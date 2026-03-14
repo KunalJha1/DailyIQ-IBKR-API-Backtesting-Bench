@@ -1,0 +1,18 @@
+[package]
+name = "dailyiq-backtesting-bench"
+version = "0.1.0"
+description = "DailyIQ Backtesting Bench — Professional-grade trading emulation and backtesting"
+authors = ["Kunal Jha"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1", features = [] }
+
+[dependencies]
+tauri = { version = "1", features = [ "fs-create-dir", "fs-exists", "fs-write-file", "path-all", "fs-read-file", "shell-open"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

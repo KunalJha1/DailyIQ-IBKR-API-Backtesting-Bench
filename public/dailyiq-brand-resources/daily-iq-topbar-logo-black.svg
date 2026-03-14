@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="120" viewBox="0 0 380 120">
+  <defs>
+    <linearGradient id="iconGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon -->
+  <g transform="translate(20,20)">
+    <circle cx="32" cy="32" r="30" fill="url(#iconGradient)"/>
+    <path d="M 20 38 Q 24 30 28 32 T 36 28 T 44 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M 20 44 Q 24 38 28 40 T 36 36 T 44 34" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.6"/>
+    <circle cx="44" cy="24" r="3" fill="#fff"/>
+  </g>
+
+  <!-- Text -->
+  <text x="110" y="62" font-size="56" font-weight="900" font-family="system-ui, -apple-system, sans-serif" fill="#000000ff">
+    DAILY<tspan fill="#3b82f6">IQ</tspan>
+  </text>
+
+  <text x="112" y="92" font-size="14" font-weight="600" letter-spacing="0.2em"
+        font-family="system-ui, -apple-system, sans-serif" fill="#44484cff">
+    STOCK INTELLIGENCE
+  </text>
+</svg>
