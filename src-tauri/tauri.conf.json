@@ -20,10 +20,13 @@
         "writeFile": true,
         "exists": true,
         "createDir": true,
-        "scope": ["$APPDATA/**"]
+        "scope": ["$APPDATA/**", "**/*.diq"]
       },
       "path": {
         "all": true
+      },
+      "dialog": {
+        "open": true
       }
     },
     "bundle": {

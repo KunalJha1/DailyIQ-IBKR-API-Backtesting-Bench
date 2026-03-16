@@ -6,7 +6,15 @@ import SignIn from "./pages/auth/SignIn";
 import SignUp from "./pages/auth/SignUp";
 import Terms from "./pages/auth/Terms";
 import Dashboard from "./pages/Dashboard";
+import { LayoutProvider, useLayout } from "./lib/layout";
+import { TwsProvider } from "./lib/tws";
 import { TabProvider } from "./lib/tabs";
+
+function LayoutGate({ children }: { children: React.ReactNode }) {
+  const { ready } = useLayout();
+  if (!ready) return null;
+  return <>{children}</>;
+}
 
 function AppRoutes() {
   const { session, loading } = useAuth();
@@ -15,12 +23,18 @@ function AppRoutes() {
 
   if (session) {
     return (
-      <TabProvider>
-        <Routes>
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
-        </Routes>
-      </TabProvider>
+      <LayoutProvider>
+        <TwsProvider>
+          <LayoutGate>
+              <TabProvider>
+                <Routes>
+                  <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                </Routes>
+              </TabProvider>
+          </LayoutGate>
+        </TwsProvider>
+      </LayoutProvider>
     );
   }
 

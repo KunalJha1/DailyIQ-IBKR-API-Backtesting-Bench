@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Logo">
+  
+  <!-- White circle background -->
+  <circle cx="256" cy="256" r="256" fill="#ffffff"/>
+
+  <!-- Logo group -->
+  <!-- Original viewBox: 0 0 300 70.0675 -->
+  <!-- Scaled and centered -->
+  <g transform="translate(70 66) scale(0.74)">
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 516 516"
+      width="516"
+      height="516"
+    >
+      <!-- Center + scale AMD logo mark -->
+      <g
+        fill="#ED1C24"
+        transform="
+          translate(258 258)
+          scale(6.8)
+          translate(-243.7 -33)
+        "
+      >
+        <polygon points="258.7,18 229.2,18 211.2,0 276.7,0 276.7,65.4 258.7,47.5" />
+        <polygon points="229.2,47.5 229.2,21.6 210.7,40.1 210.7,66 236.6,66 255.1,47.5" />
+      </g>
+    </svg>
+
+
+  </g>
+
+</svg>

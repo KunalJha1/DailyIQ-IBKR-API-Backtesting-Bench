@@ -4,7 +4,8 @@
 )]
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::time::Duration;
 use tauri::Manager;
 
 const OAUTH_CALLBACK_PORT: u16 = 17284;
@@ -171,6 +172,33 @@ fn start_oauth_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
     Ok(port)
 }
 
+#[derive(serde::Serialize)]
+struct ProbeResult {
+    port: u16,
+    connection_type: String,
+}
+
+#[tauri::command]
+fn probe_tws_ports() -> Option<ProbeResult> {
+    let ports: [(u16, &str); 4] = [
+        (7496, "tws-live"),
+        (7497, "tws-paper"),
+        (4001, "gateway-live"),
+        (4002, "gateway-paper"),
+    ];
+
+    for (port, conn_type) in &ports {
+        let addr: SocketAddr = ([127, 0, 0, 1], *port).into();
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+            return Some(ProbeResult {
+                port: *port,
+                connection_type: conn_type.to_string(),
+            });
+        }
+    }
+    None
+}
+
 /// Stub for spawning a tab as a new native window (future drag-out support)
 #[tauri::command]
 fn spawn_tab_window(app_handle: tauri::AppHandle, label: String, title: String) -> Result<(), String> {
@@ -188,7 +216,7 @@ fn spawn_tab_window(app_handle: tauri::AppHandle, label: String, title: String) 
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![start_oauth_server, spawn_tab_window])
+        .invoke_handler(tauri::generate_handler![start_oauth_server, spawn_tab_window, probe_tws_ports])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

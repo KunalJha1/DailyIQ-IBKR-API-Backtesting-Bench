@@ -1,21 +1,193 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import DashboardToolbar from "../components/DashboardToolbar";
+import GridLayout from "../components/GridLayout";
+import QuoteCard from "../components/QuoteCard";
+import WatchlistCard from "../components/WatchlistCard";
+import { useTabs } from "../lib/tabs";
+import { useLayout } from "../lib/layout";
+import type { LayoutComponent } from "../lib/layout-types";
+
+const COMPONENT_TYPES = [
+  { type: "quote", label: "Quote Card", defaultW: 4, defaultH: 8 },
+  { type: "watchlist", label: "Watchlist", defaultW: 4, defaultH: 10 },
+] as const;
 
 export default function DashboardPage() {
-  const [locked, setLocked] = useState(true);
-  const [linkChannel, setLinkChannel] = useState<number | null>(null);
+  const { activeTabId } = useTabs();
+  const {
+    getTabState,
+    setTabLocked,
+    setTabLinkChannel,
+    addComponent,
+    removeComponent,
+    updateComponent,
+    setComponentLinkChannel,
+    loadFromFile,
+  } = useLayout();
+
+  const tabState = getTabState(activeTabId);
+  const locked = tabState?.locked ?? true;
+  const linkChannel = tabState?.linkChannel ?? null;
+  const layout = tabState?.layout ?? { columns: 12, rowHeight: 40, components: [] };
+
+  // Add Component dropdown
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showAddMenu) return;
+    const handleClick = (e: MouseEvent) => {
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node))
+        setShowAddMenu(false);
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowAddMenu(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [showAddMenu]);
+
+  const handleAddComponent = (type: string) => {
+    const spec = COMPONENT_TYPES.find((c) => c.type === type);
+    if (!spec) return;
+
+    // Find first open x position in row 0
+    const occupied = new Set(
+      layout.components.map((c) => `${c.x},${c.y}`),
+    );
+    let x = 0;
+    let y = 0;
+    while (occupied.has(`${x},${y}`)) {
+      x += spec.defaultW;
+      if (x + spec.defaultW > layout.columns) {
+        x = 0;
+        y += spec.defaultH;
+      }
+    }
+
+    const defaultConfigs: Record<string, Record<string, unknown>> = {
+      quote: { symbol: "AAPL" },
+      watchlist: { symbols: ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"] },
+    };
+
+    addComponent(activeTabId, type, {
+      w: spec.defaultW,
+      h: spec.defaultH,
+      x,
+      y,
+      config: defaultConfigs[type] ?? {},
+    });
+    setShowAddMenu(false);
+  };
+
+  const handleMoveComponent = (id: string, x: number, y: number) => {
+    updateComponent(activeTabId, id, { x, y });
+  };
+
+  const handleResizeComponent = (id: string, w: number, h: number) => {
+    updateComponent(activeTabId, id, { w, h });
+  };
+
+  // When a watchlist row is clicked, update all QuoteCards on the same link channel
+  const handleSymbolSelect = (sourceComp: LayoutComponent, symbol: string) => {
+    if (!sourceComp.linkChannel) return;
+    for (const c of layout.components) {
+      if (
+        c.type === "quote" &&
+        c.linkChannel === sourceComp.linkChannel
+      ) {
+        updateComponent(activeTabId, c.id, {
+          config: { ...c.config, symbol },
+        });
+      }
+    }
+  };
+
+  const renderComponent = (comp: LayoutComponent) => {
+    switch (comp.type) {
+      case "quote":
+        return (
+          <QuoteCard
+            linkChannel={comp.linkChannel}
+            onSetLinkChannel={(ch) =>
+              setComponentLinkChannel(activeTabId, comp.id, ch)
+            }
+            onClose={() => removeComponent(activeTabId, comp.id)}
+            config={comp.config}
+            onConfigChange={(cfg) =>
+              updateComponent(activeTabId, comp.id, { config: cfg })
+            }
+          />
+        );
+      case "watchlist":
+        return (
+          <WatchlistCard
+            linkChannel={comp.linkChannel}
+            onSetLinkChannel={(ch) =>
+              setComponentLinkChannel(activeTabId, comp.id, ch)
+            }
+            onClose={() => removeComponent(activeTabId, comp.id)}
+            config={comp.config}
+            onConfigChange={(cfg) =>
+              updateComponent(activeTabId, comp.id, { config: cfg })
+            }
+            onSymbolSelect={(sym) => handleSymbolSelect(comp, sym)}
+          />
+        );
+      default:
+        return (
+          <div className="flex h-full items-center justify-center border border-white/[0.06] bg-panel text-[10px] text-white/20">
+            Unknown: {comp.type}
+          </div>
+        );
+    }
+  };
 
   return (
     <div className="flex h-full flex-col">
-      <DashboardToolbar
-        locked={locked}
-        onToggleLock={() => setLocked((v) => !v)}
-        linkChannel={linkChannel}
-        onSetLinkChannel={setLinkChannel}
-        onAddComponent={() => {}}
-      />
-      <div className="flex flex-1 items-center justify-center">
-        <p className="text-[11px] text-white/20">Dashboard</p>
+      <div className="relative">
+        <DashboardToolbar
+          locked={locked}
+          onToggleLock={() => setTabLocked(activeTabId, !locked)}
+          linkChannel={linkChannel}
+          onSetLinkChannel={(ch) => setTabLinkChannel(activeTabId, ch)}
+          onAddComponent={() => setShowAddMenu((v) => !v)}
+          onLoadWorkspace={() => loadFromFile()}
+        />
+
+        {/* Add Component dropdown */}
+        {showAddMenu && (
+          <div
+            ref={addMenuRef}
+            className="absolute left-2 top-full z-[100] mt-1 min-w-[160px] rounded-md border border-white/[0.08] bg-[#1C2128] py-1 shadow-xl shadow-black/40"
+          >
+            {COMPONENT_TYPES.map((ct) => (
+              <button
+                key={ct.type}
+                onClick={() => handleAddComponent(ct.type)}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-white/50 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/80"
+              >
+                {ct.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-hidden">
+        <GridLayout
+          columns={layout.columns}
+          rowHeight={layout.rowHeight}
+          components={layout.components}
+          locked={locked}
+          onMoveComponent={handleMoveComponent}
+          onResizeComponent={handleResizeComponent}
+          renderComponent={renderComponent}
+        />
       </div>
     </div>
   );

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Transparent background -->
+  <rect width="512" height="512" fill="none"/>
+
+  <!-- White circle -->
+  <circle cx="256" cy="256" r="240" fill="#ffffff"/>
+
+  <!-- Accenture logo centered and scaled -->
+  <g transform="translate(126,96) scale(10)">
+    <path d="M0 22.6L17.66 16.03L0 9.13V0L30.24 12.18V19.75L0 32V22.6Z" fill="#A100FF"/>
+  </g>
+</svg>

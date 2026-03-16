@@ -1,0 +1,20 @@
+<svg
+  width="512"
+  height="512"
+  viewBox="0 0 512 512"
+  xmlns="http://www.w3.org/2000/svg"
+  xml:space="preserve"
+>
+  <!-- White circle background -->
+  <circle cx="256" cy="256" r="256" fill="#ffffff" />
+
+  <!-- Centered + shifted right by 20px + scaled -->
+  <!-- Original mark size: 268.74 × 139.81 -->
+  <g transform="translate(386 256) scale(2.05) translate(-134.37 -69.905)">
+    <path
+      fill="#00e1a0"
+      d="M16.14,90.1,46,96.33l19.31,27.89,52.39-27.74V35.07L72.21,13.46,12.63,45.74c.8,9.49,2.8,33.45,3.51,44.36
+         m45.33,49.71L38.83,107.1,4.48,99.93l-.09-4.79c-.09-4.93-3-39.42-4.06-52.3L0,38.93,71.86,0l57.81,27.49v76.22Z"
+    />
+  </g>
+</svg>
