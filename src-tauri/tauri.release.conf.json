@@ -1,0 +1,10 @@
+{
+  "tauri": {
+    "bundle": {
+      "externalBin": [
+        "binaries/dailyiq-sidecar",
+        "binaries/dailyiq-worker"
+      ]
+    }
+  }
+}

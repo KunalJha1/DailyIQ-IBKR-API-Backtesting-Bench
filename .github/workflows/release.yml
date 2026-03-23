@@ -32,8 +32,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
-      - name: Install Rust stable
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -41,31 +42,45 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri -> target
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install Python sidecar deps
+      - name: Install Python deps
+        working-directory: backend
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
       - name: Build Python sidecar (Unix)
-        if: matrix.platform != 'windows-latest'
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: backend
         run: |
-          pyinstaller --onedir --name dailyiq-sidecar --distpath src-tauri/binaries main.py
+          mkdir -p ../src-tauri/binaries
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar --add-data "../data/tickers.json:data" main.py
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-worker --add-data "../data/tickers.json:data" worker_watchlist.py
+          cp dist/dailyiq-sidecar "../src-tauri/binaries/dailyiq-sidecar-${{ matrix.target }}"
+          cp dist/dailyiq-worker "../src-tauri/binaries/dailyiq-worker-${{ matrix.target }}"
 
       - name: Build Python sidecar (Windows)
-        if: matrix.platform == 'windows-latest'
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: backend
         run: |
-          pyinstaller --onedir --name dailyiq-sidecar --distpath src-tauri/binaries main.py
+          New-Item -ItemType Directory -Force -Path ..\src-tauri\binaries | Out-Null
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar --add-data "..\data\tickers.json;data" main.py
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-worker --add-data "..\data\tickers.json;data" worker_watchlist.py
+          Copy-Item dist/dailyiq-sidecar.exe "..\src-tauri\binaries\dailyiq-sidecar-${{ matrix.target }}.exe"
+          Copy-Item dist/dailyiq-worker.exe "..\src-tauri\binaries\dailyiq-worker-${{ matrix.target }}.exe"
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci
 
       - name: Install Linux deps
         if: matrix.platform == 'ubuntu-22.04'
@@ -80,8 +95,8 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'DailyIQ v__VERSION__'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'DailyIQ ${{ github.ref_name }}'
           releaseBody: 'See assets for downloadable installers.'
           releaseDraft: true
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json

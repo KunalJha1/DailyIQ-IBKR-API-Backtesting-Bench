@@ -11,7 +11,7 @@ export default function LoginLanding() {
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Welcome Back</h2>
         <p className="mt-1.5 text-sm text-gray-500">
-          Sign in to DailyIQ Bench and continue to your trading workspace.
+          Sign in to DailyIQ and continue to your trading workspace.
         </p>
       </div>
 

@@ -5,10 +5,13 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::api::process::{Command as SidecarCommand, CommandChild as SidecarChild};
+use tauri::{AppHandle, Manager};
 
 const OAUTH_CALLBACK_PORT: u16 = 17284;
 
@@ -221,16 +224,33 @@ fn spawn_tab_window(app_handle: tauri::AppHandle, label: String, title: String) 
     Ok(())
 }
 
+enum ManagedChild {
+    System(Child),
+    Sidecar(SidecarChild),
+}
+
+impl ManagedChild {
+    fn kill(self) {
+        match self {
+            ManagedChild::System(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            ManagedChild::Sidecar(child) => {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
 struct SidecarState {
-    child: Mutex<Option<Child>>,
-    worker_child: Mutex<Option<Child>>,
+    child: Mutex<Option<ManagedChild>>,
+    worker_child: Mutex<Option<ManagedChild>>,
     port: Mutex<Option<u16>>,
 }
 
-/// Find the project root by searching upward from the executable for backend/main.py.
-/// In dev mode (cargo tauri dev), the exe is in src-tauri/target/debug/.
-/// In prod, the backend would be bundled alongside the exe.
-fn find_backend_script() -> Option<std::path::PathBuf> {
+/// Find a backend script in the source tree for local dev runs.
+fn find_backend_script() -> Option<PathBuf> {
     // Try common locations relative to the executable
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
@@ -248,14 +268,14 @@ fn find_backend_script() -> Option<std::path::PathBuf> {
         }
     }
     // Also try CWD-relative as a fallback
-    let cwd_candidate = std::path::PathBuf::from("backend/main.py");
+    let cwd_candidate = PathBuf::from("backend/main.py");
     if cwd_candidate.exists() {
         return Some(cwd_candidate);
     }
     None
 }
 
-fn find_worker_script() -> Option<std::path::PathBuf> {
+fn find_worker_script() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
         for _ in 0..5 {
@@ -270,32 +290,40 @@ fn find_worker_script() -> Option<std::path::PathBuf> {
             }
         }
     }
-    let cwd_candidate = std::path::PathBuf::from("backend/worker_watchlist.py");
+    let cwd_candidate = PathBuf::from("backend/worker_watchlist.py");
     if cwd_candidate.exists() {
         return Some(cwd_candidate);
     }
     None
 }
 
-/// Shared logic: spawn the Python sidecar, poll /health, store state.
-/// Returns the port on success.
-fn do_spawn_sidecar(state: &SidecarState) -> Result<u16, String> {
-    // If already running, return existing port
-    if let Some(port) = *state.port.lock().unwrap() {
-        return Ok(port);
-    }
+fn app_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_handle
+        .path_resolver()
+        .app_data_dir()
+        .ok_or_else(|| "Failed to resolve app data directory".to_string())?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create app data directory: {}", e))?;
+    Ok(dir)
+}
 
-    let script_path = find_backend_script()
-        .ok_or_else(|| "backend/main.py not found — searched up from executable".to_string())?;
+fn bundled_env(app_handle: &AppHandle) -> Result<HashMap<String, String>, String> {
+    let mut env = HashMap::new();
+    env.insert(
+        "DAILYIQ_DATA_DIR".to_string(),
+        app_data_dir(app_handle)?.to_string_lossy().to_string(),
+    );
+    Ok(env)
+}
 
-    // Find a free port in the 18100-18200 range
-    let sidecar_port = (18100u16..=18200)
-        .find(|p| TcpListener::bind(format!("127.0.0.1:{}", p)).is_ok())
-        .ok_or_else(|| "No free port in 18100-18200 range".to_string())?;
+fn spawn_dev_python(script_path: &PathBuf, extra_args: &[String]) -> Result<ManagedChild, String> {
+    let mut args = vec![script_path.to_string_lossy().to_string()];
+    args.extend(extra_args.iter().cloned());
+    let cwd = script_path
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| format!("Failed to resolve working directory for {}", script_path.display()))?;
 
-    // Try python3 first (macOS/Linux), then python (Windows / venvs)
-    let args = [script_path.to_string_lossy().to_string(), "--port".to_string(), sidecar_port.to_string()];
-    let cwd = script_path.parent().unwrap().parent().unwrap();
     let child = Command::new("python3")
         .args(&args)
         .current_dir(cwd)
@@ -306,7 +334,48 @@ fn do_spawn_sidecar(state: &SidecarState) -> Result<u16, String> {
                 .current_dir(cwd)
                 .spawn()
         })
-        .map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
+        .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
+
+    Ok(ManagedChild::System(child))
+}
+
+fn spawn_bundled_sidecar(
+    app_handle: &AppHandle,
+    binary_name: &str,
+    args: &[String],
+) -> Result<ManagedChild, String> {
+    let current_dir = app_data_dir(app_handle)?;
+    let envs = bundled_env(app_handle)?;
+    let (_rx, child) = SidecarCommand::new_sidecar(binary_name)
+        .map_err(|e| format!("Failed to resolve sidecar '{}': {}", binary_name, e))?
+        .args(args.iter().map(|s| s.as_str()))
+        .envs(envs)
+        .current_dir(current_dir)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn sidecar '{}': {}", binary_name, e))?;
+
+    Ok(ManagedChild::Sidecar(child))
+}
+
+/// Shared logic: spawn the Python sidecar, poll /health, store state.
+/// Returns the port on success.
+fn do_spawn_sidecar(app_handle: &AppHandle, state: &SidecarState) -> Result<u16, String> {
+    // If already running, return existing port
+    if let Some(port) = *state.port.lock().unwrap() {
+        return Ok(port);
+    }
+
+    // Find a free port in the 18100-18200 range
+    let sidecar_port = (18100u16..=18200)
+        .find(|p| TcpListener::bind(format!("127.0.0.1:{}", p)).is_ok())
+        .ok_or_else(|| "No free port in 18100-18200 range".to_string())?;
+
+    let args = vec!["--port".to_string(), sidecar_port.to_string()];
+    let child = if let Some(script_path) = find_backend_script() {
+        spawn_dev_python(&script_path, &args)?
+    } else {
+        spawn_bundled_sidecar(app_handle, "dailyiq-sidecar", &args)?
+    };
 
     *state.child.lock().unwrap() = Some(child);
     *state.port.lock().unwrap() = Some(sidecar_port);
@@ -331,44 +400,38 @@ fn do_spawn_sidecar(state: &SidecarState) -> Result<u16, String> {
         }
     }
 
+    if let Some(child) = state.child.lock().unwrap().take() {
+        child.kill();
+    }
+    *state.port.lock().unwrap() = None;
+
     Err("Sidecar failed to become ready within 10s".to_string())
 }
 
-fn do_spawn_worker(state: &SidecarState) -> Result<(), String> {
+fn do_spawn_worker(app_handle: &AppHandle, state: &SidecarState) -> Result<(), String> {
     if state.worker_child.lock().unwrap().is_some() {
         return Ok(());
     }
 
-    let script_path = find_worker_script()
-        .ok_or_else(|| "backend/worker_watchlist.py not found — searched up from executable".to_string())?;
-
-    let cwd = script_path.parent().unwrap().parent().unwrap();
-
-    let mut args = vec![script_path.to_string_lossy().to_string()];
+    let mut args = Vec::new();
     if let Some(probe) = probe_tws_ports() {
         args.push("--tws-port".to_string());
         args.push(probe.port.to_string());
     }
 
-    let child = Command::new("python3")
-        .args(&args)
-        .current_dir(cwd)
-        .spawn()
-        .or_else(|_| {
-            Command::new("python")
-                .args(&args)
-                .current_dir(cwd)
-                .spawn()
-        })
-        .map_err(|e| format!("Failed to spawn worker: {}", e))?;
+    let child = if let Some(script_path) = find_worker_script() {
+        spawn_dev_python(&script_path, &args)?
+    } else {
+        spawn_bundled_sidecar(app_handle, "dailyiq-worker", &args)?
+    };
 
     *state.worker_child.lock().unwrap() = Some(child);
     Ok(())
 }
 
 #[tauri::command]
-fn spawn_sidecar(state: tauri::State<'_, SidecarState>) -> Result<u16, String> {
-    do_spawn_sidecar(&state)
+fn spawn_sidecar(app_handle: tauri::AppHandle, state: tauri::State<'_, SidecarState>) -> Result<u16, String> {
+    do_spawn_sidecar(&app_handle, &state)
 }
 
 /// Query the sidecar port (returns None if not yet running).
@@ -380,13 +443,11 @@ fn get_sidecar_port(state: tauri::State<'_, SidecarState>) -> Option<u16> {
 
 #[tauri::command]
 fn kill_sidecar(state: tauri::State<'_, SidecarState>) {
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        let _ = child.kill();
-        let _ = child.wait();
+    if let Some(child) = state.child.lock().unwrap().take() {
+        child.kill();
     }
-    if let Some(mut child) = state.worker_child.lock().unwrap().take() {
-        let _ = child.kill();
-        let _ = child.wait();
+    if let Some(child) = state.worker_child.lock().unwrap().take() {
+        child.kill();
     }
     *state.port.lock().unwrap() = None;
 }
@@ -416,11 +477,11 @@ fn main() {
 
             // Auto-spawn the Python sidecar on app start
             let state: tauri::State<SidecarState> = app.state();
-            match do_spawn_sidecar(&state) {
+            match do_spawn_sidecar(&app.handle(), &state) {
                 Ok(port) => println!("Sidecar auto-started on port {}", port),
                 Err(e) => eprintln!("Sidecar auto-start failed (will retry on demand): {}", e),
             }
-            if let Err(e) = do_spawn_worker(&state) {
+            if let Err(e) = do_spawn_worker(&app.handle(), &state) {
                 eprintln!("Worker auto-start failed (will retry on demand): {}", e);
             }
 
@@ -432,14 +493,12 @@ fn main() {
                 let window = event.window().clone();
                 let state: tauri::State<SidecarState> = window.state();
                 let child = state.child.lock().unwrap().take();
-                if let Some(mut child) = child {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if let Some(child) = child {
+                    child.kill();
                 }
                 let worker = state.worker_child.lock().unwrap().take();
-                if let Some(mut worker) = worker {
-                    let _ = worker.kill();
-                    let _ = worker.wait();
+                if let Some(worker) = worker {
+                    worker.kill();
                 }
             }
         })

@@ -6,7 +6,6 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,6 +18,7 @@ from historical import (
     read_bars_window,
 )
 from ibkr_utils import IbkrClientIdManager, is_client_id_in_use_error
+from runtime_paths import resource_path
 from score_worker import TechnicalsScorer, read_scores
 from technicals import compute_indicators_for_symbols
 
@@ -33,7 +33,7 @@ DEFAULT_TWS_HOST = "127.0.0.1"
 DEFAULT_TWS_PORTS = (7497, 7496)
 DEFAULT_TWS_CLIENT_ID = 1000
 PORTFOLIO_ROLE = "portfolio:reader"
-TICKERS_PATH = Path(__file__).parent.parent / "data" / "tickers.json"
+TICKERS_PATH = resource_path("data", "tickers.json")
 
 
 def _is_valid_quote_row(row: tuple) -> bool:

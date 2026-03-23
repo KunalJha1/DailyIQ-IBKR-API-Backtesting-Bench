@@ -15,7 +15,7 @@ import WindowControls from "../components/WindowControls";
 
 const copyByRoute: Record<string, { heading: string; subtitle: string }> = {
   "/": {
-    heading: "Professional-Grade Backtesting for Smarter Trading",
+    heading: "Professional Software for Smarter Trading",
     subtitle:
       "Analyze strategies, replay market structure, and access AI-assisted stock intelligence from one unified desktop workspace.",
   },
@@ -27,12 +27,12 @@ const copyByRoute: Record<string, { heading: string; subtitle: string }> = {
   "/signup": {
     heading: "Start Building Smarter Trading Strategies",
     subtitle:
-      "Create an account to unlock backtesting, AI market intelligence, and real-time IBKR integration.",
+      "Create an account to unlock backtesting, market intelligence, and real-time IBKR integration.",
   },
   "/terms": {
     heading: "Research & Education First",
     subtitle:
-      "DailyIQ Bench is built for learning and analysis — not financial advice. Please review our terms and disclaimers.",
+      "DailyIQ is built for learning and analysis — not financial advice. Please review our terms and disclaimers.",
   },
 };
 

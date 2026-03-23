@@ -1,5 +1,5 @@
 {
-  "name": "dailyiq-backtesting-bench",
+  "name": "dailyiq",
   "private": true,
   "version": "0.1.0",
   "type": "module",

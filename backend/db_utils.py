@@ -17,11 +17,13 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, List, Union
 
+from runtime_paths import data_dir
+
 logger = logging.getLogger(__name__)
 
 # ── Paths ────────────────────────────────────────────────────────────
 
-DB_DIR = Path(__file__).parent.parent / "data"
+DB_DIR = data_dir()
 DB_PATH = DB_DIR / "market.db"
 
 # ── Tuning knobs ─────────────────────────────────────────────────────

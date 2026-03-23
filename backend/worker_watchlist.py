@@ -10,7 +10,6 @@ import math
 import random
 import time
 from collections import deque
-from pathlib import Path
 from typing import Dict, List
 
 from ib_insync import IB, Stock, Ticker
@@ -30,6 +29,7 @@ from ibkr_utils import (
     connect_with_client_id_fallback,
     is_client_id_in_use_error,
 )
+from runtime_paths import resource_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +67,7 @@ STATE_LIVE = "live_quote_active"
 STATE_ERROR = "subscription_error"
 CLIENT_ID_SCAN_LIMIT = 10000
 WORKER_ROLE = "watchlist-worker"
-TICKERS_PATH = Path(__file__).parent.parent / "data" / "tickers.json"
+TICKERS_PATH = resource_path("data", "tickers.json")
 
 
 def default_client_id() -> int:
