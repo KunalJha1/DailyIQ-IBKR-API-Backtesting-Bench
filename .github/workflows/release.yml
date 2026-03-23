@@ -49,13 +49,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
       - name: Install Python deps
         working-directory: backend
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller>=6.2"
 
       - name: Build Python sidecar (Unix)
         if: runner.os != 'Windows'
@@ -63,8 +65,19 @@ jobs:
         working-directory: backend
         run: |
           mkdir -p ../src-tauri/binaries
-          pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar --add-data "../data/tickers.json:data" main.py
-          pyinstaller --clean --noconfirm --onefile --name dailyiq-worker --add-data "../data/tickers.json:data" worker_watchlist.py
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar \
+            --hidden-import=ib_insync \
+            --hidden-import=ib_insync.contract \
+            --hidden-import=ib_insync.objects \
+            --hidden-import=uvicorn.workers \
+            --hidden-import=uvicorn.lifespan.on \
+            --hidden-import=uvicorn.logging \
+            --add-data "../data/tickers.json:data" main.py
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-worker \
+            --hidden-import=ib_insync \
+            --hidden-import=ib_insync.contract \
+            --hidden-import=ib_insync.objects \
+            --add-data "../data/tickers.json:data" worker_watchlist.py
           cp dist/dailyiq-sidecar "../src-tauri/binaries/dailyiq-sidecar-${{ matrix.target }}"
           cp dist/dailyiq-worker "../src-tauri/binaries/dailyiq-worker-${{ matrix.target }}"
 
@@ -74,8 +87,19 @@ jobs:
         working-directory: backend
         run: |
           New-Item -ItemType Directory -Force -Path ..\src-tauri\binaries | Out-Null
-          pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar --add-data "..\data\tickers.json;data" main.py
-          pyinstaller --clean --noconfirm --onefile --name dailyiq-worker --add-data "..\data\tickers.json;data" worker_watchlist.py
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar `
+            --hidden-import=ib_insync `
+            --hidden-import=ib_insync.contract `
+            --hidden-import=ib_insync.objects `
+            --hidden-import=uvicorn.workers `
+            --hidden-import=uvicorn.lifespan.on `
+            --hidden-import=uvicorn.logging `
+            --add-data "../data/tickers.json;data" main.py
+          pyinstaller --clean --noconfirm --onefile --name dailyiq-worker `
+            --hidden-import=ib_insync `
+            --hidden-import=ib_insync.contract `
+            --hidden-import=ib_insync.objects `
+            --add-data "../data/tickers.json;data" worker_watchlist.py
           Copy-Item dist/dailyiq-sidecar.exe "..\src-tauri\binaries\dailyiq-sidecar-${{ matrix.target }}.exe"
           Copy-Item dist/dailyiq-worker.exe "..\src-tauri\binaries\dailyiq-worker-${{ matrix.target }}.exe"
 
@@ -86,7 +110,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup2.4-dev pkg-config libssl-dev
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0.6.2
@@ -94,6 +118,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: DailyIQ ${{ github.ref_name }}
