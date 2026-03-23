@@ -662,12 +662,15 @@ async def connect_ib_with_manager(
 
 
 async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
-    ib = IB()
+    # ── Sharded IB connections ──
+    # shard 0 is the "primary" — always created. Extra shards added when watchlist > SHARD_THRESHOLD.
+    ib_shards: List[IB] = [IB()]
+    shard_client_ids: List[int] = [client_id]
     client_id_mgr = IbkrClientIdManager(client_id, CLIENT_ID_SCAN_LIMIT)
-    current_client_id = client_id
     last_write: Dict[str, float] = {}
     tickers: Dict[str, Ticker] = {}
     quote_contracts: Dict[str, Stock] = {}
+    symbol_to_shard: Dict[str, int] = {}  # which shard owns each symbol's quote subscription
     watchlist: List[str] = []
     active_symbols: List[str] = []
     universe_symbols: List[str] = load_enabled_symbols()
@@ -677,6 +680,26 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
     subscription_queue: deque[tuple[str, str, str]] = deque()
     queued_quote_symbols: set[str] = set()
     queued_realtime_symbols: set[str] = set()
+
+    def _primary_ib() -> IB:
+        return ib_shards[0]
+
+    def _num_shards() -> int:
+        return len(ib_shards)
+
+    def _shard_for_symbol(sym: str) -> int:
+        """Determine which shard a symbol should be assigned to (round-robin by watchlist index)."""
+        if sym in symbol_to_shard:
+            return symbol_to_shard[sym]
+        try:
+            idx = watchlist.index(sym)
+        except ValueError:
+            idx = hash(sym)
+        shard_idx = idx % _num_shards()
+        return shard_idx
+
+    def _any_shard_connected() -> bool:
+        return any(ib.isConnected() for ib in ib_shards)
 
     def set_symbol_state(symbol: str, state: str, detail: str | None = None) -> None:
         if symbol_states.get(symbol) == state and detail is None:
@@ -706,9 +729,10 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
         t = tickers.pop(sym, None)
         quote_contracts.pop(sym, None)
         queued_quote_symbols.discard(sym)
-        if t is not None and ib.isConnected():
+        shard_idx = symbol_to_shard.pop(sym, 0)
+        if t is not None and shard_idx < len(ib_shards) and ib_shards[shard_idx].isConnected():
             try:
-                ib.cancelMktData(t.contract)
+                ib_shards[shard_idx].cancelMktData(t.contract)
             except Exception:
                 pass
 
@@ -716,14 +740,15 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
         existing = rt_bars.pop(sym, None)
         queued_realtime_symbols.discard(sym)
         current_1m.pop(sym, None)
-        if existing and ib.isConnected():
+        if existing and _primary_ib().isConnected():
             try:
-                ib.cancelRealTimeBars(existing)
+                _primary_ib().cancelRealTimeBars(existing)
             except Exception:
                 pass
 
     def subscribe_realtime(sym: str) -> None:
         cancel_realtime_subscription(sym)
+        ib = _primary_ib()
         contract = Stock(sym, "SMART", "USD")
         bars = ib.reqRealTimeBars(
             contract, barSize=5, whatToShow="TRADES", useRTH=False
@@ -768,14 +793,24 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
         bars.updateEvent += on_rt_bar
 
     def subscribe_quote(sym: str) -> None:
+        shard_idx = _shard_for_symbol(sym)
+        if shard_idx >= len(ib_shards) or not ib_shards[shard_idx].isConnected():
+            # Fall back to any connected shard
+            shard_idx = 0
+            for i, ib in enumerate(ib_shards):
+                if ib.isConnected():
+                    shard_idx = i
+                    break
+        ib = ib_shards[shard_idx]
         contract = Stock(sym, "SMART", "USD")
         ticker = ib.reqMktData(contract, genericTickList="", snapshot=False)
         ticker.updateEvent += lambda updated_ticker, s=sym: asyncio.create_task(on_tick(s, updated_ticker))
         tickers[sym] = ticker
         quote_contracts[sym] = contract
+        symbol_to_shard[sym] = shard_idx
         set_symbol_state(sym, STATE_SUBSCRIBED, "subscription active; waiting for first valid quote")
         set_symbol_state(sym, STATE_WAITING, "subscription active; waiting for first valid quote")
-        logger.info("Watchlist subscribed %s", sym)
+        logger.info("Watchlist subscribed %s (shard %d)", sym, shard_idx)
 
     async def on_tick(symbol: str, ticker: Ticker):
         now = time.time()
@@ -816,7 +851,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
             if not subscription_queue:
                 await asyncio.sleep(0.25)
                 continue
-            if not ib.isConnected():
+            if not _any_shard_connected():
                 await asyncio.sleep(1.0)
                 continue
 
@@ -853,13 +888,13 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                     logger.debug("Skipping realtime subscribe for %s; already subscribed", sym)
                     continue
                 if len(rt_bars) >= MAX_REALTIME_BAR_SUBSCRIPTIONS:
-                    logger.warning(
-                        "Deferring realtime bars for %s; cap reached (%s active bars)",
+                    logger.debug(
+                        "Skipping realtime bars for %s; cap reached (%s active bars)",
                         sym,
                         len(rt_bars),
                     )
-                    queue_subscription("realtime", sym, "deferred_cap")
-                    await asyncio.sleep(REALTIME_PACE_S)
+                    # Don't re-queue — just drop it. The universe price loop
+                    # will handle snapshot prices for these symbols instead.
                     continue
                 try:
                     subscribe_realtime(sym)
@@ -868,11 +903,8 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 except Exception as exc:
                     exc_str = str(exc)
                     if "456" in exc_str or "Max number" in exc_str:
-                        backoff_streak += 1
-                        delay = min(REALTIME_BACKOFF_BASE_S * backoff_streak, REALTIME_BACKOFF_MAX_S)
-                        logger.warning("Rate limit hit for realtime %s, backing off %.0fs (streak %d)", sym, delay, backoff_streak)
-                        queue_subscription("realtime", sym, "rate_limit_retry")
-                        await asyncio.sleep(delay)
+                        # TWS hard limit — don't retry, just drop it
+                        logger.debug("Realtime bars limit reached for %s, skipping", sym)
                         continue
                     logger.warning(f"Failed to start realtime bars for {sym}: {exc}")
 
@@ -905,17 +937,69 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                     drop_symbol_state(sym)
                     logger.info("Watchlist unsubscribed %s", sym)
 
-                if not ib.isConnected():
+                # Adjust shard count if needed (may connect new shards)
+                await _adjust_shards()
+
+                if _any_shard_connected():
+                    for sym in added:
+                        set_symbol_state(sym, STATE_QUEUED, "queued for paced quote subscription")
+                        queue_subscription("quote", sym, "watchlist_refresh")
+                else:
                     for sym in added:
                         set_symbol_state(sym, STATE_QUEUED, "watchlist loaded before IB connection")
                         logger.info("Watchlist queued before connect %s", sym)
 
-                if ib.isConnected():
-                    for sym in added:
-                        set_symbol_state(sym, STATE_QUEUED, "queued for paced quote subscription")
-                        queue_subscription("quote", sym, "watchlist_refresh")
-
             await asyncio.sleep(WATCHLIST_REFRESH_S)
+
+    async def _adjust_shards():
+        """Spin up or tear down extra IB shards based on watchlist size."""
+        desired = 1
+        if len(watchlist) > SHARD_THRESHOLD:
+            desired = min(math.ceil(len(watchlist) / SHARD_THRESHOLD), MAX_SHARDS)
+
+        # Spin up new shards
+        while len(ib_shards) < desired:
+            new_idx = len(ib_shards)
+            new_ib = IB()
+            try:
+                new_cid = client_id_mgr.acquire(
+                    f"{WORKER_ROLE}:shard{new_idx}",
+                    preferred_id=shard_client_ids[-1] + 1,
+                )
+                shard_client_ids.append(new_cid)
+                ib_shards.append(new_ib)
+                ok, final_cid = await connect_ib_with_manager(
+                    new_ib, host, ports, new_cid, client_id_mgr
+                )
+                if ok:
+                    shard_client_ids[new_idx] = final_cid
+                    logger.info(
+                        "Shard %d connected (clientId=%d) for %d-symbol watchlist",
+                        new_idx, final_cid, len(watchlist),
+                    )
+                else:
+                    logger.warning("Shard %d failed to connect, will retry on reconnect", new_idx)
+            except Exception as exc:
+                logger.warning(f"Failed to create shard {new_idx}: {exc}")
+                break
+
+        # Tear down excess shards
+        while len(ib_shards) > desired and len(ib_shards) > 1:
+            removed_idx = len(ib_shards) - 1
+            removed_ib = ib_shards.pop()
+            removed_cid = shard_client_ids.pop()
+            # Move subscriptions from removed shard back to remaining shards
+            syms_on_removed = [s for s, idx in list(symbol_to_shard.items()) if idx == removed_idx]
+            for sym in syms_on_removed:
+                cancel_quote_subscription(sym)
+                queue_subscription("quote", sym, "shard_rebalance")
+            if removed_ib.isConnected():
+                try:
+                    removed_ib.disconnect()
+                except Exception:
+                    pass
+            client_id_mgr.release(removed_cid)
+            logger.info("Shard %d removed (clientId=%d)", removed_idx, removed_cid)
 
     async def refresh_active_symbols():
         nonlocal active_symbols
@@ -934,7 +1018,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 for sym in removed:
                     cancel_realtime_subscription(sym)
 
-                if ib.isConnected():
+                if _primary_ib().isConnected():
                     for sym in added:
                         queue_subscription("realtime", sym, "active_symbol")
 
@@ -962,8 +1046,9 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
             live = [sym for sym in watchlist if symbol_states.get(sym) == STATE_LIVE]
             errors = [sym for sym in watchlist if symbol_states.get(sym) == STATE_ERROR]
             missing = [sym for sym in watchlist if sym not in tickers]
+            shard_info = f" shards={_num_shards()}" if _num_shards() > 1 else ""
             logger.info(
-                "Watchlist status summary: total=%s subscribed=%s live=%s waiting=%s queued=%s errors=%s missing_ticker=%s",
+                "Watchlist status summary: total=%s subscribed=%s live=%s waiting=%s queued=%s errors=%s missing_ticker=%s%s",
                 len(watchlist),
                 len(tickers),
                 len(live),
@@ -971,6 +1056,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 len(queued),
                 len(errors),
                 len(missing),
+                shard_info,
             )
             if waiting:
                 logger.info("Waiting for valid quote: %s", ",".join(waiting))
@@ -984,7 +1070,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
     async def yahoo_loop():
         while True:
             await asyncio.sleep(YAHOO_POLL_S)
-            if ib.isConnected():
+            if _any_shard_connected():
                 continue
             if not watchlist:
                 continue
@@ -1043,6 +1129,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
         cursor = 0
         while True:
             await asyncio.sleep(2.0)
+            ib = _primary_ib()
             if not ib.isConnected():
                 continue
             priority = list(dict.fromkeys(active_symbols + watchlist))
@@ -1119,36 +1206,105 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 except Exception as exc:
                     logger.debug(f"Snapshot refresh failed for {sym}: {exc}")
 
-    async def reconnect_loop():
-        nonlocal current_client_id
+    async def universe_price_loop():
+        """Slowly pull snapshot quotes for the full ticker universe (for heatmap).
+
+        Iterates one symbol at a time with ~1s gaps. Skips watchlist symbols
+        (they already get live updates). Full cycle takes ~6 minutes for 350 symbols.
+        """
+        await asyncio.sleep(15)  # Let other loops settle first
         while True:
+            ib = _primary_ib()
             if not ib.isConnected():
-                ok, new_id = await connect_ib_with_manager(
-                    ib, host, ports, current_client_id, client_id_mgr
-                )
-                if ok:
-                    current_client_id = new_id
-                    tickers.clear()
-                    quote_contracts.clear()
-                    rt_bars.clear()
-                    current_1m.clear()
-                    queued_quote_symbols.clear()
-                    queued_realtime_symbols.clear()
-                    subscription_queue.clear()
-                    if watchlist:
-                        await asyncio.to_thread(invalidate_yahoo_cache, watchlist)
-                    # Re-subscribe to current watchlist
-                    for sym in watchlist:
-                        queue_subscription("quote", sym, "reconnect")
-                    # Re-subscribe realtime bars for active symbols
-                    for sym in active_symbols:
-                        queue_subscription("realtime", sym, "reconnect")
+                await asyncio.sleep(30)
+                continue
+
+            watchlist_set = set(watchlist)
+            queue = [sym for sym in universe_symbols if sym not in watchlist_set]
+            if not queue:
+                await asyncio.sleep(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S)
+                continue
+
+            logger.info("[UniversePrice] Starting slow price cycle: %d symbols (skipping %d watchlist)",
+                        len(queue), len(watchlist_set))
+            fetched = 0
+            total = len(queue)
+            for i, sym in enumerate(queue):
+                if not ib.isConnected():
+                    break
+                try:
+                    contract = Stock(sym, "SMART", "USD")
+                    snap_ticker = ib.reqMktData(contract, genericTickList="", snapshot=True)
+                    # Give TWS time to fill the snapshot; yield to event loop
+                    for _ in range(5):
+                        await asyncio.sleep(0.1)
+                    q = ticker_to_quote(sym, snap_ticker)
+                    if q is not None:
+                        snapshot = _snapshot_from_quote(q)
+                        await asyncio.to_thread(_upsert_market_snapshot, snapshot)
+                        fetched += 1
+                    else:
+                        # Even without a valid quote, write what we have so the
+                        # heatmap shows the symbol exists (with stale/pending status)
+                        await asyncio.to_thread(refresh_snapshot_from_db, sym)
+                    try:
+                        ib.cancelMktData(contract)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logger.debug(f"[UniversePrice] Snapshot failed for {sym}: {exc}")
+
+                await asyncio.sleep(UNIVERSE_SNAPSHOT_SLEEP_S)
+
+                logger.info("[UniversePrice] %d/%d %s %s",
+                            i + 1, total, sym,
+                            f"last={q['last']}" if q else "no data")
+
+            logger.info("[UniversePrice] Cycle complete: %d/%d symbols updated, next cycle in %ds",
+                        fetched, len(queue), int(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S))
+            await asyncio.sleep(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S)
+
+    async def reconnect_loop():
+        while True:
+            for i, ib in enumerate(ib_shards):
+                if not ib.isConnected():
+                    ok, new_id = await connect_ib_with_manager(
+                        ib, host, ports, shard_client_ids[i], client_id_mgr
+                    )
+                    if ok:
+                        shard_client_ids[i] = new_id
+                        if i == 0:
+                            # Primary shard reconnected — clear and re-subscribe everything
+                            tickers.clear()
+                            quote_contracts.clear()
+                            symbol_to_shard.clear()
+                            rt_bars.clear()
+                            current_1m.clear()
+                            queued_quote_symbols.clear()
+                            queued_realtime_symbols.clear()
+                            subscription_queue.clear()
+                            if watchlist:
+                                await asyncio.to_thread(invalidate_yahoo_cache, watchlist)
+                            for sym in watchlist:
+                                queue_subscription("quote", sym, "reconnect")
+                            for sym in active_symbols:
+                                queue_subscription("realtime", sym, "reconnect")
+                        else:
+                            # Secondary shard reconnected — re-subscribe its symbols
+                            syms_for_shard = [s for s, idx in list(symbol_to_shard.items()) if idx == i]
+                            for sym in syms_for_shard:
+                                cancel_quote_subscription(sym)
+                                queue_subscription("quote", sym, f"shard{i}_reconnect")
+                        logger.info("Shard %d reconnected (clientId=%d)", i, new_id)
             await asyncio.sleep(2.0)
 
     try:
-        ok, new_id = await connect_ib_with_manager(ib, host, ports, current_client_id, client_id_mgr)
+        # Connect primary shard
+        ok, new_id = await connect_ib_with_manager(
+            ib_shards[0], host, ports, shard_client_ids[0], client_id_mgr
+        )
         if ok:
-            current_client_id = new_id
+            shard_client_ids[0] = new_id
 
         await asyncio.gather(
             subscription_loop(),
@@ -1160,12 +1316,15 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
             yahoo_valuation_loop(),
             backfill_loop(),
             snapshot_loop(),
+            universe_price_loop(),
             reconnect_loop(),
         )
     finally:
-        if ib.isConnected():
-            ib.disconnect()
-        client_id_mgr.release(current_client_id)
+        for i, ib in enumerate(ib_shards):
+            if ib.isConnected():
+                ib.disconnect()
+            if i < len(shard_client_ids):
+                client_id_mgr.release(shard_client_ids[i])
 
 
 def main() -> None:

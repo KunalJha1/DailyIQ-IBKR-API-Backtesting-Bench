@@ -181,7 +181,7 @@ export default function IndicatorPanel({
 
       {/* Categories */}
       <div
-        className="scrollbar-dark"
+        className="scrollbar-panel"
         style={{
           maxHeight: 380,
           overflowY: 'auto',

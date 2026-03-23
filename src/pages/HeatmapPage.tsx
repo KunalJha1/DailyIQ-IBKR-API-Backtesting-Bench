@@ -106,14 +106,15 @@ function squarify(
 }
 
 function tileColor(changePct: number | null, status: string | null): string {
-  if (status === "pending") return "#3a4350";
-  if (status === "stale") return "#8a5a12";
+  if (status === "pending" && changePct == null) return "#3a4350";
   if (changePct == null) return "#3a4350";
 
   if (changePct >= 4) return "#0b7a36";
   if (changePct >= 2) return "#138a40";
   if (changePct >= 0.5) return "#1fa34f";
-  if (changePct > -0.5) return "#666f7d";
+  if (changePct > 0) return "#2a6e3f";
+  if (changePct === 0) return "#4b5563";
+  if (changePct > -0.5) return "#8a3344";
   if (changePct > -2) return "#c43d53";
   if (changePct > -4) return "#b52e43";
   return "#981b31";
@@ -164,28 +165,16 @@ export default function HeatmapPage() {
     }
 
     fetchHeatmap();
-    const id = setInterval(fetchHeatmap, 2000);
+    const id = setInterval(fetchHeatmap, 5000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
   }, [sidecarPort]);
 
-  useEffect(() => {
-    if (!sidecarPort || tiles.length === 0) return;
-    const symbols = tiles.map((tile) => tile.symbol);
-    const register = () => {
-      fetch(`http://127.0.0.1:${sidecarPort}/active-symbols`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols }),
-      }).catch(() => {});
-    };
-
-    register();
-    const id = setInterval(register, 90_000);
-    return () => clearInterval(id);
-  }, [sidecarPort, tiles]);
+  // Heatmap prices are handled by the background universe price loop —
+  // no need to register these as active symbols (which would trigger
+  // expensive realtime 5s bar subscriptions and hit TWS limits).
 
   useEffect(() => {
     const el = containerRef.current;
@@ -334,9 +323,9 @@ export default function HeatmapPage() {
 
               {tileRects.map((rect) => {
                 const area = rect.w * rect.h;
-                const forceLabel = area > 7000;
-                const showSymbol = forceLabel || (rect.w > 36 && rect.h > 18);
-                const showChange = forceLabel || (rect.w > 62 && rect.h > 34);
+                const forceLabel = area > 5000;
+                const showSymbol = forceLabel || (rect.w > 28 && rect.h > 14);
+                const showChange = forceLabel || (rect.w > 42 && rect.h > 26);
                 const showName = area > 12000 || (rect.w > 110 && rect.h > 52);
                 const isUnknown = rect.data.status === "pending" || rect.data.changePct == null;
 
@@ -357,17 +346,17 @@ export default function HeatmapPage() {
                     title={`${rect.data.symbol} ${formatPct(rect.data.changePct)}`}
                   >
                     {showSymbol ? (
-                      <div className="flex h-full flex-col justify-center px-1.5 text-center">
+                      <div className="flex h-full flex-col items-center justify-center px-0.5 text-center">
                         <span className="truncate font-sans text-[11px] font-semibold leading-none text-white">
                           {rect.data.symbol}
                         </span>
                         {showChange ? (
-                          <span className="mt-1 font-sans text-[10px] leading-none text-white/90">
-                            {isUnknown ? "No move" : formatPct(rect.data.changePct)}
+                          <span className="mt-0.5 font-sans text-[10px] leading-none text-white/90">
+                            {isUnknown ? "—" : formatPct(rect.data.changePct)}
                           </span>
                         ) : null}
                         {showName ? (
-                          <span className="mt-1 truncate font-sans text-[10px] leading-none text-white/75">
+                          <span className="mt-0.5 truncate font-sans text-[10px] leading-none text-white/75">
                             {rect.data.name}
                           </span>
                         ) : null}
@@ -413,23 +402,27 @@ export default function HeatmapPage() {
           <div className="mt-2 space-y-1 font-sans text-[11px] text-white/70">
             <div className="flex items-center gap-2">
               <span className="h-3 w-3 bg-[#0b7a36]" />
-              <span>Strong gain</span>
+              <span>Strong gain (&ge;4%)</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="h-3 w-3 bg-[#1fa34f]" />
-              <span>Gain</span>
+              <span>Gain (&ge;0.5%)</span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="h-3 w-3 bg-[#4b5563]" />
-              <span>Flat</span>
+              <span className="h-3 w-3 bg-[#2a6e3f]" />
+              <span>Slight gain</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="h-3 w-3 bg-[#8a3344]" />
+              <span>Slight loss</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="h-3 w-3 bg-[#c43d53]" />
-              <span>Loss</span>
+              <span>Loss (&ge;0.5%)</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="h-3 w-3 bg-[#981b31]" />
-              <span>Strong loss</span>
+              <span>Strong loss (&ge;4%)</span>
             </div>
           </div>
         </div>

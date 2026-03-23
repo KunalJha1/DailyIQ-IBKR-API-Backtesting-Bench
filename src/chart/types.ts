@@ -14,6 +14,7 @@ export type ChartType = 'candlestick' | 'heikin-ashi' | 'volume-weighted' | 'bar
 export type YScaleMode = 'auto' | 'log';
 
 export type ChartBrandingMode = 'none' | 'fullLogo' | 'icon';
+export type DrawingTool = 'none' | 'trendline' | 'fibRetracement';
 
 export interface IndicatorMeta {
   name: string;

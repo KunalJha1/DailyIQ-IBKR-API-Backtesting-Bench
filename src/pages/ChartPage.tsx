@@ -446,6 +446,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
       <div className="flex flex-1 overflow-hidden relative">
         <ChartCanvas
           bars={bars}
+          symbol={symbol}
           chartType={chartType}
           timeframe={timeframe}
           engineRef={engineRef}

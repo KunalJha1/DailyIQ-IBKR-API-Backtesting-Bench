@@ -1,4 +1,4 @@
-import type { OHLCVBar, ChartType, ActiveIndicator, ChartLayout, SubPaneLayout, YScaleMode, ChartBrandingMode } from '../types';
+import type { OHLCVBar, ChartType, ActiveIndicator, ChartLayout, SubPaneLayout, YScaleMode, ChartBrandingMode, DrawingTool } from '../types';
 import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR } from '../constants';
 import { DEFAULT_BARS_VISIBLE } from '../constants';
 import { Viewport } from './Viewport';
@@ -33,6 +33,16 @@ const BRANDING_ASSETS: Record<Exclude<ChartBrandingMode, 'none'>, { src: string;
 };
 
 const brandingImageCache = new Map<string, HTMLImageElement>();
+const brandingImageFailures = new Set<string>();
+
+interface DrawingAnchor {
+  barIndex: number;
+  price: number;
+}
+
+type DrawingShape =
+  | { id: string; type: 'trendline'; start: DrawingAnchor; end: DrawingAnchor }
+  | { id: string; type: 'fibRetracement'; start: DrawingAnchor; end: DrawingAnchor };
 
 export class ChartEngine {
   private canvas: HTMLCanvasElement;
@@ -71,7 +81,14 @@ export class ChartEngine {
   private subPaneHeightOverrides: Map<string, number> = new Map();
   private brandingMode: ChartBrandingMode = 'none';
   private brandingImage: HTMLImageElement | null = null;
+  private symbolBrandingSymbol = '';
+  private symbolBrandingImage: HTMLImageElement | null = null;
   private _onViewportChange: ((startIdx: number, endIdx: number) => void) | null = null;
+  private activeDrawingTool: DrawingTool = 'none';
+  private drawings: DrawingShape[] = [];
+  private drawingStart: DrawingAnchor | null = null;
+  private drawingCurrent: DrawingAnchor | null = null;
+  private drawingPointerActive = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -161,6 +178,47 @@ export class ChartEngine {
     this.markDirty();
   }
 
+  setBrandingSymbol(symbol: string) {
+    const normalized = symbol.trim().toUpperCase();
+    if (this.symbolBrandingSymbol === normalized) return;
+    this.symbolBrandingSymbol = normalized;
+    this.symbolBrandingImage = null;
+
+    if (!normalized) {
+      this.markDirty();
+      return;
+    }
+
+    const src = `/dailyiq-brand-resources/logosvg/${normalized}.svg`;
+    if (brandingImageFailures.has(src)) {
+      this.markDirty();
+      return;
+    }
+    const cached = brandingImageCache.get(src);
+    if (cached) {
+      this.symbolBrandingImage = cached;
+      if (!cached.complete) {
+        cached.addEventListener('load', () => this.markDirty(), { once: true });
+      }
+    } else {
+      const image = new Image();
+      image.decoding = 'async';
+      image.src = src;
+      image.addEventListener('load', () => this.markDirty(), { once: true });
+      image.addEventListener('error', () => {
+        brandingImageFailures.add(src);
+        if (this.symbolBrandingSymbol === normalized) {
+          this.symbolBrandingImage = null;
+          this.markDirty();
+        }
+      }, { once: true });
+      brandingImageCache.set(src, image);
+      this.symbolBrandingImage = image;
+    }
+
+    this.markDirty();
+  }
+
   setLiveMode(isLive: boolean) {
     this.liveMode = isLive;
     const rightOffsetBars = this.computeRightOffsetBars();
@@ -179,6 +237,22 @@ export class ChartEngine {
     if (wasNearEnd) {
       this.viewport.scrollToEnd();
     }
+    this.markDirty();
+  }
+
+  setDrawingTool(tool: DrawingTool) {
+    this.activeDrawingTool = tool;
+    this.cancelDraftDrawing();
+    this.markDirty();
+  }
+
+  getDrawingTool(): DrawingTool {
+    return this.activeDrawingTool;
+  }
+
+  clearDrawings() {
+    this.drawings = [];
+    this.cancelDraftDrawing();
     this.markDirty();
   }
 
@@ -521,6 +595,9 @@ export class ChartEngine {
       // Overlay indicators
       this.renderOverlays();
 
+      // User drawings
+      this.renderDrawings();
+
       // Branding watermark
       this.renderBranding(chartAreaWidth, layout.mainHeight);
     });
@@ -580,9 +657,23 @@ export class ChartEngine {
     const maxHeight = Math.max(0, mainHeight - padding * 2);
     if (width <= 0 || height <= 0 || height > maxHeight) return;
 
-    const x = chartAreaWidth - padding - width;
+    let companyLogoWidth = 0;
+    let companyLogoHeight = 0;
+    const companyLogoGap = 8;
+    if (this.symbolBrandingImage?.complete) {
+      companyLogoWidth = Math.min(width * 0.24, 28);
+      companyLogoHeight = companyLogoWidth;
+    }
+
+    const totalWidth = width + (companyLogoWidth > 0 ? companyLogoGap + companyLogoWidth : 0);
+    const x = chartAreaWidth - padding - totalWidth;
     const y = padding;
-    this.renderer.image(this.brandingImage, x, y, width, height, asset.opacity);
+    if (companyLogoWidth > 0) {
+      const logoY = y + Math.max(0, (height - companyLogoHeight) / 2) - companyLogoHeight * 0.15;
+      this.renderer.image(this.symbolBrandingImage!, x, logoY, companyLogoWidth, companyLogoHeight, 0.22);
+    }
+    const dailyIqX = x + (companyLogoWidth > 0 ? companyLogoWidth + companyLogoGap : 0);
+    this.renderer.image(this.brandingImage, dailyIqX, y, width, height, asset.opacity);
   }
 
   private renderOverlays() {
@@ -619,6 +710,107 @@ export class ChartEngine {
         }
       }
     }
+  }
+
+  private renderDrawings() {
+    for (const drawing of this.drawings) {
+      this.renderDrawing(drawing, false);
+    }
+
+    if (this.drawingStart && this.drawingCurrent && this.activeDrawingTool !== 'none') {
+      const draft: DrawingShape = this.activeDrawingTool === 'trendline'
+        ? {
+            id: '__draft__',
+            type: 'trendline',
+            start: this.drawingStart,
+            end: this.drawingCurrent,
+          }
+        : {
+            id: '__draft__',
+            type: 'fibRetracement',
+            start: this.drawingStart,
+            end: this.drawingCurrent,
+          };
+      this.renderDrawing(draft, true);
+    }
+  }
+
+  private renderDrawing(drawing: DrawingShape, isDraft: boolean) {
+    if (drawing.type === 'trendline') {
+      const x1 = this.viewport.barToPixelX(drawing.start.barIndex);
+      const y1 = this.viewport.priceToPixelY(drawing.start.price);
+      const x2 = this.viewport.barToPixelX(drawing.end.barIndex);
+      const y2 = this.viewport.priceToPixelY(drawing.end.price);
+      const color = isDraft ? 'rgba(96,165,250,0.7)' : '#60A5FA';
+      if (isDraft) {
+        this.renderer.dashedLine(x1, y1, x2, y2, color, 1.5, [6, 4]);
+      } else {
+        this.renderer.line(x1, y1, x2, y2, color, 2);
+      }
+      this.renderer.rect(x1 - 2, y1 - 2, 4, 4, color);
+      this.renderer.rect(x2 - 2, y2 - 2, 4, 4, color);
+      return;
+    }
+
+    const startX = this.viewport.barToPixelX(drawing.start.barIndex);
+    const endX = this.viewport.barToPixelX(drawing.end.barIndex);
+    const left = Math.min(startX, endX);
+    const right = Math.max(startX, endX);
+    const high = Math.max(drawing.start.price, drawing.end.price);
+    const low = Math.min(drawing.start.price, drawing.end.price);
+    const range = high - low || 1;
+    const extendRight = Math.max(this.viewport.barWidth * 8, 80);
+    const x2 = right + extendRight;
+    const fillColor = isDraft ? 'rgba(16,185,129,0.10)' : 'rgba(16,185,129,0.18)';
+    const borderColor = isDraft ? 'rgba(16,185,129,0.45)' : 'rgba(16,185,129,0.85)';
+    const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+
+    const topY = this.viewport.priceToPixelY(high);
+    const bottomY = this.viewport.priceToPixelY(low);
+    this.renderer.rect(left, Math.min(topY, bottomY), Math.max(2, x2 - left), Math.abs(bottomY - topY), fillColor);
+    this.renderer.rectStroke(left, Math.min(topY, bottomY), Math.max(2, x2 - left), Math.abs(bottomY - topY), borderColor, 1);
+
+    for (const level of levels) {
+      const price = high - (range * level);
+      const y = this.viewport.priceToPixelY(price);
+      if (isDraft) {
+        this.renderer.dashedLine(left, y, x2, y, borderColor, level === 0 || level === 1 ? 1.25 : 1, [4, 4]);
+      } else {
+        this.renderer.line(left, y, x2, y, borderColor, level === 0 || level === 1 ? 1.25 : 1);
+      }
+      this.renderer.textSmall(level.toFixed(3), x2 - 6, y - 8, borderColor, 'right');
+    }
+  }
+
+  private getCanvasPoint(e: MouseEvent): { mx: number; my: number; rect: DOMRect } {
+    const rect = this.canvas.getBoundingClientRect();
+    const scaleX = rect.width / this.width;
+    const scaleY = rect.height / this.height;
+    return {
+      mx: (e.clientX - rect.left) / scaleX,
+      my: (e.clientY - rect.top) / scaleY,
+      rect,
+    };
+  }
+
+  private isInMainChart(mx: number, my: number): boolean {
+    const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
+    const chartAreaHeight = this.height - TIME_AXIS_HEIGHT;
+    return mx >= 0 && mx <= chartAreaWidth && my >= 0 && my <= chartAreaHeight;
+  }
+
+  private anchorFromMouse(mx: number, my: number): DrawingAnchor {
+    const snappedBarIndex = Math.max(0, Math.min(this.bars.length - 1, Math.round(this.viewport.pixelXToBar(mx))));
+    return {
+      barIndex: snappedBarIndex,
+      price: this.viewport.pixelYToPrice(my),
+    };
+  }
+
+  private cancelDraftDrawing() {
+    this.drawingStart = null;
+    this.drawingCurrent = null;
+    this.drawingPointerActive = false;
   }
 
   private renderSubPane(pane: SubPaneLayout, chartAreaWidth: number) {
@@ -991,17 +1183,28 @@ export class ChartEngine {
   // --- Events ---
 
   private onMouseDown = (e: MouseEvent) => {
+    const { mx, my } = this.getCanvasPoint(e);
+    if (this.activeDrawingTool !== 'none' && this.isInMainChart(mx, my) && !this.viewport.isInPriceAxis(mx, this.width, PRICE_AXIS_WIDTH)) {
+      this.drawingStart = this.anchorFromMouse(mx, my);
+      this.drawingCurrent = this.drawingStart;
+      this.drawingPointerActive = true;
+      this.markDirty();
+      return;
+    }
     this.panZoom.onMouseDown(e);
   };
 
   private onMouseMove = (e: MouseEvent) => {
-    const rect = this.canvas.getBoundingClientRect();
-    // rect is in viewport pixels; canvas draws in CSS pixels.
-    // Ancestor CSS transforms (e.g. layout zoom) make these differ — divide by scale.
-    const scaleX = rect.width / this.width;
-    const scaleY = rect.height / this.height;
-    const mx = (e.clientX - rect.left) / scaleX;
-    const my = (e.clientY - rect.top) / scaleY;
+    const { mx, my, rect } = this.getCanvasPoint(e);
+
+    if (this.drawingPointerActive && this.drawingStart) {
+      this.drawingCurrent = this.anchorFromMouse(mx, my);
+      const hit = this.hitTest.test(this.viewport, this.bars, mx, my);
+      this.crosshair.visible = hit.inChart;
+      this.crosshair.hit = hit;
+      this.markDirty();
+      return;
+    }
 
     this.panZoom.onMouseMove(e, rect);
 
@@ -1013,6 +1216,31 @@ export class ChartEngine {
   };
 
   private onMouseUp = (e: MouseEvent) => {
+    if (this.drawingPointerActive && this.drawingStart && this.drawingCurrent && this.activeDrawingTool !== 'none') {
+      const start = this.drawingStart;
+      const end = this.drawingCurrent;
+      const movedEnough = Math.abs(end.barIndex - start.barIndex) >= 1 || Math.abs(end.price - start.price) > 0.0001;
+      if (movedEnough) {
+        this.drawings.push(
+          this.activeDrawingTool === 'trendline'
+            ? {
+                id: `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                type: 'trendline',
+                start,
+                end,
+              }
+            : {
+                id: `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                type: 'fibRetracement',
+                start,
+                end,
+              },
+        );
+      }
+      this.cancelDraftDrawing();
+      this.markDirty();
+      return;
+    }
     this.panZoom.onMouseUp(e);
   };
 

@@ -321,6 +321,10 @@ export default function MiniChart({
     engineRef.current?.setBrandingMode('fullLogo');
   }, []);
 
+  useEffect(() => {
+    engineRef.current?.setBrandingSymbol(symbol);
+  }, [symbol]);
+
   // Live mode + stopper
   useEffect(() => {
     const engine = engineRef.current;

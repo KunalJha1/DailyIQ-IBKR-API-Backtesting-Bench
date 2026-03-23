@@ -1,9 +1,11 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import { ChartEngine } from '../core/ChartEngine';
-import type { OHLCVBar, ChartType, Timeframe, ScriptResult, ChartBrandingMode, ChartLayout } from '../types';
+import type { OHLCVBar, ChartType, Timeframe, ScriptResult, ChartBrandingMode, ChartLayout, DrawingTool } from '../types';
+import { Minus, TrendingUp, Trash2 } from 'lucide-react';
 
 interface ChartCanvasProps {
   bars: OHLCVBar[];
+  symbol?: string;
   chartType: ChartType;
   timeframe: Timeframe;
   engineRef: React.MutableRefObject<ChartEngine | null>;
@@ -19,6 +21,7 @@ interface ChartCanvasProps {
 
 export default function ChartCanvas({
   bars,
+  symbol,
   chartType,
   timeframe,
   engineRef,
@@ -33,6 +36,7 @@ export default function ChartCanvas({
 }: ChartCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [activeTool, setActiveTool] = useState<DrawingTool>('none');
 
   // Initialize engine
   useEffect(() => {
@@ -41,6 +45,7 @@ export default function ChartCanvas({
 
     const engine = new ChartEngine(canvas);
     engineRef.current = engine;
+    engine.setDrawingTool('none');
 
     return () => {
       engine.destroy();
@@ -92,6 +97,10 @@ export default function ChartCanvas({
     engineRef.current?.setBrandingMode(brandingMode);
   }, [brandingMode, engineRef]);
 
+  useEffect(() => {
+    engineRef.current?.setBrandingSymbol(symbol ?? '');
+  }, [symbol, engineRef]);
+
   // Wire viewport change callback
   useEffect(() => {
     engineRef.current?.setOnViewportChange(onViewportChange ?? null);
@@ -120,13 +129,58 @@ export default function ChartCanvas({
     onLayoutChange?.(engine.getLayout());
   }, [activeScripts, engineRef, onLayoutChange]);
 
+  const handleSelectTool = useCallback((tool: DrawingTool) => {
+    const nextTool = activeTool === tool ? 'none' : tool;
+    setActiveTool(nextTool);
+    engineRef.current?.setDrawingTool(nextTool);
+  }, [activeTool, engineRef]);
+
+  const handleClearDrawings = useCallback(() => {
+    engineRef.current?.clearDrawings();
+    setActiveTool('none');
+    engineRef.current?.setDrawingTool('none');
+  }, [engineRef]);
+
+  const toolButtonClass = (tool: DrawingTool) => [
+    'w-9 h-9 rounded-md border transition-colors flex items-center justify-center',
+    activeTool === tool
+      ? 'bg-blue/20 border-blue text-blue'
+      : 'bg-base/80 border-border-default text-text-secondary hover:bg-hover hover:text-text-primary',
+  ].join(' ');
+
   return (
     <div ref={containerRef} className="flex-1 relative overflow-hidden">
       <canvas
         ref={canvasRef}
         className="absolute inset-0"
-        style={{ cursor: 'crosshair' }}
+        style={{ cursor: activeTool === 'none' ? 'crosshair' : 'copy' }}
       />
+      <div className="absolute left-3 top-3 z-20 flex flex-col gap-2 rounded-lg border border-border-default bg-base/90 p-2 shadow-lg backdrop-blur-sm">
+        <button
+          type="button"
+          className={toolButtonClass('trendline')}
+          onClick={() => handleSelectTool('trendline')}
+          title="Trendline"
+        >
+          <Minus size={16} />
+        </button>
+        <button
+          type="button"
+          className={toolButtonClass('fibRetracement')}
+          onClick={() => handleSelectTool('fibRetracement')}
+          title="Fibonacci retracement"
+        >
+          <TrendingUp size={16} />
+        </button>
+        <button
+          type="button"
+          className="w-9 h-9 rounded-md border border-border-default bg-base/80 text-text-secondary hover:bg-hover hover:text-red flex items-center justify-center transition-colors"
+          onClick={handleClearDrawings}
+          title="Clear drawings"
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
       {children}
       {liveMode && (
         <div
