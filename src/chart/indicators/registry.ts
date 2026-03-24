@@ -230,6 +230,30 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
     ],
   },
 
+  'MACD Crossover': {
+    name: 'MACD Crossover',
+    shortName: 'MACD X',
+    category: 'overlay',
+    defaultParams: { fast: 12, slow: 26, signal: 9 },
+    paramLabels: { fast: 'Fast', slow: 'Slow', signal: 'Signal' },
+    outputs: [
+      { key: 'buy', label: 'BUY', color: '#00C853', style: 'markers' },
+      { key: 'sell', label: 'SELL', color: '#FF3D71', style: 'markers' },
+    ],
+  },
+
+  'ADL Crossover': {
+    name: 'ADL Crossover',
+    shortName: 'ADL X',
+    category: 'overlay',
+    defaultParams: { smoothing: 20, normPeriod: 100 },
+    paramLabels: { smoothing: 'Smoothing (SMA)', normPeriod: 'Norm Period' },
+    outputs: [
+      { key: 'buy', label: 'BUY', color: '#00C853', style: 'markers' },
+      { key: 'sell', label: 'SELL', color: '#FF3D71', style: 'markers' },
+    ],
+  },
+
   'Market Sentiment Signal': {
     name: 'BUY / SELL Market Sentiment',
     shortName: 'MS Sig',
@@ -242,18 +266,38 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
     ],
   },
 
+  'RSI Strategy': {
+    name: 'RSI Crossover Strategy',
+    shortName: 'RSI Strat',
+    category: 'overlay',
+    defaultParams: { rsiPeriod: 14, maPeriod: 14, maType: 1, divergence: 0, lookbackLeft: 5, lookbackRight: 5 },
+    paramLabels: {
+      rsiPeriod: 'RSI Period',
+      maPeriod: 'MA Period',
+      maType: 'MA Type (1=SMA 2=EMA 3=RMA)',
+      divergence: 'Divergence 1/0',
+      lookbackLeft: 'Div Lookback L',
+      lookbackRight: 'Div Lookback R',
+    },
+    outputs: [
+      { key: 'buy', label: 'BUY', color: '#00C853', style: 'markers' },
+      { key: 'sell', label: 'SELL', color: '#FF3D71', style: 'markers' },
+    ],
+  },
+
   RSI: {
     name: 'Relative Strength Index',
     shortName: 'RSI',
     category: 'oscillator',
-    defaultParams: { period: 14 },
-    paramLabels: { period: 'Period' },
+    defaultParams: { period: 14, maPeriod: 14, maType: 1 },
+    paramLabels: { period: 'Period', maPeriod: 'MA Period (0=off)', maType: 'MA Type (1=SMA 2=EMA 3=RMA)' },
     guideLines: [
       { value: 70, color: '#FF3D71', style: 'dashed' },
       { value: 30, color: '#00C853', style: 'dashed' },
     ],
     outputs: [
       { key: 'rsi', label: 'RSI', color: C[2], style: 'line', lineWidth: 1.5 },
+      { key: 'ma', label: 'RSI MA', color: '#FF3D71', style: 'line', lineWidth: 1.5 },
     ],
   },
 
@@ -264,8 +308,8 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
     defaultParams: { fast: 12, slow: 26, signal: 9 },
     paramLabels: { fast: 'Fast', slow: 'Slow', signal: 'Signal' },
     outputs: [
-      { key: 'macd', label: 'MACD', color: C[0], style: 'line', lineWidth: 1.5 },
-      { key: 'signal', label: 'Signal', color: C[6], style: 'line', lineWidth: 1.5 },
+      { key: 'macd', label: 'MACD', color: '#00C853', style: 'line', lineWidth: 1.5 },
+      { key: 'signal', label: 'Signal', color: '#FF3D71', style: 'line', lineWidth: 1.5 },
       { key: 'histogram', label: 'Histogram', color: C[3], style: 'histogram', lineWidth: 1 },
     ],
   },
@@ -472,6 +516,18 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
     paramLabels: {},
     outputs: [
       { key: 'volume', label: 'Volume', color: C[5], style: 'histogram' },
+    ],
+  },
+
+  ADL: {
+    name: 'Accumulation Distribution Line',
+    shortName: 'ADL',
+    category: 'oscillator',
+    defaultParams: { smoothing: 20, normPeriod: 100 },
+    paramLabels: { smoothing: 'Smoothing (SMA)', normPeriod: 'Norm Period' },
+    outputs: [
+      { key: 'adl', label: 'ADL', color: '#00C853', style: 'line', lineWidth: 1.5 },
+      { key: 'sma', label: 'ADL SMA', color: '#FF3D71', style: 'line', lineWidth: 1.5 },
     ],
   },
 

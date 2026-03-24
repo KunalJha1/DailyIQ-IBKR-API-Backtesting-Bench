@@ -442,8 +442,8 @@ export default function IndicatorLegend({
                 padding: '2px 6px 2px 4px',
                 borderRadius: isExpanded ? '3px 3px 0 0' : 3,
                 backgroundColor: isHovered || isExpanded
-                  ? 'rgba(28,33,40,0.92)'
-                  : 'rgba(13,17,23,0.72)',
+                  ? 'rgba(30,36,44,0.96)'
+                  : 'rgba(20,25,32,0.93)',
                 transition: 'background-color 120ms ease-out',
                 backdropFilter: 'blur(2px)',
                 cursor: 'default',
@@ -475,7 +475,7 @@ export default function IndicatorLegend({
                 style={{
                   fontSize: 10,
                   fontFamily: "'JetBrains Mono', monospace",
-                  color: ind.visible ? '#8B949E' : '#484F58',
+                  color: ind.visible ? '#E6EDF3' : '#484F58',
                   lineHeight: 1,
                   transition: 'color 120ms ease-out',
                   whiteSpace: 'nowrap',
@@ -483,7 +483,7 @@ export default function IndicatorLegend({
               >
                 {meta.shortName}
                 {Object.keys(ind.params).length > 0 && (
-                  <span style={{ color: ind.visible ? '#484F58' : '#2D3340' }}>
+                  <span style={{ color: ind.visible ? '#E6EDF3' : '#2D3340' }}>
                     {' ('}
                     {Object.values(ind.params).join(', ')}
                     {')'}
@@ -760,7 +760,7 @@ export default function IndicatorLegend({
               gap: 5,
               padding: '2px 6px 2px 4px',
               borderRadius: 3,
-              backgroundColor: 'rgba(13,17,23,0.72)',
+              backgroundColor: 'rgba(20,25,32,0.93)',
               backdropFilter: 'blur(2px)',
               pointerEvents: 'auto',
             }}
@@ -811,8 +811,9 @@ function IconBtn({
   danger?: boolean;
   disabled?: boolean;
 }) {
-  const baseColor = active ? '#E6EDF3' : '#484F58';
-  const hoverColor = danger ? '#FF3D71' : '#E6EDF3';
+  const baseColor = active ? '#FFFFFF' : '#E6EDF3';
+  const hoverColor = danger ? '#FF3D71' : '#FFFFFF';
+  const hoverBg = danger ? 'rgba(255,61,113,0.12)' : 'rgba(255,255,255,0.08)';
 
   return (
     <button
@@ -826,12 +827,22 @@ function IconBtn({
         background: 'none',
         border: 'none',
         cursor: disabled ? 'default' : 'pointer',
-        padding: 2,
-        borderRadius: 2,
-        transition: 'color 120ms ease-out',
+        padding: 3,
+        borderRadius: 3,
+        transition: 'all 120ms ease-out',
       }}
-      onMouseEnter={e => { if (!disabled) e.currentTarget.style.color = hoverColor; }}
-      onMouseLeave={e => { if (!disabled) e.currentTarget.style.color = baseColor; }}
+      onMouseEnter={e => {
+        if (disabled) return;
+        e.currentTarget.style.color = hoverColor;
+        e.currentTarget.style.backgroundColor = hoverBg;
+        e.currentTarget.style.transform = 'scale(1.15)';
+      }}
+      onMouseLeave={e => {
+        if (disabled) return;
+        e.currentTarget.style.color = baseColor;
+        e.currentTarget.style.backgroundColor = 'transparent';
+        e.currentTarget.style.transform = 'scale(1)';
+      }}
     >
       {children}
     </button>

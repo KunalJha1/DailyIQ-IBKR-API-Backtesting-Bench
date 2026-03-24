@@ -475,16 +475,6 @@ export default function HeatmapPage() {
                 </div>
                 <div>
                   <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-white/30">
-                    S&P 500 Weight
-                  </p>
-                  <p>
-                    {hovered.marketCap && totalMarketCap > 0
-                      ? `${((hovered.marketCap / totalMarketCap) * 100).toFixed(2)}%`
-                      : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-white/30">
                     P/E
                   </p>
                   <p>

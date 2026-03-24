@@ -124,9 +124,8 @@ export class Viewport {
     const anchorBar = this.pixelXToBar(anchorPixelX);
 
     const zoomFactor = delta > 0 ? 0.9 : 1.1;
-    const newBarsVisible = Math.round(
-      Math.max(MIN_BARS_VISIBLE, Math.min(MAX_BARS_VISIBLE, this.barsVisible * zoomFactor))
-    );
+    const newBarsVisible =
+      Math.max(MIN_BARS_VISIBLE, Math.min(MAX_BARS_VISIBLE, this.barsVisible * zoomFactor));
 
     if (newBarsVisible === this.barsVisible) return;
 

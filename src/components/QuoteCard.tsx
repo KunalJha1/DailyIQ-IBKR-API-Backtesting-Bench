@@ -250,9 +250,9 @@ export default function QuoteCard({
                   compactQuoteStrip ? "" : "border-blue/20 bg-blue/[0.04]"
                 }`}
               >
-                <p className={`${metricLabelClassName} text-blue/50`}>Mid</p>
+                <p className={`${metricLabelClassName} text-[#58A6FF]/50`}>Mid</p>
                 {quote.mid != null ? (
-                  <p className={`${metricValueClassName} text-blue`}>{formatPrice(quote.mid)}</p>
+                  <p className={`${metricValueClassName} text-[#58A6FF]`}>{formatPrice(quote.mid)}</p>
                 ) : (
                   <p className={metricEmptyClassName}>—</p>
                 )}
@@ -278,11 +278,11 @@ export default function QuoteCard({
                 : "grid grid-cols-3 gap-x-4 gap-y-3 border-t border-white/[0.06] pt-3"
             }`}>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Open</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Open</p>
                 <p className="font-mono text-[11px] font-medium text-white/70">{formatPrice(quote.open)}</p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Hi / Lo</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Hi / Lo</p>
                 <p className="font-mono text-[11px] font-medium">
                   <span className="text-green">{formatPrice(quote.high)}</span>
                   <span className="text-white/25"> / </span>
@@ -290,7 +290,7 @@ export default function QuoteCard({
                 </p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">52W H/L</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">52W H/L</p>
                 <p className="font-mono text-[11px] font-medium">
                   <span className="text-green">{quote.week52High != null ? formatPrice(quote.week52High) : "—"}</span>
                   <span className="text-white/25"> / </span>
@@ -298,28 +298,28 @@ export default function QuoteCard({
                 </p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Prev Close</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Prev Close</p>
                 <p className="font-mono text-[11px] font-medium text-white/70">{formatPrice(quote.prevClose)}</p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Volume</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Volume</p>
                 <p className="font-mono text-[11px] font-medium text-white/70">{formatVolume(quote.volume)}</p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Spread</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Spread</p>
                 <p className="font-mono text-[11px] font-medium text-amber">{quote.spread != null ? formatPrice(quote.spread) : "—"}</p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">P/E (TTM)</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">P/E (TTM)</p>
                 <p className="font-mono text-[11px] font-medium text-white/70">{quote.trailingPE != null ? quote.trailingPE.toFixed(1) : "—"}</p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Fwd P/E</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Fwd P/E</p>
                 <p className="font-mono text-[11px] font-medium text-white/70">{quote.forwardPE != null ? quote.forwardPE.toFixed(1) : "—"}</p>
               </div>
               <div>
-                <p className="text-[8px] uppercase tracking-wider text-white/30">Mkt Cap</p>
-                <p className="font-mono text-[11px] font-medium text-blue">{formatMarketCap(quote.marketCap)}</p>
+                <p className="text-[10px] uppercase tracking-wider text-white">Mkt Cap</p>
+                <p className="font-mono text-[11px] font-medium text-[#58A6FF]">{formatMarketCap(quote.marketCap)}</p>
               </div>
             </div>
           </>

@@ -241,8 +241,8 @@ export default function ChartToolbar({
             onClick={() => onTimeframeChange(tf.value)}
             className={`px-1.5 py-0.5 text-[10px] font-mono rounded-btn transition-colors duration-120
               ${timeframe === tf.value
-                ? 'text-blue bg-blue/10'
-                : 'text-text-muted hover:text-text-secondary hover:bg-hover'
+                ? 'text-[#3B82F6] bg-[#3B82F6]/10'
+                : 'text-text-primary hover:text-white hover:bg-hover'
               }`}
           >
             {tf.label}

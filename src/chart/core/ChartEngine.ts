@@ -11,7 +11,7 @@ import type {
   DrawingShape,
   DrawingSelection,
 } from '../types';
-import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR, FONT_MONO_SMALL } from '../constants';
+import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR, FONT_MONO_SMALL, VOLUME_PANE_RATIO } from '../constants';
 import { DEFAULT_BARS_VISIBLE } from '../constants';
 import { Viewport } from './Viewport';
 import { Renderer } from './Renderer';
@@ -646,8 +646,13 @@ export class ChartEngine {
       this.scaleY.renderGrid(this.renderer, this.viewport, this.width);
       this.scaleX.renderGrid(this.renderer, this.viewport, this.bars, this.height, this.width);
 
+      // Pre/post-market session background tints (intraday only)
+      this.renderSessionHighlights();
+
       // Main-chart volume overlays render behind price action
       this.renderMainVolumeOverlays();
+      this.renderMainMACDOverlay();
+      this.renderMainTechScoreOverlay();
 
       // Price action
       switch (this.chartType) {
@@ -712,12 +717,161 @@ export class ChartEngine {
     this.tooltip.render(this.renderer, this.viewport, this.crosshair.hit);
   }
 
+  private renderSessionHighlights() {
+    const tf = this.scaleX.timeframe;
+    if (tf === '1D' || tf === '1W' || tf === '1M') return;
+    if (this.bars.length === 0) return;
+
+    const start = Math.max(0, Math.floor(this.viewport.startIndex));
+    const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
+    if (start >= end) return;
+
+    const chartTop = this.viewport.chartTop;
+    const chartHeight = this.viewport.chartHeight;
+    const halfBar = this.viewport.barWidth / 2;
+
+    type Session = 'pre' | 'post' | null;
+    let runSession: Session = null;
+    let runLeft = 0;
+
+    const flush = (rightX: number) => {
+      if (!runSession) return;
+      const color = runSession === 'pre' ? COLORS.premarket : COLORS.aftermarket;
+      this.renderer.rect(runLeft, chartTop, rightX - runLeft, chartHeight, color);
+      runSession = null;
+    };
+
+    for (let i = start; i < end; i++) {
+      const bar = this.bars[i];
+      const d = new Date(bar.time);
+      const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+      const [hStr, mStr] = etStr.split(':');
+      const h = parseInt(hStr, 10);
+      const m = parseInt(mStr, 10);
+      const minuteOfDay = h * 60 + m;
+
+      let session: Session = null;
+      if (minuteOfDay >= 240 && minuteOfDay < 570) {
+        session = 'pre';   // 04:00–09:29 ET
+      } else if (minuteOfDay >= 960 && minuteOfDay < 1200) {
+        session = 'post';  // 16:00–19:59 ET
+      }
+
+      const cx = this.viewport.barToPixelX(i);
+
+      if (session !== runSession) {
+        flush(cx - halfBar);
+        if (session) {
+          runLeft = cx - halfBar;
+        }
+        runSession = session;
+      }
+    }
+
+    if (runSession) {
+      const lastCx = this.viewport.barToPixelX(end - 1);
+      flush(lastCx + halfBar);
+    }
+  }
+
   private renderMainVolumeOverlays() {
     for (const ind of this.activeIndicators) {
       if (!ind.visible || ind.paneId !== 'main' || ind.name !== 'Volume') continue;
       this.volumeRenderer.render(this.renderer, this.viewport, this.bars, {
         upColor: COLORS.volumeUp,
         downColor: COLORS.volumeDown,
+      });
+    }
+  }
+
+  private renderMainMACDOverlay() {
+    for (const ind of this.activeIndicators) {
+      if (!ind.visible || ind.paneId !== 'main' || ind.name !== 'MACD') continue;
+
+      const [macdData, signalData, histData] = ind.data;
+      if (!macdData || !signalData || !histData) continue;
+
+      const start = Math.max(0, Math.floor(this.viewport.startIndex));
+      const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
+
+      let min = Infinity;
+      let max = -Infinity;
+      for (let i = start; i < end; i++) {
+        if (!isNaN(macdData[i])) { min = Math.min(min, macdData[i]); max = Math.max(max, macdData[i]); }
+        if (!isNaN(signalData[i])) { min = Math.min(min, signalData[i]); max = Math.max(max, signalData[i]); }
+        if (!isNaN(histData[i])) { min = Math.min(min, histData[i]); max = Math.max(max, histData[i]); }
+      }
+      if (!isFinite(min) || !isFinite(max)) continue;
+
+      const paneTop = this.viewport.chartTop + this.viewport.chartHeight * (1 - VOLUME_PANE_RATIO);
+      const paneHeight = this.viewport.chartHeight * VOLUME_PANE_RATIO;
+
+      const range = max - min || 1;
+      const padding = range * 0.1;
+      const effectiveMin = min - padding;
+      const effectiveMax = max + padding;
+      const effectiveRange = effectiveMax - effectiveMin;
+
+      const toY = (value: number) =>
+        paneTop + paneHeight - ((value - effectiveMin) / effectiveRange) * paneHeight;
+      const zeroY = toY(0);
+
+      this.renderer.clip(0, paneTop, this.width, paneHeight, () => {
+        // Histogram bars
+        for (let i = start; i < end; i++) {
+          if (i >= histData.length || isNaN(histData[i])) continue;
+          const x = this.viewport.barToPixelX(i);
+          const barW = Math.max(1, this.viewport.getBarSlotWidth(i) * 0.6);
+          const y = toY(histData[i]);
+          const color = histData[i] >= 0 ? 'rgba(0,200,83,0.45)' : 'rgba(255,61,113,0.45)';
+          this.renderer.rect(x - barW / 2, Math.min(y, zeroY), barW, Math.abs(y - zeroY), color);
+        }
+
+        // MACD line
+        const macdPoints: [number, number][] = [];
+        for (let i = start; i < end; i++) {
+          if (i >= macdData.length || isNaN(macdData[i])) continue;
+          macdPoints.push([this.viewport.barToPixelX(i), toY(macdData[i])]);
+        }
+        if (macdPoints.length > 1) {
+          this.renderer.polyline(macdPoints, ind.colors?.['macd'] ?? '#00C853', 1);
+        }
+
+        // Signal line
+        const sigPoints: [number, number][] = [];
+        for (let i = start; i < end; i++) {
+          if (i >= signalData.length || isNaN(signalData[i])) continue;
+          sigPoints.push([this.viewport.barToPixelX(i), toY(signalData[i])]);
+        }
+        if (sigPoints.length > 1) {
+          this.renderer.polyline(sigPoints, ind.colors?.['signal'] ?? '#FF3D71', 1);
+        }
+      });
+    }
+  }
+
+  private renderMainTechScoreOverlay() {
+    for (const ind of this.activeIndicators) {
+      if (!ind.visible || ind.paneId !== 'main' || ind.name !== 'Technical Score') continue;
+
+      const scoreData = ind.data[0];
+      if (!scoreData) continue;
+
+      const start = Math.max(0, Math.floor(this.viewport.startIndex));
+      const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
+
+      const paneTop = this.viewport.chartTop + this.viewport.chartHeight * 0.67;
+      const paneHeight = this.viewport.chartHeight * 0.3;
+
+      const fakePaneLayout = {
+        paneId: 'main',
+        indicatorIds: [ind.id],
+        top: paneTop,
+        height: paneHeight,
+      } as SubPaneLayout;
+
+      this.renderer.clip(0, paneTop, this.width, paneHeight, () => {
+        this.renderTechnicalScoreSeries(scoreData, start, end, fakePaneLayout, 0, 100);
       });
     }
   }
@@ -770,7 +924,7 @@ export class ChartEngine {
     const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
 
     for (const ind of this.activeIndicators) {
-      if (!ind.visible || ind.paneId !== 'main' || ind.name === 'Volume') continue;
+      if (!ind.visible || ind.paneId !== 'main' || ind.name === 'Volume' || ind.name === 'MACD' || ind.name === 'Technical Score') continue;
       this.renderIndicatorSeries(
         ind,
         (value) => this.viewport.priceToPixelY(value),
@@ -1227,12 +1381,11 @@ export class ChartEngine {
 
     ranges.forEach(({ ind, meta, min, max }, index) => {
       const output = meta.outputs[0];
-      const color = output ? (ind.colors?.[output.key] ?? output.color) : COLORS.textMuted;
       this.renderer.textSmall(
         `${meta.shortName} ${min.toFixed(1)}-${max.toFixed(1)}`,
         chartAreaWidth - 8,
         pane.top + 12 + index * 12,
-        color,
+        COLORS.textPrimary,
         'right',
       );
     });

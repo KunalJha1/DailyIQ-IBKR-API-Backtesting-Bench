@@ -1260,7 +1260,7 @@ export default function WatchlistCard({
                       <div
                         key={colId}
                         className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider cursor-grab transition-colors duration-75 ${
-                          sortCol === col.key ? "text-white/70" : "text-white/40 hover:text-white/55"
+                          sortCol === col.key ? "text-white" : "text-white hover:text-white"
                         } ${borderClass} ${isDragging ? "opacity-40" : ""}`}
                         style={{ textAlign: col.align }}
                         onClick={() => handleSort(col.key)}
@@ -1329,7 +1329,7 @@ export default function WatchlistCard({
                     return (
                       <div
                         key={colId}
-                        className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider text-purple/70 cursor-grab transition-colors duration-75 hover:text-purple ${borderClass} ${isDragging ? "opacity-40" : ""}`}
+                        className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider text-white cursor-grab transition-colors duration-75 hover:text-white ${borderClass} ${isDragging ? "opacity-40" : ""}`}
                         style={{
                           textAlign: "right",
                           color: headerTints.custom?.[col.id],
@@ -1365,7 +1365,7 @@ export default function WatchlistCard({
                     return (
                       <div
                         key={colId}
-                        className={`relative min-w-0 select-none truncate px-1 text-center text-[9px] font-medium uppercase tracking-wider text-blue/50 cursor-grab ${borderClass} ${isDragging ? "opacity-40" : ""}`}
+                        className={`relative min-w-0 select-none truncate px-1 text-center text-[9px] font-medium uppercase tracking-wider text-white cursor-grab ${borderClass} ${isDragging ? "opacity-40" : ""}`}
                         style={{
                           color: headerTints.ta?.[tf],
                           backgroundColor: headerTints.ta?.[tf] ? `${headerTints.ta[tf]}14` : undefined,

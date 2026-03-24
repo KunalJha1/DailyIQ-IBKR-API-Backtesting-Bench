@@ -397,13 +397,17 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
 
   // ── Dynamic grid template ──
   const gridTemplate = useMemo(() => {
-    const tracks = orderedVisibleCols.map((key) => {
-      const col = COLUMNS.find((c) => c.key === key);
-      return `${colWidths[key] ?? col?.defaultWidth ?? 90}px`;
+    const tracks = activeColumnIds.map((id) => {
+      if (id.startsWith("b:")) {
+        const key = id.slice(2);
+        const col = COLUMNS.find((c) => c.key === key);
+        return `${colWidths[key] ?? col?.defaultWidth ?? 90}px`;
+      }
+      const tf = id.slice(3);
+      return `${taColWidths[tf] ?? TA_COL_W}px`;
     });
-    tracks.push(...orderedTaTimeframes.map((tf) => `${taColWidths[tf] ?? TA_COL_W}px`));
     return tracks.join(" ");
-  }, [orderedVisibleCols, colWidths, orderedTaTimeframes, taColWidths]);
+  }, [activeColumnIds, colWidths, taColWidths]);
 
   const rows = useMemo(
     () =>
@@ -1011,12 +1015,47 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
               className="grid sticky top-0 z-10 border-b border-white/[0.06] bg-[#131925] text-[9px] uppercase tracking-[0.14em] text-white/28"
               style={{ gridTemplateColumns: gridTemplate }}
             >
-              {orderedVisibleCols.map((key, index) => {
-                const col = COLUMNS.find((c) => c.key === key)!;
-                const isSortable = key !== "actions";
-                const tint = headerTints.builtIn?.[key];
-                const colId = builtInColId(key);
+              {activeColumnIds.map((colId, index) => {
                 const isLast = index === activeColumnIds.length - 1;
+                if (colId.startsWith("b:")) {
+                  const key = colId.slice(2);
+                  const col = COLUMNS.find((c) => c.key === key)!;
+                  const isSortable = key !== "actions";
+                  const tint = headerTints.builtIn?.[key];
+                  return (
+                    <div
+                      key={colId}
+                      ref={(el) => { headerCellRefs.current[colId] = el; }}
+                      onMouseDown={(e) => startColumnDrag(colId, e)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setHeaderMenu({ x: e.clientX, y: e.clientY, type: "builtIn", key });
+                      }}
+                      onClick={() => handleHeaderClick(key)}
+                      className={`relative flex select-none items-center justify-center truncate border-r border-white/[0.06] px-2 py-2 text-center ${colDragState?.colId === colId ? "cursor-grabbing opacity-40" : "cursor-grab"} ${isSortable ? "hover:text-white/55" : ""}`}
+                      style={{
+                        color: tint,
+                        backgroundColor: tint ? `${tint}14` : undefined,
+                      }}
+                      title="Click to sort · Right-click for color · Drag to reorder"
+                    >
+                      {colInsertBeforeId === colId && colDragState ? (
+                        <div className="pointer-events-none absolute left-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                      ) : null}
+                      {isLast && colInsertBeforeId === null && colDragState ? (
+                        <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                      ) : null}
+                      <span className="truncate pr-3">{`${col.label}${sortIndicatorFor(key)}`}</span>
+                      <div
+                        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
+                        onMouseDown={(e) => handleColResize(key, e)}
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      />
+                    </div>
+                  );
+                }
+                const tf = colId.slice(3);
+                const tint = headerTints.ta?.[tf];
                 return (
                   <div
                     key={colId}
@@ -1024,10 +1063,10 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                     onMouseDown={(e) => startColumnDrag(colId, e)}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      setHeaderMenu({ x: e.clientX, y: e.clientY, type: "builtIn", key });
+                      setHeaderMenu({ x: e.clientX, y: e.clientY, type: "ta", tf });
                     }}
-                    onClick={() => handleHeaderClick(key)}
-                    className={`relative flex select-none items-center justify-center truncate border-r border-white/[0.06] px-2 py-2 text-center ${colDragState?.colId === colId ? "cursor-grabbing opacity-40" : "cursor-grab"} ${isSortable ? "hover:text-white/55" : ""}`}
+                    onClick={() => handleHeaderClick(tf)}
+                    className={`relative select-none truncate border-r border-white/[0.06] px-1 py-2 text-center text-blue/50 hover:text-blue ${colDragState?.colId === colId ? "cursor-grabbing opacity-40" : "cursor-grab"}`}
                     style={{
                       color: tint,
                       backgroundColor: tint ? `${tint}14` : undefined,
@@ -1040,49 +1079,13 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                     {isLast && colInsertBeforeId === null && colDragState ? (
                       <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-0.5 bg-blue" />
                     ) : null}
-                    <span className="truncate pr-3">{`${col.label}${sortIndicatorFor(key)}`}</span>
+                    {`${tf}${sortIndicatorFor(tf)}`}
                     <div
                       className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
-                      onMouseDown={(e) => handleColResize(key, e)}
+                      onMouseDown={(e) => handleTaColResize(tf, e)}
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
                     />
                   </div>
-                );
-              })}
-              {orderedTaTimeframes.map((tf, index) => {
-                const tint = headerTints.ta?.[tf];
-                const colId = taColId(tf);
-                const isLast = orderedVisibleCols.length + index === activeColumnIds.length - 1;
-                return (
-                <div
-                  key={colId}
-                  ref={(el) => { headerCellRefs.current[colId] = el; }}
-                  onMouseDown={(e) => startColumnDrag(colId, e)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setHeaderMenu({ x: e.clientX, y: e.clientY, type: "ta", tf });
-                  }}
-                  onClick={() => handleHeaderClick(tf)}
-                  className={`relative select-none truncate border-r border-white/[0.06] px-1 py-2 text-center text-blue/50 hover:text-blue ${colDragState?.colId === colId ? "cursor-grabbing opacity-40" : "cursor-grab"}`}
-                  style={{
-                    color: tint,
-                    backgroundColor: tint ? `${tint}14` : undefined,
-                  }}
-                  title="Click to sort · Right-click for color · Drag to reorder"
-                >
-                  {colInsertBeforeId === colId && colDragState ? (
-                    <div className="pointer-events-none absolute left-0 top-0 z-20 h-full w-0.5 bg-blue" />
-                  ) : null}
-                  {isLast && colInsertBeforeId === null && colDragState ? (
-                    <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-0.5 bg-blue" />
-                  ) : null}
-                  {`${tf}${sortIndicatorFor(tf)}`}
-                  <div
-                    className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
-                    onMouseDown={(e) => handleTaColResize(tf, e)}
-                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                  />
-                </div>
                 );
               })}
             </div>
@@ -1099,16 +1102,32 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                 className={`grid w-full cursor-pointer border-b border-white/[0.04] text-left transition-colors ${rowHighlightClass(highlightScore)}`}
                 style={{ gridTemplateColumns: gridTemplate }}
               >
-                {orderedVisibleCols.map((key) => {
+                {activeColumnIds.map((colId) => {
+                  if (colId.startsWith("ta:")) {
+                    const tf = colId.slice(3);
+                    const score = techScores.get(row.symbol)?.get(tf) ?? null;
+                    const isLong = row.quantity > 0;
+                    const isShort = row.quantity < 0;
+                    return (
+                      <div
+                        key={`${row.symbol}-${tf}`}
+                        className={`flex min-w-0 items-center justify-center truncate border-r border-white/[0.04] px-1 py-2 text-center font-mono text-[11px] ${techScoreCellClass(score, isLong, isShort)}`}
+                        title={`${tf} score: ${score ?? "no data"} · ${isLong ? "Long" : isShort ? "Short" : "Flat"}`}
+                      >
+                        {score === null ? "—" : score}
+                      </div>
+                    );
+                  }
+                  const key = colId.slice(2);
                   if (key === "actions") {
                     return (
-                      <div key={key} className="flex min-w-0 items-center justify-center gap-1 border-r border-white/[0.04] px-2 py-1.5">
+                      <div key={colId} className="flex min-w-0 items-center justify-center gap-1 border-r border-white/[0.04] px-2 py-1.5">
                         {row.editable && row.id ? (
                           <>
                             <button
                               type="button"
                               onClick={(e) => { e.stopPropagation(); openEditPosition(row); }}
-                              className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-blue"
+                              className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-white"
                               title={`Edit ${row.symbol}`}
                             >
                               <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
@@ -1136,24 +1155,10 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                   const { value, tone = "text-white/60", strong } = cellValue(row, key);
                   return (
                     <div
-                      key={key}
+                      key={colId}
                       className={`flex min-w-0 items-center justify-center truncate border-r border-white/[0.04] px-2 py-2 text-center font-mono text-[11px] ${tone} ${strong ? "font-semibold text-white/82" : ""}`}
                     >
                       <span className="truncate">{value}</span>
-                    </div>
-                  );
-                })}
-                {orderedTaTimeframes.map((tf) => {
-                  const score = techScores.get(row.symbol)?.get(tf) ?? null;
-                  const isLong = row.quantity > 0;
-                  const isShort = row.quantity < 0;
-                  return (
-                    <div
-                      key={`${row.symbol}-${tf}`}
-                      className={`flex min-w-0 items-center justify-center truncate border-r border-white/[0.04] px-1 py-2 text-center font-mono text-[11px] ${techScoreCellClass(score, isLong, isShort)}`}
-                      title={`${tf} score: ${score ?? "no data"} · ${isLong ? "Long" : isShort ? "Short" : "Flat"}`}
-                    >
-                      {score === null ? "—" : score}
                     </div>
                   );
                 })}
@@ -1168,16 +1173,23 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                 className="grid border-b border-white/[0.04]"
                 style={{ gridTemplateColumns: gridTemplate }}
               >
-                {orderedVisibleCols.map((key) => {
+                {activeColumnIds.map((colId) => {
+                  if (colId.startsWith("ta:")) {
+                    const tf = colId.slice(3);
+                    return (
+                      <div key={`cash-${tf}`} className="flex min-w-0 items-center justify-center border-r border-white/[0.04] px-1 py-2 text-center font-mono text-[11px] text-white/15">—</div>
+                    );
+                  }
+                  const key = colId.slice(2);
                   if (key === "actions") {
                     return (
-                      <div key={key} className="flex min-w-0 items-center justify-center gap-1 border-r border-white/[0.04] px-2 py-1.5">
+                      <div key={colId} className="flex min-w-0 items-center justify-center gap-1 border-r border-white/[0.04] px-2 py-1.5">
                         {cash.editable && cash.id ? (
                           <>
                             <button
                               type="button"
                               onClick={() => openEditCash(cash)}
-                              className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-blue"
+                              className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-white"
                               title={`Edit ${cash.currency} cash`}
                             >
                               <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
@@ -1204,16 +1216,13 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                   const { value, tone = "text-white/60", strong } = cashCellValue(cash, key);
                   return (
                     <div
-                      key={key}
+                      key={colId}
                       className={`flex min-w-0 items-center justify-center truncate border-r border-white/[0.04] px-2 py-2 text-center font-mono text-[11px] ${tone} ${strong ? "font-semibold text-white/82" : ""}`}
                     >
                       <span className="truncate">{value}</span>
                     </div>
                   );
                 })}
-                {orderedTaTimeframes.map((tf) => (
-                  <div key={`cash-${tf}`} className="flex min-w-0 items-center justify-center border-r border-white/[0.04] px-1 py-2 text-center font-mono text-[11px] text-white/15">—</div>
-                ))}
               </div>
             ))}
           </div>
@@ -1339,7 +1348,7 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                   actions={
                     <>
                       <button type="button" onClick={() => { setSelectedManualAccountId(account.id); setManagerOpen(false); }} className={`rounded-sm px-1.5 py-1 text-[9px] ${selectedManualAccount?.id === account.id ? "bg-blue/[0.15] text-blue" : "text-white/40 hover:bg-white/[0.06] hover:text-white/70"}`}>Open</button>
-                      <button type="button" onClick={() => { setEditingAccountId(account.id); setAccountName(account.name); }} className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-blue"><Pencil className="h-3.5 w-3.5" strokeWidth={1.5} /></button>
+                      <button type="button" onClick={() => { setEditingAccountId(account.id); setAccountName(account.name); }} className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-white"><Pencil className="h-3.5 w-3.5" strokeWidth={1.5} /></button>
                       <button type="button" onClick={() => { if (window.confirm(`Delete manual account "${account.name}"?`)) void runMutation(() => deleteManualAccount(rawManualAccountId(account.id))); }} className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-red"><Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} /></button>
                     </>
                   }
@@ -1360,7 +1369,7 @@ export default function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClo
                   subtitle={group.accountNames.length ? group.accountNames.join(", ") : "No members"}
                   actions={
                     <>
-                      <button type="button" onClick={() => { setEditingGroupId(group.id); setGroupName(group.name); }} className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-blue"><Pencil className="h-3.5 w-3.5" strokeWidth={1.5} /></button>
+                      <button type="button" onClick={() => { setEditingGroupId(group.id); setGroupName(group.name); }} className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-white"><Pencil className="h-3.5 w-3.5" strokeWidth={1.5} /></button>
                       <button type="button" onClick={() => { if (window.confirm(`Delete group "${group.name}"?`)) void runMutation(() => deleteGroup(group.id)); }} className="rounded-sm p-1 text-white/35 hover:bg-white/[0.06] hover:text-red"><Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} /></button>
                     </>
                   }

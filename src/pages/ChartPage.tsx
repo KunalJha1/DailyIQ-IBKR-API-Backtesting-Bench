@@ -59,6 +59,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
   const [draggingMouse, setDraggingMouse] = useState<{ x: number; y: number } | null>(null);
   const [dragHoverPaneId, setDragHoverPaneId] = useState<string | null>(null);
   const restoredIndicatorsRef = useRef(false);
+  const paneDividerDragRef = useRef<{ paneId: string; startY: number; startHeight: number } | null>(null);
 
   const engineRef = useRef<ChartEngine | null>(null);
 
@@ -183,6 +184,42 @@ export default function ChartPage({ tabId }: ChartPageProps) {
     }
   }, [indicatorColorDefaults, makeDetachedPaneId]);
 
+  const syncMACDPane = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+
+    const engineIndicators = engine.getActiveIndicators();
+    const macdSignals = engineIndicators.filter((indicator) => indicator.name === 'MACD Crossover');
+    if (macdSignals.length === 0) return;
+
+    const shouldShowPane = macdSignals.some((indicator) => indicator.visible);
+    let changed = false;
+    let macdIndicator = engineIndicators.find((indicator) => indicator.name === 'MACD');
+
+    if (shouldShowPane) {
+      if (!macdIndicator) {
+        const id = engine.addIndicator('MACD');
+        if (id) {
+          // Sync params from strategy on initial creation
+          const { fast, slow, signal } = macdSignals[0].params;
+          engine.updateIndicatorParams(id, { fast, slow, signal });
+          engine.setIndicatorPane(id, makeDetachedPaneId());
+          changed = true;
+        }
+      } else if (!macdIndicator.visible) {
+        engine.setIndicatorVisibility(macdIndicator.id, true);
+        changed = true;
+      }
+    } else if (macdIndicator?.visible) {
+      engine.setIndicatorVisibility(macdIndicator.id, false);
+      changed = true;
+    }
+
+    if (changed) {
+      setActiveIndicators([...engine.getActiveIndicators()]);
+    }
+  }, [makeDetachedPaneId]);
+
   useEffect(() => {
     const nextPersisted = tabId ? loadChartState(tabId) : null;
     setPersisted(nextPersisted);
@@ -266,7 +303,8 @@ export default function ChartPage({ tabId }: ChartPageProps) {
 
   useEffect(() => {
     syncDailyIQScorePane();
-  }, [activeIndicators, syncDailyIQScorePane]);
+    syncMACDPane();
+  }, [activeIndicators, syncDailyIQScorePane, syncMACDPane]);
 
   useEffect(() => {
     if (!engineRef.current) return;
@@ -424,6 +462,37 @@ export default function ChartPage({ tabId }: ChartPageProps) {
     });
   }, []);
 
+  const handlePaneDividerMouseDown = useCallback((e: React.MouseEvent, paneId: string) => {
+    e.preventDefault();
+    const engine = engineRef.current;
+    if (!engine) return;
+    const layout = engine.getLayout();
+    const pane = layout.subPanes.find(p => p.paneId === paneId);
+    if (!pane) return;
+    paneDividerDragRef.current = { paneId, startY: e.clientY, startHeight: pane.height };
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const drag = paneDividerDragRef.current;
+      if (!drag) return;
+      const delta = drag.startY - ev.clientY;
+      const newHeight = drag.startHeight + delta;
+      engineRef.current?.setSubPaneHeight(drag.paneId, newHeight);
+      requestAnimationFrame(() => {
+        const updated = engineRef.current?.getLayout();
+        if (updated) setChartLayout(updated);
+      });
+    };
+
+    const onMouseUp = () => {
+      paneDividerDragRef.current = null;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, []);
+
   const beginIndicatorDrag = useCallback((indicatorId: string, sourcePaneId: string, clientX: number, clientY: number) => {
     setDragState({ indicatorId, sourcePaneId });
     const host = chartOverlayRef.current;
@@ -453,18 +522,18 @@ export default function ChartPage({ tabId }: ChartPageProps) {
         return;
       }
 
+      const newPaneHeight = 36;
+      const newPaneTop = rect.height - chartLayout.timeAxisHeight - newPaneHeight;
+      if (y >= newPaneTop && y <= newPaneTop + newPaneHeight) {
+        setDragHoverPaneId('__new__');
+        return;
+      }
+
       const hoveredPane = chartLayout.subPanes.find(
         (pane) => y >= pane.top && y <= pane.top + pane.height,
       );
       if (hoveredPane) {
         setDragHoverPaneId(hoveredPane.paneId === dragState.sourcePaneId ? null : hoveredPane.paneId);
-        return;
-      }
-
-      const newPaneHeight = 36;
-      const newPaneTop = rect.height - chartLayout.timeAxisHeight - newPaneHeight;
-      if (y >= newPaneTop && y <= newPaneTop + newPaneHeight) {
-        setDragHoverPaneId('__new__');
         return;
       }
 
@@ -512,6 +581,34 @@ export default function ChartPage({ tabId }: ChartPageProps) {
   const mainVolumeIndicator = activeIndicators.find(
     (indicator) => indicator.name === 'Volume' && indicator.visible && indicator.paneId === 'main',
   );
+
+  const draggableMACDPanes = chartLayout
+    ? chartLayout.subPanes.flatMap((pane) => {
+        const macdIndicator = activeIndicators.find(
+          (indicator) => pane.indicatorIds.includes(indicator.id) && indicator.name === 'MACD',
+        );
+        return macdIndicator ? [{ pane, indicatorId: macdIndicator.id }] : [];
+      })
+    : [];
+  const mainMACDIndicator = activeIndicators.find(
+    (indicator) => indicator.name === 'MACD' && indicator.visible && indicator.paneId === 'main',
+  );
+
+  const draggableTechScorePanes = chartLayout
+    ? chartLayout.subPanes.flatMap((pane) => {
+        const tsIndicator = activeIndicators.find(
+          (indicator) => pane.indicatorIds.includes(indicator.id) && indicator.name === 'Technical Score',
+        );
+        return tsIndicator ? [{ pane, indicatorId: tsIndicator.id }] : [];
+      })
+    : [];
+  const mainTechScoreIndicator = activeIndicators.find(
+    (indicator) => indicator.name === 'Technical Score' && indicator.visible && indicator.paneId === 'main',
+  );
+
+  const draggedIndicatorName = dragState
+    ? (activeIndicators.find((ind) => ind.id === dragState.indicatorId)?.name ?? '')
+    : '';
 
   return (
     <div className="flex flex-col h-full bg-base relative">
@@ -594,6 +691,88 @@ export default function ChartPage({ tabId }: ChartPageProps) {
                 beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
               }}
               title="Drag volume onto chart"
+              style={{
+                position: 'absolute',
+                left: chartToolRailWidth,
+                right: chartLayout?.priceAxisWidth ?? 70,
+                top: pane.top,
+                height: pane.height,
+                cursor: 'grab',
+                pointerEvents: dragState ? 'none' : 'auto',
+                background: 'transparent',
+                zIndex: 4,
+              }}
+            />
+          ))}
+          {chartLayout && mainMACDIndicator && (
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                beginIndicatorDrag(mainMACDIndicator.id, 'main', e.clientX, e.clientY);
+              }}
+              title="Drag MACD out to its own pane"
+              style={{
+                position: 'absolute',
+                left: chartToolRailWidth,
+                right: chartLayout.priceAxisWidth,
+                top: chartLayout.mainTop + chartLayout.mainHeight * (1 - VOLUME_PANE_RATIO),
+                height: Math.max(48, chartLayout.mainHeight * VOLUME_PANE_RATIO),
+                cursor: 'grab',
+                pointerEvents: dragState ? 'none' : 'auto',
+                background: 'transparent',
+                zIndex: 5,
+              }}
+            />
+          )}
+          {draggableMACDPanes.map(({ pane, indicatorId }) => (
+            <div
+              key={`${pane.paneId}-macd-drag`}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
+              }}
+              title="Drag MACD onto chart"
+              style={{
+                position: 'absolute',
+                left: chartToolRailWidth,
+                right: chartLayout?.priceAxisWidth ?? 70,
+                top: pane.top,
+                height: pane.height,
+                cursor: 'grab',
+                pointerEvents: dragState ? 'none' : 'auto',
+                background: 'transparent',
+                zIndex: 4,
+              }}
+            />
+          ))}
+          {chartLayout && mainTechScoreIndicator && (
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                beginIndicatorDrag(mainTechScoreIndicator.id, 'main', e.clientX, e.clientY);
+              }}
+              title="Drag Tech Score out to its own pane"
+              style={{
+                position: 'absolute',
+                left: chartToolRailWidth,
+                right: chartLayout.priceAxisWidth,
+                top: chartLayout.mainTop + chartLayout.mainHeight * 0.67,
+                height: Math.max(48, chartLayout.mainHeight * 0.3),
+                cursor: 'grab',
+                pointerEvents: dragState ? 'none' : 'auto',
+                background: 'transparent',
+                zIndex: 5,
+              }}
+            />
+          )}
+          {draggableTechScorePanes.map(({ pane, indicatorId }) => (
+            <div
+              key={`${pane.paneId}-techscore-drag`}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
+              }}
+              title="Drag Tech Score onto chart"
               style={{
                 position: 'absolute',
                 left: chartToolRailWidth,
@@ -703,11 +882,44 @@ export default function ChartPage({ tabId }: ChartPageProps) {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  Volume
+                  {draggedIndicatorName}
                 </div>
               )}
             </>
           )}
+          {chartLayout && !dragState && chartLayout.subPanes.map((pane) => (
+            <div
+              key={`divider-${pane.paneId}`}
+              onMouseDown={(e) => handlePaneDividerMouseDown(e, pane.paneId)}
+              onMouseEnter={(e) => {
+                (e.currentTarget.firstElementChild as HTMLElement).style.backgroundColor = '#1A56DB';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget.firstElementChild as HTMLElement).style.backgroundColor = '#21262D';
+              }}
+              style={{
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                top: pane.top - 3,
+                height: 7,
+                cursor: 'ns-resize',
+                zIndex: 10,
+              }}
+            >
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  top: 3,
+                  height: 1,
+                  backgroundColor: '#21262D',
+                  transition: 'background-color 120ms ease-out',
+                }}
+              />
+            </div>
+          ))}
         </ChartCanvas>
 
         <IndicatorLegend

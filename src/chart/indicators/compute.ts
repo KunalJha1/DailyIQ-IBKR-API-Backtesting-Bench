@@ -71,6 +71,8 @@ import { computeIchimoku } from './overlays/ichimoku';
 import { computeParabolicSAR } from './overlays/parabolicSar';
 import { computeEnvelope } from './overlays/envelope';
 import { computeGoldenDeathCross, computeEMACrossover } from './overlays/crossoverStrategy';
+import { computeRSIStrategy } from './overlays/rsiStrategy';
+import { computeMACDCrossover } from './overlays/macdCrossoverStrategy';
 import { computeEMA520Strategy } from './overlays/ema520Strategy';
 import { computeDailyIQTechScoreStrategy } from './overlays/dailyIQTechScoreStrategy';
 import { computeStructureBreaks } from './overlays/structureBreaks';
@@ -98,6 +100,8 @@ import { computeOBV } from './volume/obv';
 import { computeVolume } from './volume/volume';
 import { computeVolumeProfile } from './volume/volumeProfile';
 import { computeMarketSentimentStrategy } from './overlays/marketSentimentStrategy';
+import { computeADL } from './oscillators/adl';
+import { computeADLCrossover } from './overlays/adlStrategy';
 
 // --- Dispatch map ---
 
@@ -110,6 +114,7 @@ const computeFns: Record<string, (bars: OHLCVBar[], params: Record<string, numbe
   Ichimoku: computeIchimoku,
   'Parabolic SAR': computeParabolicSAR,
   Envelope: computeEnvelope,
+  'RSI Strategy': computeRSIStrategy,
   'Golden/Death Cross': computeGoldenDeathCross,
   'EMA 9/14 Crossover': computeEMACrossover,
   'EMA 5/20 Crossover': computeEMA520Strategy,
@@ -134,8 +139,11 @@ const computeFns: Record<string, (bars: OHLCVBar[], params: Record<string, numbe
   'Linear Regression': computeLinearRegressionSentiment,
   'Market Structure': computeMarketStructureSentiment,
   'Market Sentiment': computeMarketSentiment,
+  'MACD Crossover': computeMACDCrossover,
   'Market Sentiment Signal': computeMarketSentimentStrategy,
   'Trend Angle': computeTrendAngle,
+  ADL: computeADL,
+  'ADL Crossover': computeADLCrossover,
   Volume: computeVolume,
   OBV: computeOBV,
   'Volume Profile': computeVolumeProfile,

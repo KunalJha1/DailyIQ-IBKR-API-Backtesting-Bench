@@ -13,11 +13,14 @@ interface IndicatorPanelProps {
 }
 
 const STRATEGY_KEYS = new Set([
+  'RSI Strategy',
   'Golden/Death Cross',
   'EMA 9/14 Crossover',
   'EMA 5/20 Crossover',
   'DailyIQ Tech Score Signal',
   'Market Sentiment Signal',
+  'MACD Crossover',
+  'ADL Crossover',
 ]);
 
 const categories = [
@@ -35,11 +38,14 @@ const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   Ichimoku: 'Multi-component trend & momentum system',
   'Parabolic SAR': 'Trailing stop & reversal indicator',
   Envelope: 'Percentage bands around a moving average',
+  'RSI Strategy': 'RSI/MA crossover BUY and SELL signals with optional divergence detection',
   'Golden/Death Cross': '50/200 SMA crossover with BUY and SELL markers',
   'EMA 9/14 Crossover': 'Fast/slow EMA crossover with BUY and SELL markers',
   'EMA 5/20 Crossover': 'ICT-style EMA crossover with BUY and SELL markers',
   'DailyIQ Tech Score Signal': 'BUY above 50 crossover, SELL below 50 crossover',
   'Market Sentiment Signal': 'BUY above 50 sentiment crossover, SELL below 50 crossover',
+  'MACD Crossover': 'Buy/sell on MACD-signal line crossovers',
+  'ADL Crossover': 'Buy/sell when ADL crosses above/below its SMA smoothing line',
   'Structure Breaks': 'Pivot break markers for bullish and bearish structure breaks',
   'Liquidity Levels': 'Today, previous day, week, and month liquidity lines',
   'Liquidity Sweep Signal': 'Groups sweep candles into bullish/bearish liquidity zones with fewer signals',
@@ -62,6 +68,7 @@ const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   'Trend Angle': 'EMA/ATR-based trend angle in degrees',
   'Technical Score': 'DailyIQ technical score plotted through time',
   Volume: 'Raw traded volume histogram',
+  ADL: 'Cumulative volume-weighted supply/demand pressure with SMA smoothing',
   OBV: 'Cumulative volume flow',
   'Volume Profile': 'Volume distribution by price level',
 };

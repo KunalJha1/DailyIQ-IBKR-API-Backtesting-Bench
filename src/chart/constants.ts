@@ -21,6 +21,8 @@ export const COLORS = {
   volumeDown: 'rgba(255,61,113,0.25)',
   areaFill: 'rgba(26,86,219,0.12)',
   areaStroke: '#1A56DB',
+  premarket: 'rgba(245, 158, 11, 0.06)',
+  aftermarket: 'rgba(26, 86, 219, 0.06)',
 } as const;
 
 // Indicator palette for multiple overlays
@@ -72,7 +74,7 @@ export const MIN_BARS_VISIBLE = 10;
 export const MAX_BARS_VISIBLE = 500;
 export const DEFAULT_BARS_VISIBLE = 100;
 export const BAR_BODY_RATIO = 0.7;
-export const VOLUME_PANE_RATIO = 0.2;
+export const VOLUME_PANE_RATIO = 0.07;
 
 // Font
 export const FONT_MONO = '11px "JetBrains Mono", monospace';
