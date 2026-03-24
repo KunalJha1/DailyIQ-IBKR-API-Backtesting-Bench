@@ -13,6 +13,9 @@ export interface TwsSettings {
   accountId: string;
   clientId: number;
   autoProbe: boolean;
+  finnhubApiKey: string;
+  playbookMemory: string;
+  playbookMemoryEnabled: boolean;
 }
 
 const FILENAME = "tws-settings.json";
@@ -28,6 +31,9 @@ function defaultSettings(): TwsSettings {
     accountId: "",
     clientId: randomClientId(),
     autoProbe: true,
+    finnhubApiKey: "",
+    playbookMemory: "",
+    playbookMemoryEnabled: false,
   };
 }
 
@@ -41,15 +47,26 @@ export async function loadTwsSettings(): Promise<TwsSettings> {
     const content = await readTextFile(FILENAME, {
       dir: BaseDirectory.AppData,
     });
-    const parsed = JSON.parse(content) as TwsSettings;
+    const parsed = JSON.parse(content) as Partial<TwsSettings>;
     if (typeof parsed.clientId !== "number") return defaultSettings();
-    if (parsed.clientId < 1000 || parsed.clientId > 9999) {
-      return {
-        ...parsed,
-        clientId: randomClientId(),
-      };
-    }
-    return parsed;
+    return {
+      tradingMode: parsed.tradingMode === "fa-group" ? "fa-group" : "account",
+      faGroup: typeof parsed.faGroup === "string" ? parsed.faGroup : "",
+      accountId: typeof parsed.accountId === "string" ? parsed.accountId : "",
+      clientId:
+        parsed.clientId >= 1000 && parsed.clientId <= 9999
+          ? parsed.clientId
+          : randomClientId(),
+      autoProbe: typeof parsed.autoProbe === "boolean" ? parsed.autoProbe : true,
+      finnhubApiKey:
+        typeof parsed.finnhubApiKey === "string" ? parsed.finnhubApiKey : "",
+      playbookMemory:
+        typeof parsed.playbookMemory === "string" ? parsed.playbookMemory : "",
+      playbookMemoryEnabled:
+        typeof parsed.playbookMemoryEnabled === "boolean"
+          ? parsed.playbookMemoryEnabled
+          : typeof parsed.playbookMemory === "string" && parsed.playbookMemory.trim().length > 0,
+    };
   } catch {
     return defaultSettings();
   }
@@ -61,7 +78,22 @@ export async function saveTwsSettings(settings: TwsSettings): Promise<void> {
     if (!(await exists(dir))) {
       await createDir(dir, { recursive: true });
     }
-    await writeTextFile(FILENAME, JSON.stringify(settings, null, 2), {
+    let nextPayload: Record<string, unknown> = { ...settings };
+    try {
+      const existing = await readTextFile(FILENAME, {
+        dir: BaseDirectory.AppData,
+      });
+      const parsed = JSON.parse(existing);
+      if (parsed && typeof parsed === "object") {
+        nextPayload = {
+          ...(parsed as Record<string, unknown>),
+          ...settings,
+        };
+      }
+    } catch {
+      // Ignore missing/invalid existing file and write normalized settings only.
+    }
+    await writeTextFile(FILENAME, JSON.stringify(nextPayload, null, 2), {
       dir: BaseDirectory.AppData,
     });
   } catch (err) {

@@ -8,6 +8,7 @@ import WindowControls from "../components/WindowControls";
 import TabBar from "../components/TabBar";
 import SettingsPanel from "../components/SettingsPanel";
 import DashboardPage from "./DashboardPage";
+import ScreenerPage from "./ScreenerPage";
 import ChartPage from "./ChartPage";
 import OptionsPage from "./OptionsPage";
 import BacktestPage from "./BacktestPage";
@@ -17,6 +18,7 @@ import MarketBiasPage from "./MarketBiasPage";
 
 const pageByType: Record<TabType, React.FC<{ tabId?: string }>> = {
   dashboard: DashboardPage,
+  screener: ScreenerPage,
   chart: ChartPage,
   options: OptionsPage,
   backtest: BacktestPage,
@@ -35,7 +37,7 @@ const CONNECTION_LABELS: Record<string, string> = {
 export default function Dashboard() {
   const { session } = useAuth();
   const { tabs, activeTabId } = useTabs();
-  const { status, port, clientId, connectionType, sidecarStatus } = useTws();
+  const { status, port, clientId, connectionType, sidecarStatus, finnhubStatus } = useTws();
   const { isMac } = usePlatform();
 
   // Derive active data provider for status bar
@@ -178,6 +180,33 @@ export default function Dashboard() {
                 : status === "probing"
                   ? "Probing..."
                   : "Disconnected"}
+            </span>
+          </div>
+          <span className="text-white/10">|</span>
+          <div className="flex items-center gap-1.5">
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                finnhubStatus === "connected"
+                  ? "bg-green"
+                  : finnhubStatus === "testing"
+                    ? "bg-amber animate-pulse"
+                    : "bg-red/60"
+              }`}
+            />
+            <span
+              className={
+                finnhubStatus === "connected"
+                  ? "text-green"
+                  : finnhubStatus === "testing"
+                    ? "text-amber"
+                    : "text-red/60"
+              }
+            >
+              {finnhubStatus === "connected"
+                ? "FINNHUB"
+                : finnhubStatus === "testing"
+                  ? "FINNHUB TESTING"
+                  : "FINNHUB OFF"}
             </span>
           </div>
           <span className="text-white/10">|</span>

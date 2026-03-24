@@ -14,7 +14,52 @@ export type ChartType = 'candlestick' | 'heikin-ashi' | 'volume-weighted' | 'bar
 export type YScaleMode = 'auto' | 'log';
 
 export type ChartBrandingMode = 'none' | 'fullLogo' | 'icon';
-export type DrawingTool = 'none' | 'trendline' | 'fibRetracement';
+export type DrawingTool = 'none' | 'trendline' | 'fibRetracement' | 'brush' | 'text';
+
+export interface DrawingAnchor {
+  barIndex: number;
+  price: number;
+}
+
+export interface BaseDrawingShape {
+  id: string;
+  locked: boolean;
+}
+
+export interface TrendlineDrawing extends BaseDrawingShape {
+  type: 'trendline';
+  start: DrawingAnchor;
+  end: DrawingAnchor;
+}
+
+export interface FibRetracementDrawing extends BaseDrawingShape {
+  type: 'fibRetracement';
+  start: DrawingAnchor;
+  end: DrawingAnchor;
+}
+
+export interface BrushDrawing extends BaseDrawingShape {
+  type: 'brush';
+  points: DrawingAnchor[];
+}
+
+export interface TextDrawing extends BaseDrawingShape {
+  type: 'text';
+  anchor: DrawingAnchor;
+  text: string;
+}
+
+export type DrawingShape =
+  | TrendlineDrawing
+  | FibRetracementDrawing
+  | BrushDrawing
+  | TextDrawing;
+
+export interface DrawingSelection {
+  id: string;
+  type: DrawingShape['type'];
+  locked: boolean;
+}
 
 export interface IndicatorMeta {
   name: string;

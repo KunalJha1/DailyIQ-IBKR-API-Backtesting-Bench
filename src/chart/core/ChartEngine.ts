@@ -1,5 +1,17 @@
-import type { OHLCVBar, ChartType, ActiveIndicator, ChartLayout, SubPaneLayout, YScaleMode, ChartBrandingMode, DrawingTool } from '../types';
-import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR } from '../constants';
+import type {
+  OHLCVBar,
+  ChartType,
+  ActiveIndicator,
+  ChartLayout,
+  SubPaneLayout,
+  YScaleMode,
+  ChartBrandingMode,
+  DrawingTool,
+  DrawingAnchor,
+  DrawingShape,
+  DrawingSelection,
+} from '../types';
+import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR, FONT_MONO_SMALL } from '../constants';
 import { DEFAULT_BARS_VISIBLE } from '../constants';
 import { Viewport } from './Viewport';
 import { Renderer } from './Renderer';
@@ -34,15 +46,6 @@ const BRANDING_ASSETS: Record<Exclude<ChartBrandingMode, 'none'>, { src: string;
 
 const brandingImageCache = new Map<string, HTMLImageElement>();
 const brandingImageFailures = new Set<string>();
-
-interface DrawingAnchor {
-  barIndex: number;
-  price: number;
-}
-
-type DrawingShape =
-  | { id: string; type: 'trendline'; start: DrawingAnchor; end: DrawingAnchor }
-  | { id: string; type: 'fibRetracement'; start: DrawingAnchor; end: DrawingAnchor };
 
 export class ChartEngine {
   private canvas: HTMLCanvasElement;
@@ -88,7 +91,17 @@ export class ChartEngine {
   private drawings: DrawingShape[] = [];
   private drawingStart: DrawingAnchor | null = null;
   private drawingCurrent: DrawingAnchor | null = null;
+  private drawingBrushPoints: DrawingAnchor[] = [];
   private drawingPointerActive = false;
+  private draggedDrawingId: string | null = null;
+  private dragMouseOrigin: DrawingAnchor | null = null;
+  private dragDrawingOriginStart: DrawingAnchor | null = null;
+  private dragDrawingOriginEnd: DrawingAnchor | null = null;
+  private dragEndpoint: 'start' | 'end' | 'whole' = 'whole';
+  private hoveredDrawingId: string | null = null;
+  private selectedDrawingId: string | null = null;
+  private _onTextPlacementRequest: ((anchor: DrawingAnchor) => void) | null = null;
+  private _onDrawingSelectionChange: ((selection: DrawingSelection | null) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -252,8 +265,60 @@ export class ChartEngine {
 
   clearDrawings() {
     this.drawings = [];
+    this.setSelectedDrawingId(null);
     this.cancelDraftDrawing();
     this.markDirty();
+  }
+
+  setOnTextPlacementRequest(cb: ((anchor: DrawingAnchor) => void) | null) {
+    this._onTextPlacementRequest = cb;
+  }
+
+  setOnDrawingSelectionChange(cb: ((selection: DrawingSelection | null) => void) | null) {
+    this._onDrawingSelectionChange = cb;
+    this.notifyDrawingSelectionChange();
+  }
+
+  addTextDrawing(anchor: DrawingAnchor, text: string) {
+    const value = text.trim();
+    if (!value) return;
+    const drawing: DrawingShape = {
+      id: `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      type: 'text',
+      anchor: { ...anchor },
+      text: value,
+      locked: false,
+    };
+    this.drawings.push(drawing);
+    this.setSelectedDrawingId(drawing.id);
+    this.markDirty();
+  }
+
+  setDrawingLocked(id: string, locked: boolean) {
+    const drawing = this.drawings.find((item) => item.id === id);
+    if (!drawing || drawing.locked === locked) return;
+    drawing.locked = locked;
+    this.notifyDrawingSelectionChange();
+    this.markDirty();
+  }
+
+  getSelectedDrawing(): DrawingSelection | null {
+    const drawing = this.selectedDrawingId
+      ? this.drawings.find((item) => item.id === this.selectedDrawingId) ?? null
+      : null;
+    if (!drawing) return null;
+    return {
+      id: drawing.id,
+      type: drawing.type,
+      locked: drawing.locked,
+    };
+  }
+
+  anchorToCanvasPoint(anchor: DrawingAnchor): { x: number; y: number } {
+    return {
+      x: this.viewport.barToPixelX(anchor.barIndex),
+      y: this.viewport.priceToPixelY(anchor.price),
+    };
   }
 
   zoomIn() {
@@ -277,6 +342,14 @@ export class ChartEngine {
   addIndicator(name: string): string {
     const meta = indicatorRegistry[name];
     if (!meta) return '';
+    if (name === 'Volume') {
+      const existing = this.activeIndicators.find((indicator) => indicator.name === 'Volume');
+      if (existing) {
+        existing.visible = true;
+        this.markDirty();
+        return existing.id;
+      }
+    }
     const id = `ind_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const paneId = meta.category === 'overlay' ? 'main' : `pane:${id}`;
     const colors: Record<string, string> = {};
@@ -550,6 +623,11 @@ export class ChartEngine {
     const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
 
     this.viewport.setRegion(0, layout.mainTop, chartAreaWidth, layout.mainHeight);
+    if (this.chartType === 'volume-weighted') {
+      this.volumeWeightedRenderer.updateViewportLayout(this.viewport, this.bars);
+    } else {
+      this.viewport.clearVariableBarLayout();
+    }
 
     // Auto-fit price (skipped if manualYScale)
     if (this.bars.length > 0) {
@@ -567,8 +645,8 @@ export class ChartEngine {
       this.scaleY.renderGrid(this.renderer, this.viewport, this.width);
       this.scaleX.renderGrid(this.renderer, this.viewport, this.bars, this.height, this.width);
 
-      // Volume bars (behind price action)
-      this.volumeRenderer.render(this.renderer, this.viewport, this.bars);
+      // Main-chart volume overlays render behind price action
+      this.renderMainVolumeOverlays();
 
       // Price action
       switch (this.chartType) {
@@ -633,6 +711,16 @@ export class ChartEngine {
     this.tooltip.render(this.renderer, this.viewport, this.crosshair.hit);
   }
 
+  private renderMainVolumeOverlays() {
+    for (const ind of this.activeIndicators) {
+      if (!ind.visible || ind.paneId !== 'main' || ind.name !== 'Volume') continue;
+      this.volumeRenderer.render(this.renderer, this.viewport, this.bars, {
+        upColor: COLORS.volumeUp,
+        downColor: COLORS.volumeDown,
+      });
+    }
+  }
+
   private computeRightOffsetBars(): number {
     if (!this.liveMode || this.stopperPx <= 0) return 0;
     const barWidth = this.viewport.barWidth;
@@ -660,7 +748,7 @@ export class ChartEngine {
     let companyLogoWidth = 0;
     let companyLogoHeight = 0;
     const companyLogoGap = 8;
-    if (this.symbolBrandingImage?.complete) {
+    if (this.symbolBrandingImage?.complete && this.symbolBrandingImage.naturalWidth > 0) {
       companyLogoWidth = Math.min(width * 0.24, 28);
       companyLogoHeight = companyLogoWidth;
     }
@@ -681,7 +769,7 @@ export class ChartEngine {
     const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
 
     for (const ind of this.activeIndicators) {
-      if (!ind.visible || ind.paneId !== 'main') continue;
+      if (!ind.visible || ind.paneId !== 'main' || ind.name === 'Volume') continue;
       this.renderIndicatorSeries(
         ind,
         (value) => this.viewport.priceToPixelY(value),
@@ -724,61 +812,155 @@ export class ChartEngine {
             type: 'trendline',
             start: this.drawingStart,
             end: this.drawingCurrent,
+            locked: false,
           }
-        : {
-            id: '__draft__',
-            type: 'fibRetracement',
-            start: this.drawingStart,
-            end: this.drawingCurrent,
-          };
+        : this.activeDrawingTool === 'fibRetracement'
+          ? {
+              id: '__draft__',
+              type: 'fibRetracement',
+              start: this.drawingStart,
+              end: this.drawingCurrent,
+              locked: false,
+            }
+          : this.activeDrawingTool === 'brush'
+            ? {
+                id: '__draft__',
+                type: 'brush',
+                points: this.drawingBrushPoints.length > 0 ? this.drawingBrushPoints : [this.drawingStart, this.drawingCurrent],
+                locked: false,
+              }
+            : {
+                id: '__draft__',
+                type: 'text',
+                anchor: this.drawingStart,
+                text: 'Text',
+                locked: false,
+              };
       this.renderDrawing(draft, true);
     }
   }
 
   private renderDrawing(drawing: DrawingShape, isDraft: boolean) {
+    const isSelected = !isDraft && drawing.id === this.selectedDrawingId;
+    const isHovered = !isDraft && drawing.id === this.hoveredDrawingId && drawing.id !== this.draggedDrawingId;
+    const isDragged = !isDraft && drawing.id === this.draggedDrawingId;
+    const isActive = isHovered || isDragged;
+    const lineAccent = isDraft ? 'rgba(96,165,250,0.7)' : isSelected ? '#F59E0B' : isActive ? '#93C5FD' : '#60A5FA';
+
     if (drawing.type === 'trendline') {
       const x1 = this.viewport.barToPixelX(drawing.start.barIndex);
       const y1 = this.viewport.priceToPixelY(drawing.start.price);
       const x2 = this.viewport.barToPixelX(drawing.end.barIndex);
       const y2 = this.viewport.priceToPixelY(drawing.end.price);
-      const color = isDraft ? 'rgba(96,165,250,0.7)' : '#60A5FA';
+      const lineWidth = isActive ? 2.5 : 2;
       if (isDraft) {
-        this.renderer.dashedLine(x1, y1, x2, y2, color, 1.5, [6, 4]);
+        this.renderer.dashedLine(x1, y1, x2, y2, lineAccent, 1.5, [6, 4]);
       } else {
-        this.renderer.line(x1, y1, x2, y2, color, 2);
+        this.renderer.line(x1, y1, x2, y2, lineAccent, lineWidth);
       }
-      this.renderer.rect(x1 - 2, y1 - 2, 4, 4, color);
-      this.renderer.rect(x2 - 2, y2 - 2, 4, 4, color);
+      const handleSize = isActive ? 5 : 3;
+      this.renderer.rect(x1 - handleSize, y1 - handleSize, handleSize * 2, handleSize * 2, lineAccent);
+      this.renderer.rect(x2 - handleSize, y2 - handleSize, handleSize * 2, handleSize * 2, lineAccent);
+      if (drawing.locked && !isDraft) {
+        this.renderer.textSmall('L', x2 + 8, y2, '#F59E0B', 'center');
+      }
+      return;
+    }
+
+    if (drawing.type === 'brush') {
+      const points = drawing.points.map((point) => {
+        const pixel = this.anchorToCanvasPoint(point);
+        return [pixel.x, pixel.y] as [number, number];
+      });
+      if (isDraft) {
+        this.renderer.dashedPolyline(points, lineAccent, 1.75, [5, 4]);
+      } else {
+        this.renderer.polyline(points, lineAccent, 2);
+      }
+      if (points.length > 0) {
+        const [x, y] = points[points.length - 1];
+        this.renderer.rect(x - 2, y - 2, 4, 4, lineAccent);
+        if (drawing.locked && !isDraft) {
+          this.renderer.textSmall('L', x + 8, y, '#F59E0B', 'center');
+        }
+      }
+      return;
+    }
+
+    if (drawing.type === 'text') {
+      const { x, y } = this.anchorToCanvasPoint(drawing.anchor);
+      this.ctx.save();
+      this.ctx.font = FONT_MONO_SMALL;
+      const width = Math.max(28, this.ctx.measureText(drawing.text).width + 10);
+      this.ctx.restore();
+      const height = 20;
+      const border = isDraft ? 'rgba(96,165,250,0.7)' : isSelected ? '#F59E0B' : '#60A5FA';
+      const fill = isDraft ? 'rgba(96,165,250,0.14)' : 'rgba(13,17,23,0.88)';
+      this.renderer.rect(x, y - height / 2, width, height, fill);
+      this.renderer.rectStroke(x, y - height / 2, width, height, border, 1);
+      this.renderer.textSmall(drawing.text, x + 5, y, drawing.locked && !isDraft ? '#FCD34D' : '#E6EDF3', 'left');
+      if (drawing.locked && !isDraft) {
+        this.renderer.textSmall('L', x + width - 7, y, '#F59E0B', 'center');
+      }
       return;
     }
 
     const startX = this.viewport.barToPixelX(drawing.start.barIndex);
     const endX = this.viewport.barToPixelX(drawing.end.barIndex);
     const left = Math.min(startX, endX);
-    const right = Math.max(startX, endX);
     const high = Math.max(drawing.start.price, drawing.end.price);
     const low = Math.min(drawing.start.price, drawing.end.price);
     const range = high - low || 1;
-    const extendRight = Math.max(this.viewport.barWidth * 8, 80);
-    const x2 = right + extendRight;
-    const fillColor = isDraft ? 'rgba(16,185,129,0.10)' : 'rgba(16,185,129,0.18)';
-    const borderColor = isDraft ? 'rgba(16,185,129,0.45)' : 'rgba(16,185,129,0.85)';
-    const levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+    const x2 = this.width - PRICE_AXIS_WIDTH;
+    // Level line colors: grey, blue, green, light-green, orange, red, grey
+    const levelColors: [number, string][] = [
+      [0,     '#9CA3AF'],
+      [0.236, '#1A56DB'],
+      [0.382, '#00C853'],
+      [0.5,   '#4ADE80'],
+      [0.618, '#F59E0B'],
+      [0.786, '#FF3D71'],
+      [1,     '#9CA3AF'],
+    ];
 
-    const topY = this.viewport.priceToPixelY(high);
-    const bottomY = this.viewport.priceToPixelY(low);
-    this.renderer.rect(left, Math.min(topY, bottomY), Math.max(2, x2 - left), Math.abs(bottomY - topY), fillColor);
-    this.renderer.rectStroke(left, Math.min(topY, bottomY), Math.max(2, x2 - left), Math.abs(bottomY - topY), borderColor, 1);
+    // Draw per-zone fills — each band filled with the upper level's color
+    for (let i = 0; i < levelColors.length - 1; i++) {
+      const [topLevel, zoneColor] = levelColors[i];
+      const [bottomLevel] = levelColors[i + 1];
+      const priceTop = high - range * topLevel;
+      const priceBot = high - range * bottomLevel;
+      const yTop = this.viewport.priceToPixelY(priceTop);
+      const yBot = this.viewport.priceToPixelY(priceBot);
+      const hr = parseInt(zoneColor.slice(1, 3), 16);
+      const hg = parseInt(zoneColor.slice(3, 5), 16);
+      const hb = parseInt(zoneColor.slice(5, 7), 16);
+      const alpha = isDraft ? 0.06 : isActive ? 0.18 : 0.12;
+      this.renderer.rect(left, Math.min(yTop, yBot), Math.max(2, x2 - left), Math.abs(yBot - yTop), `rgba(${hr},${hg},${hb},${alpha})`);
+    }
 
-    for (const level of levels) {
-      const price = high - (range * level);
+    for (const [level, hex] of levelColors) {
+      const price = high - range * level;
       const y = this.viewport.priceToPixelY(price);
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      const lineColor = isDraft ? `rgba(${r},${g},${b},0.5)` : hex;
+      const lw = level === 0 || level === 1 ? 1.25 : 1;
       if (isDraft) {
-        this.renderer.dashedLine(left, y, x2, y, borderColor, level === 0 || level === 1 ? 1.25 : 1, [4, 4]);
+        this.renderer.dashedLine(left, y, x2, y, lineColor, lw, [4, 4]);
       } else {
-        this.renderer.line(left, y, x2, y, borderColor, level === 0 || level === 1 ? 1.25 : 1);
+        this.renderer.line(left, y, x2, y, lineColor, isActive ? lw + 0.75 : lw);
       }
-      this.renderer.textSmall(level.toFixed(3), x2 - 6, y - 8, borderColor, 'right');
+      this.renderer.textSmall(level.toFixed(3), x2 - 6, y - 8, lineColor, 'right');
+    }
+    // Anchor handles for fib when hovered/dragged
+    if (isActive) {
+      const sx = this.viewport.barToPixelX(drawing.start.barIndex);
+      const sy = this.viewport.priceToPixelY(drawing.start.price);
+      const ex = this.viewport.barToPixelX(drawing.end.barIndex);
+      const ey = this.viewport.priceToPixelY(drawing.end.price);
+      this.renderer.rect(sx - 5, sy - 5, 10, 10, '#9CA3AF');
+      this.renderer.rect(ex - 5, ey - 5, 10, 10, '#9CA3AF');
     }
   }
 
@@ -807,9 +989,118 @@ export class ChartEngine {
     };
   }
 
+  private distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  }
+
+  private isNearDrawing(drawing: DrawingShape, mx: number, my: number): boolean {
+    if (drawing.type === 'trendline') {
+      const x1 = this.viewport.barToPixelX(drawing.start.barIndex);
+      const y1 = this.viewport.priceToPixelY(drawing.start.price);
+      const x2 = this.viewport.barToPixelX(drawing.end.barIndex);
+      const y2 = this.viewport.priceToPixelY(drawing.end.price);
+      return this.distToSegment(mx, my, x1, y1, x2, y2) < 8;
+    }
+    if (drawing.type === 'brush') {
+      const points = drawing.points.map((point) => this.anchorToCanvasPoint(point));
+      if (points.length === 1) {
+        return Math.hypot(mx - points[0].x, my - points[0].y) < 8;
+      }
+      for (let i = 1; i < points.length; i++) {
+        if (this.distToSegment(mx, my, points[i - 1].x, points[i - 1].y, points[i].x, points[i].y) < 8) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (drawing.type === 'text') {
+      const { x, y } = this.anchorToCanvasPoint(drawing.anchor);
+      this.ctx.save();
+      this.ctx.font = FONT_MONO_SMALL;
+      const width = Math.max(28, this.ctx.measureText(drawing.text).width + 10);
+      this.ctx.restore();
+      const height = 20;
+      return mx >= x && mx <= x + width && my >= y - height / 2 && my <= y + height / 2;
+    }
+    // fibRetracement
+    const startX = this.viewport.barToPixelX(drawing.start.barIndex);
+    const endX = this.viewport.barToPixelX(drawing.end.barIndex);
+    const left = Math.min(startX, endX);
+    const high = Math.max(drawing.start.price, drawing.end.price);
+    const low = Math.min(drawing.start.price, drawing.end.price);
+    const topY = this.viewport.priceToPixelY(high);
+    const bottomY = this.viewport.priceToPixelY(low);
+    const x2 = this.width - PRICE_AXIS_WIDTH;
+    return mx >= left && mx <= x2 && my >= Math.min(topY, bottomY) && my <= Math.max(topY, bottomY);
+  }
+
+  private hitTestDrawing(mx: number, my: number): DrawingShape | null {
+    for (let i = this.drawings.length - 1; i >= 0; i--) {
+      if (this.isNearDrawing(this.drawings[i], mx, my)) return this.drawings[i];
+    }
+    return null;
+  }
+
+  private hitTestDrawingEndpoint(
+    mx: number,
+    my: number,
+  ): { drawing: Extract<DrawingShape, { start: DrawingAnchor; end: DrawingAnchor }>; endpoint: 'start' | 'end' } | null {
+    const HANDLE_RADIUS = 10;
+    for (let i = this.drawings.length - 1; i >= 0; i--) {
+      const d = this.drawings[i];
+      if (d.type !== 'trendline' && d.type !== 'fibRetracement') continue;
+      const sx = this.viewport.barToPixelX(d.start.barIndex);
+      const sy = this.viewport.priceToPixelY(d.start.price);
+      const ex = this.viewport.barToPixelX(d.end.barIndex);
+      const ey = this.viewport.priceToPixelY(d.end.price);
+      if (Math.hypot(mx - sx, my - sy) <= HANDLE_RADIUS) return { drawing: d, endpoint: 'start' };
+      if (Math.hypot(mx - ex, my - ey) <= HANDLE_RADIUS) return { drawing: d, endpoint: 'end' };
+    }
+    return null;
+  }
+
+  getHoveredDrawingId(): string | null {
+    return this.hoveredDrawingId;
+  }
+
+  private createDrawingSelection(drawing: DrawingShape): DrawingSelection {
+    return {
+      id: drawing.id,
+      type: drawing.type,
+      locked: drawing.locked,
+    };
+  }
+
+  private notifyDrawingSelectionChange() {
+    if (!this._onDrawingSelectionChange) return;
+    const selection = this.selectedDrawingId
+      ? this.drawings.find((item) => item.id === this.selectedDrawingId) ?? null
+      : null;
+    this._onDrawingSelectionChange(selection ? this.createDrawingSelection(selection) : null);
+  }
+
+  private setSelectedDrawingId(id: string | null) {
+    if (this.selectedDrawingId === id) return;
+    this.selectedDrawingId = id;
+    this.notifyDrawingSelectionChange();
+  }
+
+  private translateAnchor(anchor: DrawingAnchor, dBar: number, dPrice: number): DrawingAnchor {
+    return {
+      barIndex: Math.max(0, Math.min(this.bars.length - 1, anchor.barIndex + dBar)),
+      price: anchor.price + dPrice,
+    };
+  }
+
   private cancelDraftDrawing() {
     this.drawingStart = null;
     this.drawingCurrent = null;
+    this.drawingBrushPoints = [];
     this.drawingPointerActive = false;
   }
 
@@ -834,7 +1125,22 @@ export class ChartEngine {
       .filter((indicator): indicator is ActiveIndicator => !!indicator);
     if (indicators.length === 0) return;
 
-    const ranges = indicators
+    const volumeIndicators = indicators.filter((indicator) => indicator.name === 'Volume');
+    const nonVolumeIndicators = indicators.filter((indicator) => indicator.name !== 'Volume');
+
+    if (volumeIndicators.length > 0) {
+      this.renderer.clip(0, pane.top, chartAreaWidth, pane.height, () => {
+        this.volumeRenderer.render(this.renderer, this.viewport, this.bars, {
+          top: pane.top,
+          height: pane.height,
+          upColor: 'rgba(0,200,83,0.45)',
+          downColor: 'rgba(255,61,113,0.45)',
+          widthRatio: 0.82,
+        });
+      });
+    }
+
+    const ranges = nonVolumeIndicators
       .map((ind) => {
         const meta = indicatorRegistry[ind.name];
         if (!meta) return null;
@@ -853,7 +1159,10 @@ export class ChartEngine {
           }
         }
 
-        if (!isFinite(min) || !isFinite(max)) {
+        if (ind.name === 'Volume') {
+          min = 0;
+          max = Math.max(max, 1) * 1.1;
+        } else if (!isFinite(min) || !isFinite(max)) {
           min = 0;
           max = 100;
         } else {
@@ -865,7 +1174,12 @@ export class ChartEngine {
       })
       .filter((entry): entry is { ind: ActiveIndicator; meta: typeof indicatorRegistry[string]; min: number; max: number } => !!entry);
 
-    if (ranges.length === 0) return;
+    if (ranges.length === 0) {
+      if (volumeIndicators.length > 0) {
+        this.renderer.textSmall('Vol', 4, pane.top + 12, COLORS.textMuted, 'left');
+      }
+      return;
+    }
 
     const primary = ranges[0];
     this.scaleY.renderSubPane(this.renderer, pane.top, pane.height, primary.min, primary.max, this.width);
@@ -984,11 +1298,14 @@ export class ChartEngine {
       }
 
       if (output.style === 'histogram') {
+        if (ind.name === 'Volume') {
+          continue;
+        }
         const zeroY = toY(0);
-        const barW = Math.max(1, this.viewport.barWidth * 0.6);
         for (let i = start; i < end; i++) {
           if (i >= series.length || isNaN(series[i])) continue;
           const x = this.viewport.barToPixelX(i);
+          const barW = Math.max(1, Math.min(this.viewport.getBarSlotWidth(i) * 0.6, this.viewport.getBarSlotWidth(i) - 1));
           const y = toY(series[i]);
           const color = series[i] >= 0 ? COLORS.green : COLORS.red;
           this.renderer.rect(x - barW / 2, Math.min(y, zeroY), barW, Math.abs(y - zeroY), color);
@@ -1184,12 +1501,54 @@ export class ChartEngine {
 
   private onMouseDown = (e: MouseEvent) => {
     const { mx, my } = this.getCanvasPoint(e);
+    if (e.button !== 0) return;
     if (this.activeDrawingTool !== 'none' && this.isInMainChart(mx, my) && !this.viewport.isInPriceAxis(mx, this.width, PRICE_AXIS_WIDTH)) {
       this.drawingStart = this.anchorFromMouse(mx, my);
       this.drawingCurrent = this.drawingStart;
+      this.drawingBrushPoints = this.activeDrawingTool === 'brush' ? [this.drawingStart] : [];
       this.drawingPointerActive = true;
+      this.setSelectedDrawingId(null);
       this.markDirty();
       return;
+    }
+    if (this.activeDrawingTool === 'none') {
+      // Check endpoint handles first (higher priority than whole-drawing drag)
+      const endpointHit = this.hitTestDrawingEndpoint(mx, my);
+      if (endpointHit && !endpointHit.drawing.locked) {
+        this.setSelectedDrawingId(endpointHit.drawing.id);
+        this.draggedDrawingId = endpointHit.drawing.id;
+        this.dragMouseOrigin = this.anchorFromMouse(mx, my);
+        this.dragDrawingOriginStart = { ...endpointHit.drawing.start };
+        this.dragDrawingOriginEnd = { ...endpointHit.drawing.end };
+        this.dragEndpoint = endpointHit.endpoint;
+        this.markDirty();
+        return;
+      }
+      const hit = this.hitTestDrawing(mx, my);
+      if (hit) {
+        this.setSelectedDrawingId(hit.id);
+        if (!hit.locked) {
+          this.draggedDrawingId = hit.id;
+          this.dragMouseOrigin = this.anchorFromMouse(mx, my);
+          if (hit.type === 'trendline' || hit.type === 'fibRetracement') {
+            this.dragDrawingOriginStart = { ...hit.start };
+            this.dragDrawingOriginEnd = { ...hit.end };
+          } else if (hit.type === 'text') {
+            this.dragDrawingOriginStart = { ...hit.anchor };
+            this.dragDrawingOriginEnd = { ...hit.anchor };
+          } else if (hit.points.length > 0) {
+            this.dragDrawingOriginStart = { ...hit.points[0] };
+            this.dragDrawingOriginEnd = { ...hit.points[hit.points.length - 1] };
+          } else {
+            this.dragDrawingOriginStart = null;
+            this.dragDrawingOriginEnd = null;
+          }
+          this.dragEndpoint = 'whole';
+        }
+        this.markDirty();
+        return;
+      }
+      this.setSelectedDrawingId(null);
     }
     this.panZoom.onMouseDown(e);
   };
@@ -1199,6 +1558,12 @@ export class ChartEngine {
 
     if (this.drawingPointerActive && this.drawingStart) {
       this.drawingCurrent = this.anchorFromMouse(mx, my);
+      if (this.activeDrawingTool === 'brush') {
+        const lastPoint = this.drawingBrushPoints[this.drawingBrushPoints.length - 1];
+        if (!lastPoint || lastPoint.barIndex !== this.drawingCurrent.barIndex || Math.abs(lastPoint.price - this.drawingCurrent.price) > 0.0001) {
+          this.drawingBrushPoints.push(this.drawingCurrent);
+        }
+      }
       const hit = this.hitTest.test(this.viewport, this.bars, mx, my);
       this.crosshair.visible = hit.inChart;
       this.crosshair.hit = hit;
@@ -1206,7 +1571,57 @@ export class ChartEngine {
       return;
     }
 
+    if (this.draggedDrawingId && this.dragMouseOrigin && this.dragDrawingOriginStart && this.dragDrawingOriginEnd) {
+      const cur = this.anchorFromMouse(mx, my);
+      const dBar = cur.barIndex - this.dragMouseOrigin.barIndex;
+      const dPrice = cur.price - this.dragMouseOrigin.price;
+      const idx = this.drawings.findIndex(d => d.id === this.draggedDrawingId);
+      if (idx !== -1) {
+        const drawing = this.drawings[idx];
+        if (drawing.type === 'text') {
+          this.drawings[idx] = {
+            ...drawing,
+            anchor: this.translateAnchor(this.dragDrawingOriginStart!, dBar, dPrice),
+          };
+        } else if (drawing.type === 'brush') {
+          this.drawings[idx] = {
+            ...drawing,
+            points: drawing.points.map((point) => this.translateAnchor(point, dBar, dPrice)),
+          };
+          this.dragMouseOrigin = cur;
+        } else if (this.dragEndpoint === 'start') {
+          this.drawings[idx] = {
+            ...drawing,
+            start: { barIndex: this.dragDrawingOriginStart.barIndex + dBar, price: this.dragDrawingOriginStart.price + dPrice },
+          };
+        } else if (this.dragEndpoint === 'end') {
+          this.drawings[idx] = {
+            ...drawing,
+            end: { barIndex: this.dragDrawingOriginEnd.barIndex + dBar, price: this.dragDrawingOriginEnd.price + dPrice },
+          };
+        } else {
+          this.drawings[idx] = {
+            ...drawing,
+            start: { barIndex: this.dragDrawingOriginStart.barIndex + dBar, price: this.dragDrawingOriginStart.price + dPrice },
+            end:   { barIndex: this.dragDrawingOriginEnd.barIndex   + dBar, price: this.dragDrawingOriginEnd.price   + dPrice },
+          };
+        }
+      }
+      this.markDirty();
+      return;
+    }
+
     this.panZoom.onMouseMove(e, rect);
+
+    // Update hover state for drawings (when no tool active and not dragging)
+    if (this.activeDrawingTool === 'none') {
+      const hovered = this.hitTestDrawing(mx, my);
+      const newHoveredId = hovered?.id ?? null;
+      if (newHoveredId !== this.hoveredDrawingId) {
+        this.hoveredDrawingId = newHoveredId;
+        this.markDirty();
+      }
+    }
 
     // Crosshair
     const hit = this.hitTest.test(this.viewport, this.bars, mx, my);
@@ -1220,33 +1635,73 @@ export class ChartEngine {
       const start = this.drawingStart;
       const end = this.drawingCurrent;
       const movedEnough = Math.abs(end.barIndex - start.barIndex) >= 1 || Math.abs(end.price - start.price) > 0.0001;
-      if (movedEnough) {
+      let createdDrawingId: string | null = null;
+      if (this.activeDrawingTool === 'text') {
+        this._onTextPlacementRequest?.(start);
+      } else if (this.activeDrawingTool === 'brush') {
+        if (this.drawingBrushPoints.length >= 2) {
+          createdDrawingId = `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          this.drawings.push({
+            id: createdDrawingId,
+            type: 'brush',
+            points: this.drawingBrushPoints.map((point) => ({ ...point })),
+            locked: false,
+          });
+        }
+      } else if (movedEnough) {
+        createdDrawingId = `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         this.drawings.push(
           this.activeDrawingTool === 'trendline'
             ? {
-                id: `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                id: createdDrawingId,
                 type: 'trendline',
                 start,
                 end,
+                locked: false,
               }
             : {
-                id: `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                id: createdDrawingId,
                 type: 'fibRetracement',
                 start,
                 end,
+                locked: false,
               },
         );
       }
+      if (createdDrawingId) this.setSelectedDrawingId(createdDrawingId);
       this.cancelDraftDrawing();
       this.markDirty();
+      return;
+    }
+    if (this.draggedDrawingId) {
+      this.draggedDrawingId = null;
+      this.dragMouseOrigin = null;
+      this.dragDrawingOriginStart = null;
+      this.dragDrawingOriginEnd = null;
+      this.dragEndpoint = 'whole';
       return;
     }
     this.panZoom.onMouseUp(e);
   };
 
+  private onContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    const { mx, my } = this.getCanvasPoint(e);
+    const hit = this.hitTestDrawing(mx, my);
+    if (hit && !hit.locked) {
+      this.drawings = this.drawings.filter(d => d.id !== hit.id);
+      if (this.selectedDrawingId === hit.id) this.setSelectedDrawingId(null);
+      this.markDirty();
+    } else if (hit) {
+      this.setSelectedDrawingId(hit.id);
+      this.markDirty();
+    }
+  };
+
   private onMouseLeave = () => {
     this.crosshair.visible = false;
     this.crosshair.hit = null;
+    this.hoveredDrawingId = null;
     this.markDirty();
   };
 
@@ -1265,6 +1720,7 @@ export class ChartEngine {
     this.canvas.addEventListener('mouseleave', this.onMouseLeave);
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     this.canvas.addEventListener('dblclick', this.onDoubleClick);
+    this.canvas.addEventListener('contextmenu', this.onContextMenu);
   }
 
   private unbindEvents() {
@@ -1274,5 +1730,6 @@ export class ChartEngine {
     this.canvas.removeEventListener('mouseleave', this.onMouseLeave);
     this.canvas.removeEventListener('wheel', this.onWheel);
     this.canvas.removeEventListener('dblclick', this.onDoubleClick);
+    this.canvas.removeEventListener('contextmenu', this.onContextMenu);
   }
 }

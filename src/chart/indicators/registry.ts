@@ -455,14 +455,23 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
 
   'Technical Score': {
     name: 'DailyIQ Technical Score',
-    shortName: 'DIQ Score',
+    shortName: 'DailyIQ Score',
     category: 'oscillator',
     defaultParams: {},
     paramLabels: {},
     outputs: [
-      { key: 'score', label: 'Score', color: C[0], style: 'line', lineWidth: 1.5 },
-      { key: 'buy', label: 'BUY', color: C[3], style: 'markers' },
-      { key: 'sell', label: 'SELL', color: C[4], style: 'markers' },
+      { key: 'score', label: 'Score', color: '#FFFFFF', style: 'line', lineWidth: 1.5 },
+    ],
+  },
+
+  Volume: {
+    name: 'Volume',
+    shortName: 'Vol',
+    category: 'volume',
+    defaultParams: {},
+    paramLabels: {},
+    outputs: [
+      { key: 'volume', label: 'Volume', color: C[5], style: 'histogram' },
     ],
   },
 

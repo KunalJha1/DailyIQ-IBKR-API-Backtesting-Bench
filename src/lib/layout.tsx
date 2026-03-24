@@ -17,6 +17,7 @@ import {
   loadWorkspaceFromPath,
   saveWorkspaceToLocalStorage,
 } from "./layout-storage";
+import { isTauriRuntime } from "./platform";
 
 interface LayoutContextValue {
   workspace: WorkspaceFile | null;
@@ -112,6 +113,8 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
 
   // Flush save on window close
   useEffect(() => {
+    if (!isTauriRuntime()) return;
+
     const unlisten = appWindow.onCloseRequested(async () => {
       if (workspaceRef.current) {
         await saveWorkspace(workspaceRef.current);

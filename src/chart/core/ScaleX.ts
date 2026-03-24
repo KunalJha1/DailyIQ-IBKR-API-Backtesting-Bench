@@ -31,7 +31,7 @@ export class ScaleX {
       if (x < viewport.chartLeft || x > priceAxisX) continue;
 
       const label = this.formatTime(bars[i].time);
-      renderer.textSmall(label, x, axisTop + TIME_AXIS_HEIGHT / 2, COLORS.textMuted, 'center');
+      renderer.textSmall(label, x, axisTop + TIME_AXIS_HEIGHT / 2, COLORS.textPrimary, 'center');
     }
   }
 

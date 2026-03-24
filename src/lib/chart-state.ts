@@ -24,6 +24,18 @@ export interface ChartState {
 
 const KEY_PREFIX = "chart-state:";
 
+export function createDefaultPersistedChartIndicators(): PersistedChartIndicator[] {
+  return [{
+    name: "Volume",
+    paneId: "main",
+    params: {},
+    colors: {},
+    lineWidths: {},
+    lineStyles: {},
+    visible: true,
+  }];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -102,13 +114,14 @@ export function loadChartState(tabId: string): ChartState | null {
       chartType?: string;
       indicators?: unknown;
     };
+    const hasIndicators = Object.prototype.hasOwnProperty.call(parsed, "indicators");
     return {
       symbol: typeof parsed.symbol === "string" ? parsed.symbol : "AAPL",
       timeframe: (typeof parsed.timeframe === "string" ? parsed.timeframe : "1D") as Timeframe,
       chartType: (typeof parsed.chartType === "string" ? parsed.chartType : "candlestick") as ChartType,
       linkChannel: typeof parsed.linkChannel === "number" ? parsed.linkChannel : null,
-      indicators: parseIndicators(parsed.indicators),
-      stopperPx: typeof parsed.stopperPx === "number" ? parsed.stopperPx : 80,
+      indicators: hasIndicators ? parseIndicators(parsed.indicators) : createDefaultPersistedChartIndicators(),
+      stopperPx: typeof parsed.stopperPx === "number" ? parsed.stopperPx : 40,
       indicatorColorDefaults:
         parsed.indicatorColorDefaults && typeof parsed.indicatorColorDefaults === "object"
           ? (parsed.indicatorColorDefaults as Record<string, Record<string, string>>)

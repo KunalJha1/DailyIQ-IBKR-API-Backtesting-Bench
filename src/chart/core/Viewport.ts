@@ -6,7 +6,7 @@ import {
 import type { YScaleMode } from '../types';
 
 // How many bars of empty space to allow scrolling past the right edge
-const FRONT_MARGIN_BARS = 50;
+const FRONT_MARGIN_BARS = 25;
 
 export class Viewport {
   startIndex: number = 0;
@@ -30,6 +30,9 @@ export class Viewport {
   manualYScale: boolean = false;
   private yScaleAnchorY: number = 0;
   private yScaleDragging: boolean = false;
+  private variableBarLayoutStart: number = 0;
+  private variableBarLayoutLefts: Float64Array = new Float64Array(0);
+  private variableBarLayoutWidths: Float64Array = new Float64Array(0);
 
   get barWidth(): number {
     if (this.barsVisible === 0) return 0;
@@ -48,12 +51,31 @@ export class Viewport {
     this.chartHeight = height;
   }
 
+  setVariableBarLayout(startIndex: number, lefts: Float64Array, widths: Float64Array) {
+    this.variableBarLayoutStart = startIndex;
+    this.variableBarLayoutLefts = lefts;
+    this.variableBarLayoutWidths = widths;
+  }
+
+  clearVariableBarLayout() {
+    this.variableBarLayoutStart = 0;
+    this.variableBarLayoutLefts = new Float64Array(0);
+    this.variableBarLayoutWidths = new Float64Array(0);
+  }
+
+  getBarSlotWidth(index: number): number {
+    const slot = this.getVariableBarSlot(index);
+    return slot ? slot.width : this.barWidth;
+  }
+
   setTotalBars(total: number) {
     this.totalBars = total;
     // On first load, scroll to end
     if (this.startIndex === 0 && total > 0) {
       this.scrollToEnd();
+      return;
     }
+    this.startIndex = this.clampStart(this.startIndex);
   }
 
   setRightOffsetBars(bars: number) {
@@ -83,13 +105,23 @@ export class Viewport {
 
   pan(pixelDelta: number) {
     if (this.barWidth === 0) return;
+    if (this.variableBarLayoutWidths.length > 0) {
+      const anchorPx = this.chartLeft + this.chartWidth / 2;
+      const currentBar = this.pixelXToBar(anchorPx);
+      const shiftedBar = this.pixelXToBar(anchorPx - pixelDelta);
+      const barDelta = shiftedBar - currentBar;
+      if (!Number.isFinite(barDelta)) return;
+      this.startIndex = this.clampStart(this.startIndex + barDelta);
+      return;
+    }
     const barDelta = pixelDelta / this.barWidth;
     this.startIndex = this.clampStart(this.startIndex - barDelta);
   }
 
   zoom(delta: number, anchorPixelX: number) {
+    if (this.chartWidth <= 0) return;
     const anchorRatio = (anchorPixelX - this.chartLeft) / this.chartWidth;
-    const anchorBar = this.startIndex + this.barsVisible * anchorRatio;
+    const anchorBar = this.pixelXToBar(anchorPixelX);
 
     const zoomFactor = delta > 0 ? 0.9 : 1.1;
     const newBarsVisible = Math.round(
@@ -201,6 +233,26 @@ export class Viewport {
 
   /** Convert bar index to pixel X (center of bar). */
   barToPixelX(index: number): number {
+    const slot = this.getVariableBarSlot(index);
+    if (slot) {
+      return slot.left + slot.width / 2;
+    }
+
+    if (this.variableBarLayoutWidths.length > 0) {
+      const lower = Math.floor(index);
+      const upper = Math.ceil(index);
+      if (lower !== upper) {
+        const lowerSlot = this.getVariableBarSlot(lower);
+        const upperSlot = this.getVariableBarSlot(upper);
+        if (lowerSlot && upperSlot) {
+          const frac = index - lower;
+          const lowerCenter = lowerSlot.left + lowerSlot.width / 2;
+          const upperCenter = upperSlot.left + upperSlot.width / 2;
+          return lowerCenter + (upperCenter - lowerCenter) * frac;
+        }
+      }
+    }
+
     return this.chartLeft + (index - this.startIndex) * this.barWidth + this.barWidth / 2;
   }
 
@@ -226,6 +278,39 @@ export class Viewport {
 
   /** Convert pixel X to bar index. */
   pixelXToBar(px: number): number {
+    const count = this.variableBarLayoutWidths.length;
+    if (count > 0) {
+      const firstLeft = this.variableBarLayoutLefts[0];
+      const lastIndex = count - 1;
+      const lastLeft = this.variableBarLayoutLefts[lastIndex];
+      const lastWidth = this.variableBarLayoutWidths[lastIndex];
+
+      if (px <= firstLeft) {
+        const firstWidth = this.variableBarLayoutWidths[0] || this.barWidth || 1;
+        return this.variableBarLayoutStart + (px - firstLeft) / firstWidth;
+      }
+      if (px >= lastLeft + lastWidth) {
+        const width = lastWidth || this.barWidth || 1;
+        return this.variableBarLayoutStart + lastIndex + 1 + (px - (lastLeft + lastWidth)) / width;
+      }
+
+      let lo = 0;
+      let hi = lastIndex;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const left = this.variableBarLayoutLefts[mid];
+        const right = left + this.variableBarLayoutWidths[mid];
+        if (px < left) {
+          hi = mid - 1;
+        } else if (px > right) {
+          lo = mid + 1;
+        } else {
+          const width = this.variableBarLayoutWidths[mid] || 1;
+          return this.variableBarLayoutStart + mid + (px - left) / width;
+        }
+      }
+    }
+
     return this.startIndex + (px - this.chartLeft) / this.barWidth;
   }
 
@@ -251,8 +336,16 @@ export class Viewport {
   }
 
   private clampStart(v: number): number {
-    // Allow scrolling past the right edge by FRONT_MARGIN_BARS
-    const maxStart = this.getMaxStart();
-    return Math.max(0, Math.min(maxStart, v));
+    return Math.max(0, Math.min(this.getMaxStart(), v));
+  }
+
+  private getVariableBarSlot(index: number): { left: number; width: number } | null {
+    if (!Number.isInteger(index) || this.variableBarLayoutWidths.length === 0) return null;
+    const offset = index - this.variableBarLayoutStart;
+    if (offset < 0 || offset >= this.variableBarLayoutWidths.length) return null;
+    return {
+      left: this.variableBarLayoutLefts[offset],
+      width: this.variableBarLayoutWidths[offset],
+    };
   }
 }

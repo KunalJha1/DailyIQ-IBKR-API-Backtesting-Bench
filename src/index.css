@@ -71,32 +71,29 @@
 
 .scrollbar-watchlist {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.2) #161B22;
 }
 
 .scrollbar-watchlist::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-track {
-  background: transparent;
+  background: #161B22;
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.16);
-  background-clip: padding-box;
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
-  background-clip: padding-box;
+  background: rgba(255, 255, 255, 0.35);
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-corner {
-  background: transparent;
+  background: #161B22;
 }
 
 * {

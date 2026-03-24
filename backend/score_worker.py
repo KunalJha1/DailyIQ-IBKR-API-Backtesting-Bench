@@ -113,7 +113,15 @@ class TechnicalsScorer:
         self._task: asyncio.Task | None = None
 
     def set_symbols(self, symbols: list[str]) -> None:
-        self._symbols = list(symbols)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in symbols:
+            sym = (raw or "").strip().upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            normalized.append(sym)
+        self._symbols = normalized
 
     def start(self) -> None:
         if self._task is None or self._task.done():

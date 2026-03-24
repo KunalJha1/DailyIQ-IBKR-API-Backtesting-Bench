@@ -316,25 +316,55 @@ fn bundled_env(app_handle: &AppHandle) -> Result<HashMap<String, String>, String
     Ok(env)
 }
 
-fn spawn_dev_python(script_path: &PathBuf, extra_args: &[String]) -> Result<ManagedChild, String> {
+fn spawn_dev_python(
+    app_handle: &AppHandle,
+    script_path: &PathBuf,
+    extra_args: &[String],
+) -> Result<ManagedChild, String> {
     let mut args = vec![script_path.to_string_lossy().to_string()];
     args.extend(extra_args.iter().cloned());
     let cwd = script_path
         .parent()
         .and_then(|p| p.parent())
         .ok_or_else(|| format!("Failed to resolve working directory for {}", script_path.display()))?;
+    let app_data = app_data_dir(app_handle)?;
 
-    let child = Command::new("python3")
-        .args(&args)
-        .current_dir(cwd)
-        .spawn()
-        .or_else(|_| {
-            Command::new("python")
-                .args(&args)
-                .current_dir(cwd)
-                .spawn()
-        })
-        .map_err(|e| format!("Failed to spawn Python process: {}", e))?;
+    // Prefer the uv-managed venv Python if it exists (avoids Windows App Execution Alias)
+    let venv_python = if cfg!(target_os = "windows") {
+        cwd.join("backend").join(".venv").join("Scripts").join("python.exe")
+    } else {
+        cwd.join("backend").join(".venv").join("bin").join("python")
+    };
+
+    let child = if venv_python.exists() {
+        Command::new(&venv_python)
+            .args(&args)
+            .current_dir(cwd)
+            .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn venv Python: {}", e))?
+    } else {
+        Command::new("python3")
+            .args(&args)
+            .current_dir(cwd)
+            .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+            .spawn()
+            .or_else(|_| {
+                Command::new("python")
+                    .args(&args)
+                    .current_dir(cwd)
+                    .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+                    .spawn()
+            })
+            .or_else(|_| {
+                Command::new("py")
+                    .args(&args)
+                    .current_dir(cwd)
+                    .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+                    .spawn()
+            })
+            .map_err(|e| format!("Failed to spawn Python process: {}", e))?
+    };
 
     Ok(ManagedChild::System(child))
 }
@@ -372,7 +402,7 @@ fn do_spawn_sidecar(app_handle: &AppHandle, state: &SidecarState) -> Result<u16,
 
     let args = vec!["--port".to_string(), sidecar_port.to_string()];
     let child = if let Some(script_path) = find_backend_script() {
-        spawn_dev_python(&script_path, &args)?
+        spawn_dev_python(app_handle, &script_path, &args)?
     } else {
         spawn_bundled_sidecar(app_handle, "dailyiq-sidecar", &args)?
     };
@@ -420,7 +450,7 @@ fn do_spawn_worker(app_handle: &AppHandle, state: &SidecarState) -> Result<(), S
     }
 
     let child = if let Some(script_path) = find_worker_script() {
-        spawn_dev_python(&script_path, &args)?
+        spawn_dev_python(app_handle, &script_path, &args)?
     } else {
         spawn_bundled_sidecar(app_handle, "dailyiq-worker", &args)?
     };

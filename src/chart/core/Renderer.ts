@@ -124,6 +124,7 @@ export class Renderer {
   }
 
   image(image: CanvasImageSource, x: number, y: number, w: number, h: number, opacity: number = 1) {
+    if (image instanceof HTMLImageElement && (!image.complete || image.naturalWidth === 0)) return;
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = opacity;

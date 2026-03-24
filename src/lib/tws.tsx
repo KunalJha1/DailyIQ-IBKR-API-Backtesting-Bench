@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useCallback,
+  useMemo,
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
@@ -22,10 +23,26 @@ type TwsConnectionType =
   | "gateway-paper";
 
 type SidecarStatus = "connected" | "disconnected";
+type FinnhubStatus = "connected" | "disconnected" | "testing";
 
 interface ProbeResult {
   port: number;
   connection_type: TwsConnectionType;
+}
+
+interface FinnhubStatusResponse {
+  status: FinnhubStatus;
+  message: string;
+  hasKey: boolean;
+  validatedAt: number | null;
+}
+
+interface FinnhubValidateResponse {
+  ok: boolean;
+  status: FinnhubStatus;
+  message: string;
+  hasKey: boolean;
+  validatedAt: number | null;
 }
 
 interface TwsContextValue {
@@ -38,6 +55,11 @@ interface TwsContextValue {
   probe: () => Promise<void>;
   sidecarPort: number | null;
   sidecarStatus: SidecarStatus;
+  reloadSettings: () => Promise<void>;
+  finnhubStatus: FinnhubStatus;
+  finnhubMessage: string;
+  finnhubHasKey: boolean;
+  validateFinnhubKey: (apiKey: string) => Promise<FinnhubValidateResponse>;
 }
 
 const TwsContext = createContext<TwsContextValue | null>(null);
@@ -59,6 +81,9 @@ export function TwsProvider({ children }: { children: ReactNode }) {
     accountId: "",
     clientId: 0,
     autoProbe: true,
+    finnhubApiKey: "",
+    playbookMemory: "",
+    playbookMemoryEnabled: false,
   });
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -67,6 +92,15 @@ export function TwsProvider({ children }: { children: ReactNode }) {
   const [sidecarPort, setSidecarPort] = useState<number | null>(null);
   const [sidecarStatus, setSidecarStatus] =
     useState<SidecarStatus>("disconnected");
+  const [finnhubStatus, setFinnhubStatus] = useState<FinnhubStatus>("disconnected");
+  const [finnhubMessage, setFinnhubMessage] = useState("No API key saved");
+  const [finnhubHasKey, setFinnhubHasKey] = useState(false);
+
+  const reloadSettings = useCallback(async () => {
+    const loaded = await loadTwsSettings();
+    setSettings(loaded);
+    settingsRef.current = loaded;
+  }, []);
 
   const probe = useCallback(async () => {
     setStatus("probing");
@@ -91,12 +125,10 @@ export function TwsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
-    loadTwsSettings().then((loaded) => {
-      setSettings(loaded);
-      settingsRef.current = loaded;
+    reloadSettings().then(() => {
       probe();
     });
-  }, [probe]);
+  }, [probe, reloadSettings]);
 
   const refreshSidecarPort = useCallback(async () => {
     try {
@@ -115,6 +147,36 @@ export function TwsProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(id);
   }, [refreshSidecarPort]);
 
+  const refreshFinnhubStatus = useCallback(async () => {
+    if (!sidecarPort) {
+      setFinnhubStatus("disconnected");
+      setFinnhubMessage("Sidecar disconnected");
+      setFinnhubHasKey(false);
+      return;
+    }
+    try {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/settings/finnhub/status`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const payload = (await res.json()) as FinnhubStatusResponse;
+      setFinnhubStatus(payload.status);
+      setFinnhubMessage(payload.message);
+      setFinnhubHasKey(payload.hasKey);
+    } catch {
+      setFinnhubStatus("disconnected");
+      setFinnhubMessage("Finnhub status unavailable");
+      setFinnhubHasKey(false);
+    }
+  }, [sidecarPort]);
+
+  useEffect(() => {
+    refreshFinnhubStatus();
+    if (!sidecarPort) return;
+    const id = setInterval(refreshFinnhubStatus, 5000);
+    return () => clearInterval(id);
+  }, [sidecarPort, refreshFinnhubStatus]);
+
   useEffect(() => {
     if (status !== "disconnected" || !settings.autoProbe) return;
     const id = setInterval(() => probe(), 10_000);
@@ -132,20 +194,79 @@ export function TwsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const validateFinnhubKey = useCallback(
+    async (apiKey: string): Promise<FinnhubValidateResponse> => {
+      if (!sidecarPort) {
+        return {
+          ok: false,
+          status: "disconnected",
+          message: "Sidecar not connected",
+          hasKey: false,
+          validatedAt: null,
+        };
+      }
+      setFinnhubStatus("testing");
+      setFinnhubMessage("Testing Finnhub key...");
+      try {
+        const res = await fetch(`http://127.0.0.1:${sidecarPort}/settings/finnhub/validate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey }),
+        });
+        const payload = (await res.json()) as FinnhubValidateResponse;
+        await reloadSettings();
+        await refreshFinnhubStatus();
+        return payload;
+      } catch {
+        await refreshFinnhubStatus();
+        return {
+          ok: false,
+          status: "disconnected",
+          message: "Finnhub validation request failed",
+          hasKey: false,
+          validatedAt: null,
+        };
+      }
+    },
+    [reloadSettings, refreshFinnhubStatus, sidecarPort],
+  );
+
+  const value = useMemo(
+    () => ({
+      status,
+      port,
+      clientId: settings.clientId,
+      connectionType,
+      settings,
+      updateSettings,
+      probe,
+      sidecarPort,
+      sidecarStatus,
+      reloadSettings,
+      finnhubStatus,
+      finnhubMessage,
+      finnhubHasKey,
+      validateFinnhubKey,
+    }),
+    [
+      status,
+      port,
+      settings,
+      connectionType,
+      updateSettings,
+      probe,
+      sidecarPort,
+      sidecarStatus,
+      reloadSettings,
+      finnhubStatus,
+      finnhubMessage,
+      finnhubHasKey,
+      validateFinnhubKey,
+    ],
+  );
+
   return (
-    <TwsContext.Provider
-      value={{
-        status,
-        port,
-        clientId: settings.clientId,
-        connectionType,
-        settings,
-        updateSettings,
-        probe,
-        sidecarPort,
-        sidecarStatus,
-      }}
-    >
+    <TwsContext.Provider value={value}>
       {children}
     </TwsContext.Provider>
   );

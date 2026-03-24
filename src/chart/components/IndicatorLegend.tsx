@@ -372,6 +372,7 @@ interface IndicatorLegendProps {
   onMoveDown?: (id: string) => void;
   onDragStart?: (id: string) => void;
   onDragEnd?: () => void;
+  leftOffset?: number;
 }
 
 export default function IndicatorLegend({
@@ -388,6 +389,7 @@ export default function IndicatorLegend({
   onMoveDown,
   onDragStart,
   onDragEnd,
+  leftOffset = 8,
 }: IndicatorLegendProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -401,7 +403,7 @@ export default function IndicatorLegend({
       style={{
         position: 'absolute',
         top: 30,
-        left: 8,
+        left: leftOffset,
         zIndex: 10,
         display: 'flex',
         flexDirection: 'column',

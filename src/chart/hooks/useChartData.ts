@@ -101,6 +101,22 @@ function normalizeSource(value: unknown): 'tws' | 'yahoo' | 'cache' {
   return value === 'tws' || value === 'yahoo' || value === 'cache' ? value : 'yahoo';
 }
 
+function mergeBarsByTime(existingBars: OHLCVBar[], incomingBars: OHLCVBar[]): OHLCVBar[] {
+  if (existingBars.length === 0) return incomingBars;
+  if (incomingBars.length === 0) return existingBars;
+
+  const merged = new Map<number, OHLCVBar>();
+
+  for (const bar of existingBars) {
+    merged.set(bar.time, bar);
+  }
+  for (const bar of incomingBars) {
+    merged.set(bar.time, bar);
+  }
+
+  return Array.from(merged.values()).sort((a, b) => a.time - b.time);
+}
+
 export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOptions): UseChartDataResult {
   const [rawBars, setRawBars] = useState<OHLCVBar[]>([]);
   const [rawBarSize, setRawBarSize] = useState<'1m' | '1d'>('1m');
@@ -268,12 +284,12 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           url.searchParams.set('bar_size', '1 day');
           url.searchParams.set('duration', '30 Y');
         } else {
-          // Intraday: only fetch bars newer than our latest cached bar
+          // Intraday: re-fetch the trailing bar so the open candle can refresh live.
           url.searchParams.set('bar_size', '1 min');
           const currentBars = rawBarsRef.current;
           if (currentBars.length > 0) {
             const lastTs = currentBars[currentBars.length - 1].time;
-            url.searchParams.set('ts_start', String(lastTs + 1));
+            url.searchParams.set('ts_start', String(Math.max(0, lastTs - 60_000)));
           } else {
             url.searchParams.set('limit', String(initialLimit));
           }
@@ -298,9 +314,9 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
             setSource((payload.source as 'tws' | 'yahoo' | 'cache') || 'yahoo');
           }
         } else if (newBars.length > 0) {
-          // Intraday: append new bars, trim if over limit
+          // Intraday: merge by timestamp so the current open bar can be replaced.
           setRawBars(prev => {
-            const merged = [...prev, ...newBars];
+            const merged = mergeBarsByTime(prev, newBars);
             // Trim oldest bars if cache is too large
             if (merged.length > MAX_CACHED_BARS) {
               return merged.slice(merged.length - MAX_CACHED_BARS);

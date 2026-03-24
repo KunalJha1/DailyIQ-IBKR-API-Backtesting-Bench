@@ -12,8 +12,36 @@ interface State {
 export default class ErrorBoundary extends Component<Props, State> {
   state: State = { hasError: false, error: null };
 
+  private handleWindowError = (event: ErrorEvent) => {
+    const error = event.error instanceof Error
+      ? event.error
+      : new Error(event.message || "Unhandled runtime error");
+    this.setState({ hasError: true, error });
+  };
+
+  private handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+    const error = event.reason instanceof Error
+      ? event.reason
+      : new Error(
+          typeof event.reason === "string"
+            ? event.reason
+            : "Unhandled promise rejection",
+        );
+    this.setState({ hasError: true, error });
+  };
+
   static getDerivedStateFromError(error: Error): State {
     return { hasError: true, error };
+  }
+
+  componentDidMount() {
+    window.addEventListener("error", this.handleWindowError);
+    window.addEventListener("unhandledrejection", this.handleUnhandledRejection);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener("error", this.handleWindowError);
+    window.removeEventListener("unhandledrejection", this.handleUnhandledRejection);
   }
 
   render() {

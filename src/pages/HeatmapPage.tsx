@@ -32,7 +32,7 @@ interface LayoutRect extends Rect {
 
 interface SectorBound extends Rect {
   sector: string;
-  totalWeight: number;
+  totalMarketCap: number;
   count: number;
   headerHeight: number;
 }
@@ -211,17 +211,17 @@ export default function HeatmapPage() {
     const sectorItems = Array.from(sectorMap.entries())
       .map(([sector, items]) => ({
         sector,
-        items: [...items].sort((a, b) => b.sp500Weight - a.sp500Weight),
-        totalWeight: items.reduce(
-          (sum, tile) => sum + Math.max(tile.sp500Weight, 0.0001),
+        items: [...items].sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0)),
+        totalMarketCap: items.reduce(
+          (sum, tile) => sum + Math.max(tile.marketCap ?? tile.sp500Weight * 1e12, 1),
           0,
         ),
       }))
-      .sort((a, b) => b.totalWeight - a.totalWeight);
+      .sort((a, b) => b.totalMarketCap - a.totalMarketCap);
 
     const sectorRects = squarify(
       sectorItems.map((sectorInfo) => ({
-        value: sectorInfo.totalWeight,
+        value: sectorInfo.totalMarketCap,
         data: sectorInfo.items[0],
       })),
       { x: 0, y: 0, w: width, h: height },
@@ -253,14 +253,14 @@ export default function HeatmapPage() {
       nextSectorBounds.push({
         ...shell,
         sector: sectorInfo.sector,
-        totalWeight: sectorInfo.totalWeight,
+        totalMarketCap: sectorInfo.totalMarketCap,
         count: sectorInfo.items.length,
         headerHeight,
       });
 
       const tileRectsForSector = squarify(
         sectorInfo.items.map((tile) => ({
-          value: Math.max(tile.sp500Weight, 0.0001),
+          value: Math.max(tile.marketCap ?? tile.sp500Weight * 1e12, 1),
           data: tile,
         })),
         inner,
@@ -280,6 +280,10 @@ export default function HeatmapPage() {
 
   const totalTiles = tiles.length;
   const loadedTiles = tiles.filter((tile) => tile.status !== "pending").length;
+  const totalMarketCap = useMemo(
+    () => tiles.reduce((sum, t) => sum + (t.marketCap ?? 0), 0),
+    [tiles],
+  );
 
   return (
     <div className="flex h-full min-h-0 bg-[#111318] text-white">
@@ -384,7 +388,7 @@ export default function HeatmapPage() {
                       {sector.sector}
                     </span>
                     <span className="font-mono text-[9px] text-white/42">
-                      {(sector.totalWeight * 100).toFixed(1)}%
+                      {formatMarketCap(sector.totalMarketCap)}
                     </span>
                   </div>
                 );
@@ -471,9 +475,13 @@ export default function HeatmapPage() {
                 </div>
                 <div>
                   <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-white/30">
-                    S&P Weight
+                    S&P 500 Weight
                   </p>
-                  <p>{(hovered.sp500Weight * 100).toFixed(2)}%</p>
+                  <p>
+                    {hovered.marketCap && totalMarketCap > 0
+                      ? `${((hovered.marketCap / totalMarketCap) * 100).toFixed(2)}%`
+                      : "—"}
+                  </p>
                 </div>
                 <div>
                   <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-white/30">

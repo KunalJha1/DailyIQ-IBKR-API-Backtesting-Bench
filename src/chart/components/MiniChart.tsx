@@ -1,12 +1,14 @@
-import { useRef, useEffect, useMemo, useState, useCallback } from 'react';
+import { useRef, useEffect, useMemo, useState, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { interpretScript } from '../scripting/interpreter';
 import { ChartEngine } from '../core/ChartEngine';
 import { useChartData } from '../hooks/useChartData';
 import { indicatorRegistry } from '../indicators/registry';
 import type { Timeframe, ChartType, ActiveIndicator, YScaleMode } from '../types';
+import { PRICE_AXIS_WIDTH } from '../constants';
 import { useTws } from '../../lib/tws';
 import { linkBus } from '../../lib/link-bus';
 import { X, ChevronDown, Search, TrendingUp, BrainCircuit, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import ComponentLinkMenu from '../../components/ComponentLinkMenu';
 import IndicatorLegend from './IndicatorLegend';
 
 interface MiniChartProps {
@@ -33,14 +35,6 @@ const CHART_TYPES: { label: string; short: string; value: ChartType }[] = [
   { label: 'Line', short: 'Line', value: 'line' },
   { label: 'Area', short: 'Area', value: 'area' },
 ];
-
-const LINK_CHANNEL_COLORS: Record<number, string> = {
-  1: '#1A56DB',
-  2: '#00C853',
-  3: '#F59E0B',
-  4: '#FF3D71',
-  5: '#8B5CF6',
-};
 
 const SCRIPT_ID = 'mini_custom_script';
 
@@ -131,6 +125,18 @@ function serializeIndicators(indicators: ActiveIndicator[]): PersistedMiniIndica
   }));
 }
 
+function getDefaultMiniIndicators(): PersistedMiniIndicator[] {
+  return [{
+    name: 'Volume',
+    paneId: 'main',
+    params: {},
+    colors: {},
+    lineWidths: {},
+    lineStyles: {},
+    visible: true,
+  }];
+}
+
 function recordsEqual(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
   const aEntries = Object.entries(a ?? {}).sort(([ka], [kb]) => ka.localeCompare(kb));
   const bEntries = Object.entries(b ?? {}).sort(([ka], [kb]) => ka.localeCompare(kb));
@@ -166,7 +172,6 @@ export default function MiniChart({
   const chartType = (config.chartType as ChartType) || 'candlestick';
   const yScaleMode = (config.yScaleMode as YScaleMode) || 'auto';
 
-  const [showLinkMenu, setShowLinkMenu] = useState(false);
   const [showChartTypeMenu, setShowChartTypeMenu] = useState(false);
   const [showIndicatorMenu, setShowIndicatorMenu] = useState(false);
   const [showStrategyMenu, setShowStrategyMenu] = useState(false);
@@ -178,6 +183,7 @@ export default function MiniChart({
   const [scriptSource, setScriptSource] = useState('');
   const [scriptErrors, setScriptErrors] = useState<string[]>([]);
   const [draggingIndicatorId, setDraggingIndicatorId] = useState<string | null>(null);
+  const [yAxisHovered, setYAxisHovered] = useState(false);
   const dragStateRef = useRef<{
     paneId: string;
     startY: number;
@@ -196,7 +202,18 @@ export default function MiniChart({
     timeframe,
     sidecarPort,
   });
-  const stopperPx = (config.stopperPx as number) ?? 80;
+  const stopperPx = (config.stopperPx as number) ?? 40;
+
+  const handleCanvasPointerMove = useCallback((event: ReactMouseEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    setYAxisHovered(x >= rect.width - PRICE_AXIS_WIDTH && y >= 0 && y <= rect.height);
+  }, []);
+
+  const handleCanvasPointerLeave = useCallback(() => {
+    setYAxisHovered(false);
+  }, []);
 
   // Price info
   const lastBar = bars.length > 0 ? bars[bars.length - 1] : null;
@@ -372,12 +389,6 @@ export default function MiniChart({
     onConfigChange({ ...config, yScaleMode: mode });
   };
 
-  const toggleLinkMenu = () => setShowLinkMenu((v) => !v);
-  const selectLinkChannel = (ch: number | null) => {
-    onSetLinkChannel(ch);
-    setShowLinkMenu(false);
-  };
-
   // Filtered indicators for search
   const allIndicators = useMemo(
     () => Object.entries(indicatorRegistry).map(([key, meta]) => ({ key, ...meta })),
@@ -411,10 +422,12 @@ export default function MiniChart({
   const emptyScripts = useMemo(() => new Map(), []);
   const indicatorColorDefaults =
     (config.indicatorColorDefaults as Record<string, Record<string, string>> | undefined) ?? {};
-  const persistedIndicators = useMemo(
-    () => parsePersistedIndicators(config.indicators),
-    [config.indicators],
-  );
+  const persistedIndicators = useMemo(() => {
+    if (!Object.prototype.hasOwnProperty.call(config, 'indicators')) {
+      return getDefaultMiniIndicators();
+    }
+    return parsePersistedIndicators(config.indicators);
+  }, [config]);
 
   const persistedScript = useMemo(() => {
     const scripts = config.scripts;
@@ -718,108 +731,18 @@ export default function MiniChart({
 
   return (
     <div
-      className="flex flex-col h-full w-full overflow-hidden"
-      style={{
-        backgroundColor: '#0D1117',
-        border: '1px solid #21262D',
-        borderRadius: 0,
-        minWidth: 240,
-        minHeight: 200,
-      }}
+      className="flex h-full w-full min-h-[200px] min-w-[240px] flex-col overflow-hidden rounded-none border border-white/[0.06] bg-panel"
     >
       {/* Toolbar: symbol, timeframes, chart type, indicators, close */}
       <div
-        className="flex items-center justify-between shrink-0 select-none"
-        style={{
-          height: 22,
-          padding: '0 4px',
-          borderBottom: '1px solid #21262D',
-          backgroundColor: '#161B22',
-        }}
+        className="flex h-7 shrink-0 select-none items-center justify-between border-b border-white/[0.10] bg-base px-2"
       >
         {/* Left: link + symbol + price + collapse toggle */}
-        <div className="flex items-center gap-1 overflow-hidden" style={{ minWidth: 0 }}>
-          {/* Link channel indicator */}
-          <button
-            onClick={toggleLinkMenu}
-            className="relative shrink-0 flex items-center justify-center"
-            style={{
-              width: 14,
-              height: 14,
-              borderRadius: 2,
-              backgroundColor: linkChannel !== null
-                ? (LINK_CHANNEL_COLORS[linkChannel] || '#484F58')
-                : '#484F58',
-              opacity: linkChannel !== null ? 1 : 0.4,
-              cursor: 'pointer',
-              border: 'none',
-              padding: 0,
-            }}
-            title={linkChannel !== null ? `Link channel ${linkChannel}` : 'Not linked'}
-          >
-            <span
-              style={{
-                fontFamily: '"JetBrains Mono", monospace',
-                fontSize: 8,
-                color: '#E6EDF3',
-                lineHeight: 1,
-              }}
-            >
-              {linkChannel ?? '—'}
-            </span>
-          </button>
-
-          {/* Link channel dropdown */}
-          {showLinkMenu && (
-            <div
-              className="absolute z-50"
-              style={{
-                top: 28,
-                left: 4,
-                backgroundColor: '#161B22',
-                border: '1px solid #21262D',
-                borderRadius: 4,
-                padding: 2,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 1,
-              }}
-            >
-              <button
-                onClick={() => selectLinkChannel(null)}
-                className="flex items-center gap-1 px-2 py-0.5 hover:bg-[#1C2128] text-left"
-                style={{
-                  fontFamily: '"JetBrains Mono", monospace',
-                  fontSize: 9,
-                  color: '#8B949E',
-                  border: 'none',
-                  background: 'none',
-                  cursor: 'pointer',
-                  borderRadius: 2,
-                }}
-              >
-                None
-              </button>
-              {[1, 2, 3, 4, 5].map((ch) => (
-                <button
-                  key={ch}
-                  onClick={() => selectLinkChannel(ch)}
-                  className="flex items-center gap-1 px-2 py-0.5 hover:bg-[#1C2128] text-left"
-                  style={{
-                    fontFamily: '"JetBrains Mono", monospace',
-                    fontSize: 9,
-                    color: LINK_CHANNEL_COLORS[ch],
-                    border: 'none',
-                    background: 'none',
-                    cursor: 'pointer',
-                    borderRadius: 2,
-                  }}
-                >
-                  Ch {ch}
-                </button>
-              ))}
-            </div>
-          )}
+        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+          <ComponentLinkMenu
+            linkChannel={linkChannel}
+            onSetLinkChannel={onSetLinkChannel}
+          />
 
           <span
             style={{
@@ -862,10 +785,11 @@ export default function MiniChart({
             <button
               key={tf.value}
               onClick={() => setTimeframeValue(tf.value)}
+              className="rounded-sm transition-colors duration-75 hover:bg-white/[0.06]"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: 9,
-                padding: '1px 3px',
+                padding: '2px 4px',
                 borderRadius: 2,
                 border: 'none',
                 cursor: 'pointer',
@@ -878,21 +802,21 @@ export default function MiniChart({
             </button>
           ))}
 
-          <div style={{ width: 1, height: 12, backgroundColor: '#21262D', margin: '0 2px' }} />
+          <div className="mx-0.5 h-3 w-px bg-white/[0.08]" />
 
           {/* Chart type dropdown */}
           <div className="relative" ref={chartTypeMenuRef}>
             <button
               onClick={() => { setShowChartTypeMenu((v) => !v); setShowIndicatorMenu(false); }}
-              className="flex items-center gap-0.5 hover:bg-[#1C2128]"
+              className="flex items-center gap-0.5 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: 9,
-                padding: '1px 3px',
+                padding: '2px 4px',
                 borderRadius: 2,
                 border: 'none',
                 cursor: 'pointer',
-                backgroundColor: showChartTypeMenu ? '#1C2128' : 'transparent',
+                backgroundColor: showChartTypeMenu ? 'rgba(255,255,255,0.06)' : 'transparent',
                 color: '#8B949E',
                 lineHeight: 1,
               }}
@@ -950,15 +874,15 @@ export default function MiniChart({
                 setShowChartTypeMenu(false);
                 setIndicatorSearch('');
               }}
-              className="flex items-center gap-0.5 hover:bg-[#1C2128]"
+              className="flex items-center gap-0.5 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: 9,
-                padding: '1px 3px',
+                padding: '2px 4px',
                 borderRadius: 2,
                 border: 'none',
                 cursor: 'pointer',
-                backgroundColor: showIndicatorMenu ? '#1C2128' : 'transparent',
+                backgroundColor: showIndicatorMenu ? 'rgba(255,255,255,0.06)' : 'transparent',
                 color: activeStandardIndicatorCount > 0 ? '#1A56DB' : '#8B949E',
                 lineHeight: 1,
               }}
@@ -1010,7 +934,7 @@ export default function MiniChart({
                 </div>
 
                 {/* Indicator list */}
-                <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                <div className="scrollbar-panel" style={{ maxHeight: 260, overflowY: 'auto' }}>
                   {INDICATOR_CATEGORIES.map((cat) => {
                     const items = standardIndicators.filter((ind) => ind.category === cat.key);
                     if (items.length === 0) return null;
@@ -1097,15 +1021,15 @@ export default function MiniChart({
                 setShowChartTypeMenu(false);
                 setIndicatorSearch('');
               }}
-              className="flex items-center gap-0.5 hover:bg-[#1C2128]"
+              className="flex items-center gap-0.5 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
                 fontSize: 9,
-                padding: '1px 3px',
+                padding: '2px 4px',
                 borderRadius: 2,
                 border: 'none',
                 cursor: 'pointer',
-                backgroundColor: showStrategyMenu ? '#1C2128' : 'transparent',
+                backgroundColor: showStrategyMenu ? 'rgba(255,255,255,0.06)' : 'transparent',
                 color: activeStrategyCount > 0 ? '#1A56DB' : '#8B949E',
                 lineHeight: 1,
               }}
@@ -1154,7 +1078,7 @@ export default function MiniChart({
                   />
                 </div>
 
-                <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+                <div className="scrollbar-panel" style={{ maxHeight: 220, overflowY: 'auto' }}>
                   {strategyIndicators.map((ind) => {
                     const isActive = activeIndicators.some((ai) => ai.name === ind.key);
                     return (
@@ -1196,14 +1120,13 @@ export default function MiniChart({
           {/* Zoom controls */}
           <button
             onClick={() => engineRef.current?.zoomOut()}
-            className="flex items-center justify-center hover:bg-[#1C2128]"
+            className="flex items-center justify-center rounded-sm text-white/30 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/55"
             style={{
               width: 16,
               height: 16,
               borderRadius: 2,
               border: 'none',
               background: 'transparent',
-              color: '#8B949E',
               cursor: 'pointer',
             }}
             title="Zoom out"
@@ -1212,14 +1135,13 @@ export default function MiniChart({
           </button>
           <button
             onClick={() => engineRef.current?.zoomIn()}
-            className="flex items-center justify-center hover:bg-[#1C2128]"
+            className="flex items-center justify-center rounded-sm text-white/30 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/55"
             style={{
               width: 16,
               height: 16,
               borderRadius: 2,
               border: 'none',
               background: 'transparent',
-              color: '#8B949E',
               cursor: 'pointer',
             }}
             title="Zoom in"
@@ -1228,14 +1150,13 @@ export default function MiniChart({
           </button>
           <button
             onClick={() => engineRef.current?.resetZoom()}
-            className="flex items-center justify-center hover:bg-[#1C2128]"
+            className="flex items-center justify-center rounded-sm text-white/30 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/55"
             style={{
               width: 16,
               height: 16,
               borderRadius: 2,
               border: 'none',
               background: 'transparent',
-              color: '#8B949E',
               cursor: 'pointer',
             }}
             title="Reset zoom"
@@ -1284,13 +1205,13 @@ export default function MiniChart({
           {/* Compact mode toggle */}
           <button
             onClick={() => setToolbarCollapsed(v => !v)}
+            className="rounded-sm p-0 text-white/30 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/55"
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               width: 16, height: 16, padding: 0, border: 'none', cursor: 'pointer',
-              backgroundColor: toolbarCollapsed ? '#1C2128' : 'transparent',
-              color: toolbarCollapsed ? '#E6EDF3' : '#484F58', borderRadius: 2,
+              backgroundColor: toolbarCollapsed ? 'rgba(255,255,255,0.06)' : 'transparent',
+              color: toolbarCollapsed ? '#E6EDF3' : '#8B949E', borderRadius: 2,
             }}
-            className="hover:bg-[#1C2128] hover:text-[#E6EDF3]"
             title={toolbarCollapsed ? 'Show controls' : 'Compact mode'}
           >
             <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 8, lineHeight: 1 }}>
@@ -1299,11 +1220,12 @@ export default function MiniChart({
           </button>
 
           {/* Separator */}
-          <div style={{ width: 1, height: 12, backgroundColor: '#21262D', margin: '0 1px' }} />
+          <div className="mx-px h-3 w-px bg-white/[0.08]" />
 
           {/* Close */}
           <button
             onClick={onClose}
+            className="rounded-sm p-0 text-white/30 transition-colors duration-75 hover:bg-white/[0.06] hover:text-red"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1314,10 +1236,9 @@ export default function MiniChart({
               border: 'none',
               cursor: 'pointer',
               backgroundColor: 'transparent',
-              color: '#484F58',
+              color: '#8B949E',
               borderRadius: 2,
             }}
-            className="hover:bg-[#1C2128] hover:text-[#E6EDF3]"
             title="Close"
           >
             <X size={10} />
@@ -1503,8 +1424,40 @@ export default function MiniChart({
         <canvas
           ref={canvasRef}
           className="absolute inset-0"
-          style={{ cursor: 'crosshair' }}
+          onMouseMove={handleCanvasPointerMove}
+          onMouseLeave={handleCanvasPointerLeave}
+          style={{ cursor: yAxisHovered ? 'ns-resize' : 'crosshair' }}
         />
+        {yAxisHovered && (
+          <div
+            style={{
+              pointerEvents: 'none',
+              position: 'absolute',
+              right: 5,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              zIndex: 20,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 16,
+              height: 64,
+              borderRadius: 999,
+              border: '1px solid rgba(26,86,219,0.4)',
+              backgroundColor: 'rgba(13,17,23,0.85)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.28)',
+              backdropFilter: 'blur(4px)',
+            }}
+          >
+            <div style={{ width: 6, height: 6, borderRadius: 999, backgroundColor: 'rgba(26,86,219,0.95)' }} />
+            <div style={{ width: 1, height: 24, margin: '4px 0', backgroundColor: 'rgba(26,86,219,0.8)' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ width: 8, height: 2, borderRadius: 999, backgroundColor: 'rgba(26,86,219,0.8)' }} />
+              <div style={{ width: 8, height: 2, borderRadius: 999, backgroundColor: 'rgba(26,86,219,0.8)' }} />
+            </div>
+          </div>
+        )}
         {draggingIndicatorId && (
           <>
             <div

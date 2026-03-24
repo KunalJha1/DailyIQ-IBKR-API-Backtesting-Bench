@@ -59,7 +59,7 @@ export class ScaleY {
 
       // Label
       const label = formatPrice(tick);
-      renderer.text(label, axisX + 6, y, COLORS.textSecondary, 'left');
+      renderer.text(label, axisX + 6, y, COLORS.textPrimary, 'left');
     }
   }
 
@@ -97,7 +97,7 @@ export class ScaleY {
       const y = top + ratio * height;
       if (y < top + 5 || y > top + height - 5) continue;
       renderer.line(0, y, axisX, y, COLORS.gridLine);
-      renderer.textSmall(v.toFixed(1), axisX + 4, y, COLORS.textMuted, 'left');
+      renderer.textSmall(formatPrice(v), axisX + 4, y, COLORS.textPrimary, 'left');
     }
   }
 }
@@ -116,6 +116,5 @@ function niceNumber(range: number, round: boolean): number {
 
 function formatPrice(price: number): string {
   if (price >= 10000) return price.toFixed(0);
-  if (price >= 100) return price.toFixed(1);
   return price.toFixed(2);
 }

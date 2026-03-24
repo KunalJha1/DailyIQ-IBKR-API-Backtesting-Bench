@@ -74,9 +74,6 @@ def test_1_db_connection():
         }
         expected = {"ohlcv_1m", "ohlcv_1d", "ohlcv_5s", "fetch_meta", "technical_scores"}
 
-        # historical schema tables are created by _ensure_schema, run it
-        historical._ensure_schema(conn)
-
         tables = {
             r[0]
             for r in conn.execute(

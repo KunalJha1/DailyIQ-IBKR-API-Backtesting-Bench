@@ -62,6 +62,7 @@ const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   'Market Sentiment': 'Composite sentiment from oscillator and trend components',
   'Trend Angle': 'EMA/ATR-based trend angle in degrees',
   'Technical Score': 'DailyIQ technical score plotted through time',
+  Volume: 'Raw traded volume histogram',
   OBV: 'Cumulative volume flow',
   'Volume Profile': 'Volume distribution by price level',
 };
@@ -125,8 +126,9 @@ export default function IndicatorPanel({
       ref={panelRef}
       style={{
         position: 'absolute',
-        top: 8,
-        left: 8,
+        top: '100%',
+        left: 0,
+        marginTop: 4,
         zIndex: 50,
         width: 320,
         backgroundColor: '#161B22',

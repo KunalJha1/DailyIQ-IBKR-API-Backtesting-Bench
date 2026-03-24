@@ -34,6 +34,13 @@ const COLUMNS: ColDef[] = [
   { key: "changePct", label: "Chg%", defaultWidth: 58, minWidth: 42, align: "right" },
 ];
 
+// Column ID encoding: "b:key" for builtin, "c:id" for custom, "ta:tf" for TA
+function toColId(type: "builtin" | "custom" | "ta", key: string): string {
+  if (type === "builtin") return `b:${key}`;
+  if (type === "ta") return `ta:${key}`;
+  return `c:${key}`;
+}
+
 const ROW_H = 24;
 const HEADER_H = 22;
 const TA_COL_W = 44;
@@ -112,6 +119,7 @@ export default function WatchlistCard({
   onConfigChange,
   onSymbolSelect,
 }: WatchlistCardProps) {
+  const overlayRoot = typeof document !== "undefined" ? document.body : null;
   const {
     symbols,
     setSymbols,
@@ -148,6 +156,10 @@ export default function WatchlistCard({
   const [selectionAnchorIdx, setSelectionAnchorIdx] = useState<number | null>(null);
 
   const handleSort = useCallback((key: string) => {
+    if (didColDragRef.current) {
+      didColDragRef.current = false;
+      return;
+    }
     if (sortCol === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -415,6 +427,32 @@ export default function WatchlistCard({
     savedColWidths ?? COLUMNS.map((c) => c.defaultWidth),
   );
 
+  // ── Column order (drag-to-reorder) ──
+  const allColIds = useMemo(() => [
+    ...COLUMNS.map(c => toColId("builtin", c.key)),
+    ...customColumns.map(c => toColId("custom", c.id)),
+    ...taTimeframes.map(tf => toColId("ta", tf)),
+  ], [customColumns, taTimeframes]);
+
+  const effectiveColOrder = useMemo(() => {
+    const savedOrder = config.colOrder as string[] | undefined;
+    const validSet = new Set(allColIds);
+    if (!savedOrder || savedOrder.length === 0) return allColIds;
+    const storedValid = savedOrder.filter(id => validSet.has(id));
+    const storedSet = new Set(storedValid);
+    const newCols = allColIds.filter(id => !storedSet.has(id));
+    return [...storedValid, ...newCols];
+  }, [allColIds, config]);
+
+  const [colDragState, setColDragState] = useState<{ colId: string; mouseX: number; mouseY: number } | null>(null);
+  const [colInsertBeforeId, setColInsertBeforeId] = useState<string | null>(null);
+  const colDragColIdRef = useRef<string | null>(null);
+  const colInsertBeforeIdRef = useRef<string | null>(null);
+  const effectiveColOrderRef = useRef<string[]>([]);
+  effectiveColOrderRef.current = effectiveColOrder;
+  const paneHeaderRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const didColDragRef = useRef(false);
+
   const persistConfig = useCallback(
     (updates: Record<string, unknown>) => {
       onConfigChange({ ...config, ...updates });
@@ -561,6 +599,91 @@ export default function WatchlistCard({
     [colWidths, customColumns, taColWidths, headerTints, persistConfig],
   );
 
+  // ── Column header drag-to-reorder ──
+  const startColDrag = useCallback((colId: string, e: React.MouseEvent) => {
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let didDrag = false;
+    // Capture layout at drag-start time (won't change mid-drag)
+    const capColWidths = colWidths;
+    const capCustomCols = customColumns;
+    const capTaColWidths = taColWidths;
+    const capSortCol = sortCol;
+
+    colDragColIdRef.current = colId;
+    colInsertBeforeIdRef.current = null;
+
+    const getInsertId = (clientX: number): string | null => {
+      const header =
+        paneHeaderRefs.current.find(h => {
+          if (!h) return false;
+          const r = h.getBoundingClientRect();
+          return clientX >= r.left && clientX <= r.right;
+        }) ?? paneHeaderRefs.current.find(h => !!h) ?? null;
+      if (!header) return null;
+      const rect = header.getBoundingClientRect();
+      let cum = capSortCol ? 0 : ROW_GRIP_W;
+      for (const id of effectiveColOrderRef.current) {
+        let w = 0;
+        if (id.startsWith("b:")) {
+          const ci = COLUMNS.findIndex(c => c.key === id.slice(2));
+          w = ci >= 0 ? (capColWidths[ci] ?? 60) : 60;
+        } else if (id.startsWith("c:")) {
+          w = capCustomCols.find(c => c.id === id.slice(2))?.width ?? 60;
+        } else if (id.startsWith("ta:")) {
+          w = capTaColWidths[id.slice(3)] ?? TA_COL_W;
+        }
+        if (clientX - rect.left < cum + w / 2) return id;
+        cum += w;
+      }
+      return null;
+    };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!didDrag) {
+        if (Math.abs(ev.clientX - startX) > 4 || Math.abs(ev.clientY - startY) > 4) {
+          didDrag = true;
+          setColDragState({ colId, mouseX: ev.clientX, mouseY: ev.clientY });
+        }
+        return;
+      }
+      setColDragState(prev => prev ? { ...prev, mouseX: ev.clientX, mouseY: ev.clientY } : null);
+      const insertId = getInsertId(ev.clientX);
+      colInsertBeforeIdRef.current = insertId;
+      setColInsertBeforeId(insertId);
+    };
+
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      const srcId = colDragColIdRef.current;
+      colDragColIdRef.current = null;
+      setColDragState(null);
+      setColInsertBeforeId(null);
+      if (!didDrag || !srcId) return;
+      didColDragRef.current = true;
+      const dstId = colInsertBeforeIdRef.current;
+      colInsertBeforeIdRef.current = null;
+      const order = effectiveColOrderRef.current;
+      const srcIdx = order.indexOf(srcId);
+      if (srcIdx === -1) return;
+      const next = [...order];
+      next.splice(srcIdx, 1);
+      if (dstId === null || dstId === srcId) {
+        if (dstId === srcId) return;
+        next.push(srcId);
+      } else {
+        const dstIdx = order.indexOf(dstId);
+        next.splice(dstIdx > srcIdx ? dstIdx - 1 : dstIdx, 0, srcId);
+      }
+      if (next.join(",") === order.join(",")) return;
+      persistConfig({ colOrder: next });
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [colWidths, customColumns, taColWidths, sortCol, persistConfig]);
+
   // ── Fixed partition count setting ──
   const fixedPaneCount = config.paneCount as number | undefined;
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -595,20 +718,35 @@ export default function WatchlistCard({
 
   // ── How many panes fit side-by-side? ──
   const paneWidth = useMemo(() => {
-    const builtInWidth = colWidths.reduce((sum, width) => sum + width, 0);
-    const customWidth = customColumns.reduce((sum, col) => sum + col.width, 0);
-    const taWidth = taTimeframes.reduce((sum, tf) => sum + (taColWidths[tf] ?? TA_COL_W), 0);
-    const gripWidth = sortCol ? 0 : ROW_GRIP_W;
-    return builtInWidth + customWidth + taWidth + gripWidth + PANE_CHROME_W + PANE_GAP;
-  }, [colWidths, customColumns, taColWidths, taTimeframes, sortCol]);
+    let total = 0;
+    for (const id of effectiveColOrder) {
+      if (id.startsWith("b:")) {
+        const ci = COLUMNS.findIndex(c => c.key === id.slice(2));
+        total += ci >= 0 ? (colWidths[ci] ?? 60) : 60;
+      } else if (id.startsWith("c:")) {
+        total += customColumns.find(c => c.id === id.slice(2))?.width ?? 60;
+      } else if (id.startsWith("ta:")) {
+        total += taColWidths[id.slice(3)] ?? TA_COL_W;
+      }
+    }
+    return total + (sortCol ? 0 : ROW_GRIP_W) + PANE_CHROME_W + PANE_GAP;
+  }, [effectiveColOrder, colWidths, customColumns, taColWidths, sortCol]);
+
   const paneGridTemplate = useMemo(() => {
     const tracks: string[] = [];
     if (!sortCol) tracks.push(`${ROW_GRIP_W}px`);
-    tracks.push(...colWidths.map((width) => `${width}px`));
-    tracks.push(...customColumns.map((col) => `${col.width}px`));
-    tracks.push(...taTimeframes.map((tf) => `${taColWidths[tf] ?? TA_COL_W}px`));
+    for (const id of effectiveColOrder) {
+      if (id.startsWith("b:")) {
+        const ci = COLUMNS.findIndex(c => c.key === id.slice(2));
+        tracks.push(`${ci >= 0 ? (colWidths[ci] ?? 60) : 60}px`);
+      } else if (id.startsWith("c:")) {
+        tracks.push(`${customColumns.find(c => c.id === id.slice(2))?.width ?? 60}px`);
+      } else if (id.startsWith("ta:")) {
+        tracks.push(`${taColWidths[id.slice(3)] ?? TA_COL_W}px`);
+      }
+    }
     return tracks.join(" ");
-  }, [colWidths, customColumns, taColWidths, taTimeframes, sortCol]);
+  }, [effectiveColOrder, colWidths, customColumns, taColWidths, sortCol]);
   const autoPaneCount = Math.max(1, Math.floor(containerWidth / paneWidth));
   const paneCount = fixedPaneCount ?? autoPaneCount;
 
@@ -1088,7 +1226,7 @@ export default function WatchlistCard({
       {/* Body — data-no-drag prevents GridLayout from starting a component move on row mousedown */}
       <div
         ref={containerRef}
-        className={`flex flex-1 ${fixedPaneCount != null ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}
+        className={`flex flex-1 scrollbar-watchlist ${fixedPaneCount != null ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}
         data-no-drag
       >
         <div ref={bodyRef} className={`flex h-full gap-[6px] ${fixedPaneCount != null ? "" : "w-full"}`}>
@@ -1102,148 +1240,162 @@ export default function WatchlistCard({
                   : { flex: 1, minWidth: 0 }
               }
             >
-              {/* Column headers — click to sort */}
+              {/* Column headers — click to sort, drag to reorder */}
               <div
+                ref={(el) => { paneHeaderRefs.current[paneIdx] = el; }}
                 className="grid shrink-0 items-center border-b border-white/[0.06] bg-[#0D1117]"
-                style={{
-                  height: HEADER_H,
-                  gridTemplateColumns: paneGridTemplate,
-                }}
+                style={{ height: HEADER_H, gridTemplateColumns: paneGridTemplate }}
               >
                 {!sortCol && <div />}
-                {COLUMNS.map((col, ci) => (
-                  <div
-                    key={col.key}
-                    className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider cursor-pointer transition-colors duration-75 ${
-                      sortCol === col.key ? "text-white/70" : "text-white/40 hover:text-white/55"
-                    } ${ci < COLUMNS.length - 1 || customColumns.length > 0 || taTimeframes.length > 0 ? "border-r border-white/[0.06]" : ""}`}
-                    style={{
-                      textAlign: col.align,
-                    }}
-                    onClick={() => handleSort(col.key)}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      setEditingHeaderKey(col.key);
-                      setEditingHeaderValue(columnLabels[col.key] ?? col.label);
-                    }}
-                  >
-                    {editingHeaderKey === col.key ? (
-                      <input
-                        autoFocus
-                        className="w-full bg-transparent text-[9px] font-medium uppercase tracking-wider text-white/70 outline-none"
-                        value={editingHeaderValue}
-                        onChange={(e) => setEditingHeaderValue(e.target.value)}
-                        onBlur={() => {
-                          const trimmed = editingHeaderValue.trim();
-                          const next = { ...columnLabels };
-                          if (trimmed && trimmed !== col.label) {
-                            next[col.key] = trimmed;
-                          } else {
-                            delete next[col.key];
-                          }
-                          setColumnLabels(next);
-                          persistConfig({ columnLabels: next });
-                          setEditingHeaderKey(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                          if (e.key === "Escape") setEditingHeaderKey(null);
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    ) : (
-                      columnLabels[col.key] ?? col.label
-                    )}
-                    {editingHeaderKey !== col.key && sortCol === col.key && (
-                      <span className="ml-0.5 text-[8px] text-white/50">
-                        {sortDir === "asc" ? "\u25B2" : "\u25BC"}
-                      </span>
-                    )}
-                    {/* Resize handle — overlaps the column border */}
-                    <div
-                      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleColResize(ci, e);
-                      }}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                    />
-                  </div>
-                ))}
-                {/* Custom column headers */}
-                {customColumns.map((col, ci) => (
-                  <div
-                    key={col.id}
-                    className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider text-purple/70 cursor-pointer transition-colors duration-75 hover:text-purple ${
-                      ci < customColumns.length - 1 || taTimeframes.length > 0 ? "border-r border-white/[0.06]" : ""
-                    }`}
-                    style={{
-                      textAlign: "right",
-                      color: headerTints.custom?.[col.id],
-                      backgroundColor: headerTints.custom?.[col.id] ? `${headerTints.custom[col.id]}14` : undefined,
-                    }}
-                    onDoubleClick={() => {
-                      setColumnEditor({ ...col });
-                      setColumnEditorIsNew(false);
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setColHeaderMenu({ x: e.clientX, y: e.clientY, type: "custom", colId: col.id });
-                    }}
-                    title="Double-click to edit · Right-click for options"
-                  >
-                    {col.label}
-                    <div
-                      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-purple/[0.15]"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleCustomColResize(col.id, col.width, e);
-                      }}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                    />
-                  </div>
-                ))}
-                {/* TA Score column headers */}
-                {taTimeframes.map((tf, ti) => (
-                  <div
-                    key={`tah-${tf}`}
-                    className={`relative min-w-0 select-none truncate px-1 text-center text-[9px] font-medium uppercase tracking-wider text-blue/50 cursor-default ${
-                      ti < taTimeframes.length - 1 ? "border-r border-white/[0.06]" : ""
-                    }`}
-                    style={{
-                      color: headerTints.ta?.[tf],
-                      backgroundColor: headerTints.ta?.[tf] ? `${headerTints.ta[tf]}14` : undefined,
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setColHeaderMenu({ x: e.clientX, y: e.clientY, type: "ta", tf });
-                    }}
-                    title={`Technical score ${tf} · Right-click to remove`}
-                  >
-                    {tf}
-                    <div
-                      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleTaColResize(tf, e);
-                      }}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                    />
-                  </div>
-                ))}
+                {effectiveColOrder.map((colId, ci) => {
+                  const isLast = ci === effectiveColOrder.length - 1;
+                  const borderClass = !isLast ? "border-r border-white/[0.06]" : "";
+                  const isDragging = colDragState?.colId === colId;
 
+                  if (colId.startsWith("b:")) {
+                    const key = colId.slice(2);
+                    const col = COLUMNS.find(c => c.key === key)!;
+                    const colIdx = COLUMNS.findIndex(c => c.key === key);
+                    return (
+                      <div
+                        key={colId}
+                        className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider cursor-grab transition-colors duration-75 ${
+                          sortCol === col.key ? "text-white/70" : "text-white/40 hover:text-white/55"
+                        } ${borderClass} ${isDragging ? "opacity-40" : ""}`}
+                        style={{ textAlign: col.align }}
+                        onClick={() => handleSort(col.key)}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setEditingHeaderKey(col.key);
+                          setEditingHeaderValue(columnLabels[col.key] ?? col.label);
+                        }}
+                        onMouseDown={(e) => {
+                          if (editingHeaderKey === col.key) return;
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          if (e.clientX > rect.right - 8) return;
+                          startColDrag(colId, e);
+                        }}
+                      >
+                        {colInsertBeforeId === colId && colDragState && (
+                          <div className="pointer-events-none absolute left-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                        )}
+                        {isLast && colInsertBeforeId === null && colDragState && (
+                          <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                        )}
+                        {editingHeaderKey === col.key ? (
+                          <input
+                            autoFocus
+                            className="w-full bg-transparent text-[9px] font-medium uppercase tracking-wider text-white/70 outline-none"
+                            value={editingHeaderValue}
+                            onChange={(e) => setEditingHeaderValue(e.target.value)}
+                            onBlur={() => {
+                              const trimmed = editingHeaderValue.trim();
+                              const next = { ...columnLabels };
+                              if (trimmed && trimmed !== col.label) {
+                                next[col.key] = trimmed;
+                              } else {
+                                delete next[col.key];
+                              }
+                              setColumnLabels(next);
+                              persistConfig({ columnLabels: next });
+                              setEditingHeaderKey(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                              if (e.key === "Escape") setEditingHeaderKey(null);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          columnLabels[col.key] ?? col.label
+                        )}
+                        {editingHeaderKey !== col.key && sortCol === col.key && (
+                          <span className="ml-0.5 text-[8px] text-white/50">
+                            {sortDir === "asc" ? "\u25B2" : "\u25BC"}
+                          </span>
+                        )}
+                        <div
+                          className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
+                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleColResize(colIdx, e); }}
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                        />
+                      </div>
+                    );
+                  }
+
+                  if (colId.startsWith("c:")) {
+                    const col = customColumns.find(c => c.id === colId.slice(2));
+                    if (!col) return null;
+                    return (
+                      <div
+                        key={colId}
+                        className={`relative min-w-0 select-none truncate px-1.5 text-[9px] font-medium uppercase tracking-wider text-purple/70 cursor-grab transition-colors duration-75 hover:text-purple ${borderClass} ${isDragging ? "opacity-40" : ""}`}
+                        style={{
+                          textAlign: "right",
+                          color: headerTints.custom?.[col.id],
+                          backgroundColor: headerTints.custom?.[col.id] ? `${headerTints.custom[col.id]}14` : undefined,
+                        }}
+                        onDoubleClick={() => { setColumnEditor({ ...col }); setColumnEditorIsNew(false); }}
+                        onContextMenu={(e) => { e.preventDefault(); setColHeaderMenu({ x: e.clientX, y: e.clientY, type: "custom", colId: col.id }); }}
+                        onMouseDown={(e) => {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          if (e.clientX > rect.right - 8) return;
+                          startColDrag(colId, e);
+                        }}
+                        title="Double-click to edit · Right-click for options · Drag to reorder"
+                      >
+                        {colInsertBeforeId === colId && colDragState && (
+                          <div className="pointer-events-none absolute left-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                        )}
+                        {isLast && colInsertBeforeId === null && colDragState && (
+                          <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                        )}
+                        {col.label}
+                        <div
+                          className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-purple/[0.15]"
+                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleCustomColResize(col.id, col.width, e); }}
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                        />
+                      </div>
+                    );
+                  }
+
+                  if (colId.startsWith("ta:")) {
+                    const tf = colId.slice(3);
+                    return (
+                      <div
+                        key={colId}
+                        className={`relative min-w-0 select-none truncate px-1 text-center text-[9px] font-medium uppercase tracking-wider text-blue/50 cursor-grab ${borderClass} ${isDragging ? "opacity-40" : ""}`}
+                        style={{
+                          color: headerTints.ta?.[tf],
+                          backgroundColor: headerTints.ta?.[tf] ? `${headerTints.ta[tf]}14` : undefined,
+                        }}
+                        onContextMenu={(e) => { e.preventDefault(); setColHeaderMenu({ x: e.clientX, y: e.clientY, type: "ta", tf }); }}
+                        onMouseDown={(e) => {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          if (e.clientX > rect.right - 8) return;
+                          startColDrag(colId, e);
+                        }}
+                        title={`Technical score ${tf} · Right-click to remove · Drag to reorder`}
+                      >
+                        {colInsertBeforeId === colId && colDragState && (
+                          <div className="pointer-events-none absolute left-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                        )}
+                        {isLast && colInsertBeforeId === null && colDragState && (
+                          <div className="pointer-events-none absolute right-0 top-0 z-20 h-full w-0.5 bg-blue" />
+                        )}
+                        {tf}
+                        <div
+                          className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
+                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleTaColResize(tf, e); }}
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                        />
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
               </div>
 
               <WatchlistPaneRows
@@ -1281,6 +1433,7 @@ export default function WatchlistCard({
                 showGrip={!sortCol}
                 insertBeforeIdx={insertBeforeIdx}
                 startRowDrag={startRowDrag}
+                colOrder={effectiveColOrder}
               />
             </div>
           ))}
@@ -1288,7 +1441,7 @@ export default function WatchlistCard({
       </div>
 
       {/* Context Menu */}
-      {contextMenu && (
+      {overlayRoot && contextMenu && createPortal(
         <div
           ref={contextMenuRef}
           className="fixed z-[100] min-w-[140px] rounded-md border border-white/[0.08] bg-[#1C2128] py-1 shadow-xl shadow-black/40"
@@ -1316,22 +1469,40 @@ export default function WatchlistCard({
               </button>
             </>
           )}
-        </div>
+        </div>,
+        overlayRoot,
       )}
 
-      {/* Drag ghost — floats at cursor */}
-      {dragState && (
+      {/* Column drag ghost */}
+      {overlayRoot && colDragState && createPortal(
+        <div
+          className="pointer-events-none fixed z-[300] flex items-center gap-1 rounded border border-blue/50 bg-base/90 px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider text-white/60 shadow-lg backdrop-blur-sm"
+          style={{ left: colDragState.mouseX + 10, top: colDragState.mouseY - 14 }}
+        >
+          {effectiveColOrder.find(id => id === colDragState.colId)?.startsWith("b:")
+            ? (columnLabels[colDragState.colId.slice(2)] ?? COLUMNS.find(c => c.key === colDragState.colId.slice(2))?.label ?? colDragState.colId.slice(2))
+            : effectiveColOrder.find(id => id === colDragState.colId)?.startsWith("c:")
+              ? customColumns.find(c => c.id === colDragState.colId.slice(2))?.label ?? colDragState.colId.slice(2)
+            : colDragState.colId.slice(3)
+          }
+        </div>,
+        overlayRoot,
+      )}
+
+      {/* Row drag ghost — floats at cursor */}
+      {overlayRoot && dragState && createPortal(
         <div
           className="pointer-events-none fixed z-[300] flex items-center gap-1.5 rounded border border-blue/40 bg-base/90 px-2 py-0.5 font-mono text-[10px] text-white/70 shadow-lg backdrop-blur-sm"
           style={{ left: dragState.mouseX + 12, top: dragState.mouseY - 10 }}
         >
           <GripVertical className="h-2.5 w-2.5 text-white/30" strokeWidth={1.5} />
           {dragState.symbol}
-        </div>
+        </div>,
+        overlayRoot,
       )}
 
       {/* Column Header Context Menu */}
-      {colHeaderMenu && (
+      {overlayRoot && colHeaderMenu && createPortal(
         <div
           ref={colHeaderMenuRef}
           className="fixed z-[100] min-w-[140px] rounded-md border border-white/[0.08] bg-[#1C2128] py-1 shadow-xl shadow-black/40"
@@ -1419,7 +1590,8 @@ export default function WatchlistCard({
               </button>
             </>
           )}
-        </div>
+        </div>,
+        overlayRoot,
       )}
 
       {/* Custom Column Builder Modal */}
@@ -1577,6 +1749,7 @@ interface WatchlistRowProps {
   reserveGripSpace: boolean;
   insertLineBefore: boolean;
   onGripMouseDown: (e: React.MouseEvent) => void;
+  colOrder: string[];
 }
 
 interface WatchlistPaneRowsProps {
@@ -1604,6 +1777,7 @@ interface WatchlistPaneRowsProps {
   showGrip: boolean;
   insertBeforeIdx: number | null;
   startRowDrag: (e: React.MouseEvent, globalIdx: number, symbol: string) => void;
+  colOrder: string[];
 }
 
 function WatchlistPaneRows({
@@ -1631,6 +1805,7 @@ function WatchlistPaneRows({
   showGrip,
   insertBeforeIdx,
   startRowDrag,
+  colOrder,
 }: WatchlistPaneRowsProps) {
   const localRowsRef = useRef<HTMLDivElement | null>(null);
 
@@ -1679,6 +1854,7 @@ function WatchlistPaneRows({
               reserveGripSpace={showGrip}
               insertLineBefore={insertBeforeIdx === globalIdx}
               onGripMouseDown={(e) => startRowDrag(e, globalIdx, sym)}
+              colOrder={colOrder}
             />
           );
         })}
@@ -1704,13 +1880,13 @@ function WatchlistRow({
   onContextMenu,
   customColumns,
   customValues,
-  taTimeframes,
   taScores,
   gridTemplateColumns,
   showGrip,
   reserveGripSpace,
   insertLineBefore,
   onGripMouseDown,
+  colOrder,
 }: WatchlistRowProps) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState("");
@@ -1867,12 +2043,9 @@ function WatchlistRow({
               placeholder="Type symbol..."
               className="w-full bg-transparent font-mono text-[10px] text-white/70 placeholder:text-white/15 focus:outline-none"
             />
-            {showSuggestions && suggestions.length > 0 && inputRef.current && (() => {
-              const rect = inputRef.current!.getBoundingClientRect();
-              return (
+            {showSuggestions && suggestions.length > 0 && (
               <div
-                className="fixed z-[130] w-[260px] rounded-md border border-white/[0.08] bg-[#1C2128] py-0.5 shadow-xl shadow-black/40"
-                style={{ left: rect.left, top: rect.bottom + 2 }}
+                className="absolute left-0 top-full z-[130] mt-1 w-[260px] rounded-md border border-white/[0.08] bg-[#1C2128] py-0.5 shadow-xl shadow-black/40"
               >
                 {suggestions.map((s, i) => (
                   <button
@@ -1913,8 +2086,7 @@ function WatchlistRow({
                   </button>
                 ))}
               </div>
-              );
-            })()}
+            )}
           </div>
         ) : (
           <button
@@ -1978,13 +2150,10 @@ function WatchlistRow({
             placeholder={symbol}
             className="w-full bg-transparent font-mono text-[10px] text-white/70 placeholder:text-white/25 focus:outline-none"
           />
-          {showSuggestions && suggestions.length > 0 && inputRef.current && (() => {
-            const rect = inputRef.current!.getBoundingClientRect();
-            return (
-              <div
-                className="fixed z-[130] w-[260px] rounded-md border border-white/[0.08] bg-[#1C2128] py-0.5 shadow-xl shadow-black/40"
-                style={{ left: rect.left, top: rect.bottom + 2 }}
-              >
+          {showSuggestions && suggestions.length > 0 && (
+            <div
+              className="absolute left-0 top-full z-[130] mt-1 w-[260px] rounded-md border border-white/[0.08] bg-[#1C2128] py-0.5 shadow-xl shadow-black/40"
+            >
                 {suggestions.map((s, i) => (
                   <button
                     key={s.symbol}
@@ -2023,9 +2192,8 @@ function WatchlistRow({
                     </span>
                   </button>
                 ))}
-              </div>
-            );
-          })()}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -2080,112 +2248,86 @@ function WatchlistRow({
           {showGrip && <GripVertical className="h-2.5 w-2.5 text-white/25" strokeWidth={1.5} />}
         </div>
       )}
-      {/* Symbol */}
-      <div
-        ref={symbolCellRef}
-        className={`min-w-0 truncate border-r border-white/[0.06] px-1.5 font-mono text-[10px] font-medium ${
-          isError ? "text-red/80" : "text-white/80"
-        }`}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-      >
-        {symbol}
-      </div>
+      {colOrder.map((colId, ci) => {
+        const isLastCell = ci === colOrder.length - 1;
+        const borderClass = !isLastCell ? "border-r border-white/[0.06]" : "";
 
-      {/* Last */}
-      <div
-        className={`min-w-0 truncate border-r border-white/[0.06] px-1.5 text-right font-mono text-[10px] ${
-          isError ? "text-red/40" : "text-white/70"
-        }`}
-      >
-        {quote ? quote.last.toFixed(2) : isError ? "ERR" : "—"}
-      </div>
-
-      {/* Change */}
-      <div
-        className={`min-w-0 truncate border-r border-white/[0.06] px-1.5 text-right font-mono text-[10px] font-medium ${
-          isError ? "text-red/40" : quote ? changeColor(quote.change) : "text-white/30"
-        }`}
-      >
-        {quote
-          ? `${quote.change >= 0 ? "+" : ""}${quote.change.toFixed(2)}`
-          : isError ? "—" : "—"}
-      </div>
-
-      {/* Change % */}
-      <div
-        className={`min-w-0 truncate ${customColumns.length > 0 || taTimeframes.length > 0 ? "border-r border-white/[0.06]" : ""} px-1.5 text-right font-mono text-[10px] font-medium ${
-          isError ? "text-red/40" : quote ? changeColor(quote.changePct) : "text-white/30"
-        }`}
-      >
-        {quote
-          ? `${quote.changePct >= 0 ? "+" : ""}${quote.changePct.toFixed(2)}%`
-          : "—"}
-      </div>
-
-      {/* Custom scripted columns */}
-      {customColumns.map((col, ci) => {
-        const val = customValues[col.id];
-        const isNum = typeof val === "number";
-        const isStr = typeof val === "string";
-        const isCrossover = col.kind === "crossover";
-        const shouldColorize = "colorize" in col && col.colorize;
-        let colorClass = "text-white/50";
-        let displayValue = val != null ? (isNum ? (val as number).toFixed(col.decimals ?? 0) : String(val)) : "—";
-        if (isCrossover && isStr) {
-          colorClass =
-            val === "BUY"
-              ? "bg-green/[0.16] text-green font-medium"
-              : val === "SELL"
-                ? "bg-red/[0.16] text-red font-medium"
-                : "bg-yellow/20 text-yellow font-medium";
-          displayValue =
-            val === "BUY"
-              ? "\u2197"
-              : val === "SELL"
-                ? "\u2198"
-                : "-";
-        } else if (isNum && shouldColorize) {
-          colorClass = (val as number) > 50 ? "text-green font-medium" : (val as number) < 50 ? "text-red font-medium" : "text-white/50";
+        if (colId === "b:symbol") {
+          return (
+            <div
+              key={colId}
+              ref={symbolCellRef}
+              className={`min-w-0 truncate px-1.5 font-mono text-[10px] font-medium ${borderClass} ${isError ? "text-red/80" : "text-white/80"}`}
+              onMouseEnter={() => setHovered(true)}
+              onMouseLeave={() => setHovered(false)}
+            >
+              {symbol}
+            </div>
+          );
         }
-        return (
-          <div
-            key={col.id}
-            className={`min-w-0 truncate px-1.5 font-mono text-[10px] ${isCrossover ? "text-center" : "text-right"} ${colorClass} ${ci < customColumns.length - 1 || taTimeframes.length > 0 ? "border-r border-white/[0.06]" : ""}`}
-          >
-            {displayValue}
-          </div>
-        );
+        if (colId === "b:last") {
+          return (
+            <div key={colId} className={`min-w-0 truncate px-1.5 text-right font-mono text-[10px] ${borderClass} ${isError ? "text-red/40" : "text-white/70"}`}>
+              {quote ? quote.last.toFixed(2) : isError ? "ERR" : "—"}
+            </div>
+          );
+        }
+        if (colId === "b:change") {
+          return (
+            <div key={colId} className={`min-w-0 truncate px-1.5 text-right font-mono text-[10px] font-medium ${borderClass} ${isError ? "text-red/40" : quote ? changeColor(quote.change) : "text-white/30"}`}>
+              {quote ? `${quote.change >= 0 ? "+" : ""}${quote.change.toFixed(2)}` : isError ? "—" : "—"}
+            </div>
+          );
+        }
+        if (colId === "b:changePct") {
+          return (
+            <div key={colId} className={`min-w-0 truncate px-1.5 text-right font-mono text-[10px] font-medium ${borderClass} ${isError ? "text-red/40" : quote ? changeColor(quote.changePct) : "text-white/30"}`}>
+              {quote ? `${quote.changePct >= 0 ? "+" : ""}${quote.changePct.toFixed(2)}%` : "—"}
+            </div>
+          );
+        }
+        if (colId.startsWith("c:")) {
+          const col = customColumns.find(c => c.id === colId.slice(2));
+          if (!col) return null;
+          const val = customValues[col.id];
+          const isNum = typeof val === "number";
+          const isStr = typeof val === "string";
+          const isCrossover = col.kind === "crossover";
+          const shouldColorize = "colorize" in col && col.colorize;
+          let colorClass = "text-white/50";
+          let displayValue = val != null ? (isNum ? (val as number).toFixed(col.decimals ?? 0) : String(val)) : "—";
+          if (isCrossover && isStr) {
+            colorClass = val === "BUY" ? "bg-green/[0.16] text-green font-medium" : val === "SELL" ? "bg-red/[0.16] text-red font-medium" : "bg-yellow/20 text-yellow font-medium";
+            displayValue = val === "BUY" ? "\u2197" : val === "SELL" ? "\u2198" : "-";
+          } else if (isNum && shouldColorize) {
+            colorClass = (val as number) > 50 ? "text-green font-medium" : (val as number) < 50 ? "text-red font-medium" : "text-white/50";
+          }
+          return (
+            <div key={colId} className={`min-w-0 truncate px-1.5 font-mono text-[10px] ${isCrossover ? "text-center" : "text-right"} ${colorClass} ${borderClass}`}>
+              {displayValue}
+            </div>
+          );
+        }
+        if (colId.startsWith("ta:")) {
+          const tf = colId.slice(3);
+          const score = taScores[tf] ?? null;
+          return (
+            <div
+              key={colId}
+              className={`min-w-0 truncate px-1 text-center font-mono text-[10px] font-medium ${borderClass} ${score === null ? "text-white/15" : score > 60 ? "text-green" : score < 40 ? "text-red" : "text-white/40"}`}
+              title={`${tf} technical score: ${score ?? "no data"}`}
+            >
+              {score === null ? "—" : score}
+            </div>
+          );
+        }
+        return null;
       })}
 
-      {/* TA score cells */}
-      {taTimeframes.map((tf, ti) => {
-        const score = taScores[tf] ?? null;
-        return (
-          <div
-            key={`ta-${tf}`}
-            className={`min-w-0 truncate px-1 text-center font-mono text-[10px] font-medium ${
-              ti < taTimeframes.length - 1 ? "border-r border-white/[0.06]" : ""
-            } ${
-              score === null
-                ? "text-white/15"
-                : score > 60
-                  ? "text-green"
-                  : score < 40
-                    ? "text-red"
-                    : "text-white/40"
-            }`}
-            title={`${tf} technical score: ${score ?? "no data"}`}
-          >
-            {score === null ? "—" : score}
-          </div>
-        );
-      })}
-
-      {/* Hover tooltip — fixed position to escape overflow clipping */}
+      {/* Hover tooltip — portal to document.body to escape parent transform/overflow */}
       {hovered && symbolCellRef.current && (() => {
         const rect = symbolCellRef.current!.getBoundingClientRect();
-        return (
+        return createPortal(
           <div
             className="pointer-events-none fixed z-[140] rounded-md border border-white/[0.08] bg-[#1C2128] px-2.5 py-1.5 shadow-xl shadow-black/40"
             style={{
@@ -2208,7 +2350,8 @@ function WatchlistRow({
                 Waiting for TWS data
               </p>
             )}
-          </div>
+          </div>,
+          document.body,
         );
       })()}
     </div>

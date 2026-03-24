@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { useTws } from "../lib/tws";
 
@@ -14,10 +14,35 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
+const PLAYBOOK_PLACEHOLDER = `Example:
+- Prioritize risk management over new opportunities
+- If a portfolio position breaks my rules, discuss that first
+- Prefer alignment across 1H, 5D, and 1W
+- No averaging down
+- Flag oversized positions above 12%
+- Prefer swing-style decisions over scalp-style noise`;
+
 export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
-  const { status, port, clientId, connectionType, settings, updateSettings, probe } =
+  const {
+    status,
+    port,
+    clientId,
+    connectionType,
+    settings,
+    updateSettings,
+    probe,
+    finnhubStatus,
+    finnhubMessage,
+    validateFinnhubKey,
+  } =
     useTws();
   const panelRef = useRef<HTMLDivElement>(null);
+  const [finnhubDraft, setFinnhubDraft] = useState("");
+  const [playbookMemoryDraft, setPlaybookMemoryDraft] = useState("");
+  const [playbookMemoryEnabledDraft, setPlaybookMemoryEnabledDraft] = useState(false);
+  const [finnhubSaveMessage, setFinnhubSaveMessage] = useState("");
+  const [finnhubSaveState, setFinnhubSaveState] = useState<"idle" | "success" | "error">("idle");
+  const [playbookSaveMessage, setPlaybookSaveMessage] = useState("");
 
   // Escape to close
   useEffect(() => {
@@ -28,6 +53,21 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    setFinnhubDraft(settings.finnhubApiKey);
+    setPlaybookMemoryDraft(settings.playbookMemory);
+    setPlaybookMemoryEnabledDraft(settings.playbookMemoryEnabled);
+    setFinnhubSaveMessage("");
+    setFinnhubSaveState("idle");
+    setPlaybookSaveMessage("");
+  }, [
+    open,
+    settings.finnhubApiKey,
+    settings.playbookMemory,
+    settings.playbookMemoryEnabled,
+  ]);
 
   if (!open) return null;
 
@@ -44,6 +84,38 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       : status === "probing"
         ? "Probing ports..."
         : "Disconnected";
+  const finnhubTesting = finnhubStatus === "testing";
+  const playbookHasText = playbookMemoryDraft.trim().length > 0;
+  const playbookDirty =
+    playbookMemoryDraft !== settings.playbookMemory ||
+    playbookMemoryEnabledDraft !== settings.playbookMemoryEnabled;
+
+  async function handleFinnhubSave() {
+    setFinnhubSaveMessage("");
+    setFinnhubSaveState("idle");
+    const result = await validateFinnhubKey(finnhubDraft);
+    if (result.ok) {
+      setFinnhubSaveState("success");
+      setFinnhubSaveMessage(result.message);
+    } else {
+      setFinnhubSaveState("error");
+      setFinnhubSaveMessage(result.message);
+    }
+  }
+
+  function handlePlaybookSave() {
+    updateSettings({
+      playbookMemory: playbookMemoryDraft,
+      playbookMemoryEnabled: playbookHasText ? playbookMemoryEnabledDraft : false,
+    });
+    setPlaybookSaveMessage("Playbook memory saved");
+  }
+
+  function handlePlaybookClear() {
+    setPlaybookMemoryDraft("");
+    setPlaybookMemoryEnabledDraft(false);
+    setPlaybookSaveMessage("");
+  }
 
   return (
     <>
@@ -77,7 +149,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {/* Connection Section */}
           <section className="mb-6">
             <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
-              Connection
+              Connection (IBKR ONLY)
             </h3>
 
             {/* Status */}
@@ -115,7 +187,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {/* Trading Configuration */}
           <section>
             <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
-              Trading Configuration
+              Trading Configuration (IBKR ONLY)
             </h3>
 
             {/* Radio: FA Group vs Account */}
@@ -172,6 +244,147 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 />
               </div>
             )}
+          </section>
+
+          <section className="mt-6">
+            <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
+              FINNHUB API KEY (OPTIONAL)
+            </h3>
+            <label className="mb-1 block text-[10px] text-white/30">
+              API Key
+            </label>
+            <input
+              type="password"
+              value={finnhubDraft}
+              onChange={(e) => setFinnhubDraft(e.target.value)}
+              placeholder="Paste your Finnhub API key"
+              className="w-full rounded border border-white/[0.08] bg-base px-2 py-1 font-mono text-[11px] text-white/60 outline-none transition-colors duration-75 placeholder:text-white/15 focus:border-blue/40"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span
+                className={`text-[10px] ${
+                  finnhubTesting
+                    ? "text-amber"
+                    : finnhubStatus === "connected"
+                      ? "text-green"
+                      : "text-white/35"
+                }`}
+              >
+                {finnhubTesting ? "Testing..." : finnhubMessage}
+              </span>
+              <button
+                onClick={() => handleFinnhubSave()}
+                disabled={finnhubTesting || finnhubDraft === settings.finnhubApiKey}
+                className="rounded-md border border-white/[0.08] bg-base px-3 py-1 text-[11px] text-white/50 transition-colors duration-120 hover:bg-white/[0.04] hover:text-white/70 disabled:opacity-40"
+              >
+                {finnhubTesting ? "Saving..." : "Save"}
+              </button>
+            </div>
+            {finnhubSaveMessage ? (
+              <p
+                className={`mt-2 text-[10px] ${
+                  finnhubSaveState === "success" ? "text-green" : "text-red/70"
+                }`}
+              >
+                {finnhubSaveMessage}
+              </p>
+            ) : null}
+          </section>
+
+          <section className="mt-6 border-t border-white/[0.06] pt-6">
+            <div className="mb-3">
+              <h3 className="text-[10px] font-semibold uppercase tracking-wider text-white/30">
+                Playbook Memory
+              </h3>
+              <p className="mt-1 max-w-[320px] text-[10px] leading-4 text-white/35">
+                Persistent trading rules, preferences, and context that the AI monitor should consider before generating analysis.
+              </p>
+            </div>
+
+            <label className="mb-2 flex cursor-pointer items-center justify-between gap-3 rounded-md border border-white/[0.06] bg-base/70 px-3 py-2">
+              <div>
+                <p className="text-[11px] text-white/65">Enable Playbook Memory for AI Monitor</p>
+                <p className="mt-0.5 text-[10px] text-white/25">
+                  Stored locally even when disabled.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={playbookMemoryEnabledDraft}
+                aria-label="Enable Playbook Memory for AI Monitor"
+                onClick={() => {
+                  if (!playbookHasText && !playbookMemoryEnabledDraft) return;
+                  setPlaybookMemoryEnabledDraft((value) => !value);
+                  setPlaybookSaveMessage("");
+                }}
+                disabled={!playbookHasText && !playbookMemoryEnabledDraft}
+                className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors duration-120 ${
+                  playbookMemoryEnabledDraft
+                    ? "border-blue/50 bg-blue/30"
+                    : "border-white/[0.08] bg-white/[0.06]"
+                } disabled:opacity-40`}
+              >
+                <span
+                  className={`absolute top-[1px] h-3.5 w-3.5 rounded-full bg-white transition-transform duration-120 ${
+                    playbookMemoryEnabledDraft ? "translate-x-[18px]" : "translate-x-[1px]"
+                  }`}
+                />
+              </button>
+            </label>
+
+            <textarea
+              value={playbookMemoryDraft}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                setPlaybookMemoryDraft(nextValue);
+                setPlaybookSaveMessage("");
+                if (nextValue.trim().length === 0) {
+                  setPlaybookMemoryEnabledDraft(false);
+                } else if (!settings.playbookMemory && !settings.playbookMemoryEnabled) {
+                  setPlaybookMemoryEnabledDraft(true);
+                }
+              }}
+              placeholder={PLAYBOOK_PLACEHOLDER}
+              className="min-h-[190px] w-full resize-y rounded-md border border-white/[0.08] bg-base px-3 py-2 text-[11px] leading-5 text-white/72 outline-none transition-colors duration-75 placeholder:text-white/18 focus:border-blue/40"
+              spellCheck={false}
+            />
+
+            <p className="mt-2 text-[10px] leading-4 text-white/28">
+              This text is prepended to the AI monitor context as a persistent instruction layer.
+            </p>
+
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={handlePlaybookClear}
+                disabled={!playbookMemoryDraft && !playbookMemoryEnabledDraft}
+                className="rounded-md border border-white/[0.08] bg-base px-3 py-1 text-[11px] text-white/50 transition-colors duration-120 hover:bg-white/[0.04] hover:text-white/70 disabled:opacity-40"
+              >
+                Clear
+              </button>
+              <div className="flex items-center gap-3">
+                {playbookSaveMessage ? (
+                  <span className="text-[10px] text-green">
+                    {playbookSaveMessage}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-white/20">
+                    {playbookDirty ? "Unsaved changes" : "Saved"}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handlePlaybookSave}
+                  disabled={!playbookDirty}
+                  className="rounded-md border border-white/[0.08] bg-base px-3 py-1 text-[11px] text-white/50 transition-colors duration-120 hover:bg-white/[0.04] hover:text-white/70 disabled:opacity-40"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
           </section>
         </div>
       </div>

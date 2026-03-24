@@ -10,7 +10,11 @@ import math
 import random
 import time
 from collections import deque
+from pathlib import Path
 from typing import Dict, List
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from ib_insync import IB, Stock, Ticker
 from yahooquery import Ticker as YahooTicker
@@ -19,8 +23,10 @@ from db_utils import sync_db_session
 from historical import (
     BACKGROUND_INTRADAY_DURATION,
     DEFAULT_DAILY_DURATION,
+    enqueue_historical_priority,
     get_historical_bars,
     invalidate_yahoo_cache,
+    pop_historical_priority_requests,
     save_realtime_bar,
     save_realtime_bar_1m,
 )
@@ -29,7 +35,7 @@ from ibkr_utils import (
     connect_with_client_id_fallback,
     is_client_id_in_use_error,
 )
-from runtime_paths import resource_path
+from runtime_paths import data_dir, resource_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,11 +43,19 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("watchlist-worker")
+logging.getLogger("ib_insync.client").setLevel(logging.CRITICAL)
 
 WATCHLIST_REFRESH_S = 2.0
-YAHOO_POLL_S = 5.0
+YAHOO_POLL_S = 600.0
+YAHOO_SYMBOL_SLEEP_S = 3.0
 YAHOO_VALUATION_CHECK_S = 300.0
+YAHOO_VALUATION_SYMBOL_SLEEP_S = 60.0
 YAHOO_VALUATION_MAX_AGE_S = 86400.0
+YAHOO_VALUATION_FAST_RETRY_S = 10.0   # Retry interval when market_cap still NULL for some symbols
+FINNHUB_WATCHLIST_POLL_S = 600.0
+FINNHUB_WATCHLIST_SYMBOL_SLEEP_S = 1.5
+FINNHUB_UNIVERSE_SYMBOL_SLEEP_S = 4.0
+FINNHUB_HTTP_TIMEOUT_S = 10.0
 TICK_THROTTLE_S = 3.0
 ACTIVE_REFRESH_S = 3.0
 ACTIVE_TTL_S = 120
@@ -50,6 +64,10 @@ UNIVERSE_REFRESH_S = 300.0
 SNAPSHOT_LOOP_SLEEP_S = 5.0
 SNAPSHOT_STALE_S = 300.0
 UNIVERSE_BATCH_SIZE = 8
+YAHOO_HISTORICAL_REQUEST_SLEEP_S = 5.0
+YAHOO_HISTORICAL_SYMBOL_SLEEP_S = 10.0
+TWS_HISTORICAL_REQUEST_SLEEP_S = 1.0
+URGENT_HISTORICAL_BATCH_SIZE = 4
 SUBSCRIPTION_PACE_S = 2.0
 REALTIME_PACE_S = 3.0
 REALTIME_BACKOFF_BASE_S = 10.0
@@ -57,8 +75,10 @@ REALTIME_BACKOFF_MAX_S = 30.0
 MAX_REALTIME_BAR_SUBSCRIPTIONS = 25
 SHARD_THRESHOLD = 20
 MAX_SHARDS = 3
-UNIVERSE_SNAPSHOT_SLEEP_S = 1.0
+UNIVERSE_SNAPSHOT_SLEEP_S = 10.0
 UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S = 60.0
+UNIVERSE_YAHOO_INTERVAL_S = 43200.0  # Re-fetch Yahoo prices/market-caps for full universe every 12h
+UNIVERSE_YAHOO_FAST_RETRY_S = 10.0   # Retry interval when market_cap still NULL for some symbols
 
 STATE_QUEUED = "queued"
 STATE_SUBSCRIBED = "subscribed"
@@ -68,6 +88,7 @@ STATE_ERROR = "subscription_error"
 CLIENT_ID_SCAN_LIMIT = 10000
 WORKER_ROLE = "watchlist-worker"
 TICKERS_PATH = resource_path("data", "tickers.json")
+SETTINGS_PATH = data_dir() / "tws-settings.json"
 
 
 def default_client_id() -> int:
@@ -153,6 +174,225 @@ def yahoo_to_quote(symbol: str, data: dict) -> dict:
         "spread": None,
         "source": "yahoo",
     }
+
+
+def _load_finnhub_api_key(settings_path: Path = SETTINGS_PATH) -> str:
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        logger.warning("Failed to read Finnhub settings from %s: %s", settings_path, exc)
+        return ""
+
+    api_key = raw.get("finnhubApiKey") if isinstance(raw, dict) else ""
+    return str(api_key or "").strip()
+
+
+def _finnhub_get_json(path: str, params: dict[str, str]) -> dict:
+    query = urlencode(params)
+    url = f"https://finnhub.io/api/v1/{path}?{query}"
+    with urlopen(url, timeout=FINNHUB_HTTP_TIMEOUT_S) as response:
+        payload = response.read().decode("utf-8")
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected Finnhub payload type for {path}")
+    if data.get("error"):
+        raise RuntimeError(str(data["error"]))
+    return data
+
+
+def _finnhub_quote_to_quote(symbol: str, data: dict) -> dict | None:
+    last = _price(data.get("c"))
+    if last is None:
+        return None
+
+    prev_close = _price(data.get("pc"))
+    open_ = _price(data.get("o"))
+    high = _price(data.get("h"))
+    low = _price(data.get("l"))
+    change = _safe(data.get("d"))
+    change_pct = _safe(data.get("dp"))
+    if change is None and prev_close is not None:
+        change = round(last - prev_close, 4)
+    if change_pct is None and prev_close is not None and prev_close > 0 and change is not None:
+        change_pct = round((change / prev_close) * 100, 4)
+
+    return {
+        "symbol": symbol,
+        "last": last,
+        "bid": None,
+        "ask": None,
+        "mid": None,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "prev_close": prev_close,
+        "change": change if change is not None else 0.0,
+        "change_pct": change_pct if change_pct is not None else 0.0,
+        "volume": 0.0,
+        "spread": None,
+        "source": "finnhub",
+    }
+
+
+def fetch_quotes_from_finnhub(
+    symbols: List[str],
+    *,
+    api_key: str,
+    sleep_s: float,
+    label: str,
+) -> List[dict]:
+    quotes: List[dict] = []
+    total = len(symbols)
+    for idx, sym in enumerate(symbols, start=1):
+        msg = f"[{label}] Fetching {sym} ({idx}/{total})"
+        print(msg, flush=True)
+        logger.info(msg)
+        try:
+            data = _finnhub_get_json("quote", {"symbol": sym, "token": api_key})
+            quote = _finnhub_quote_to_quote(sym, data)
+            if quote is None:
+                raise RuntimeError("Finnhub quote payload missing current price")
+            quotes.append(quote)
+            if label == "Finnhub watchlist":
+                quote_msg = (
+                    f"[Finnhub watchlist] Quote {sym}: "
+                    f"last={quote.get('last')} open={quote.get('open')} "
+                    f"high={quote.get('high')} low={quote.get('low')} "
+                    f"prev_close={quote.get('prev_close')} change_pct={quote.get('change_pct')}"
+                )
+                print(quote_msg, flush=True)
+                logger.info(quote_msg)
+        except HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                pass
+            detail = f"HTTP {exc.code}"
+            if body:
+                detail = f"{detail}: {body}"
+            raise RuntimeError(detail) from exc
+        except URLError as exc:
+            raise RuntimeError(f"network error: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("invalid JSON from Finnhub") from exc
+
+        if idx < total:
+            time.sleep(sleep_s)
+    return quotes
+
+
+def fetch_watchlist_quotes_from_yahoo(symbols: List[str]) -> List[dict]:
+    """Fetch Yahoo watchlist quotes one symbol at a time with a fixed pause."""
+    quotes: List[dict] = []
+    total = len(symbols)
+    for idx, sym in enumerate(symbols, start=1):
+        msg = f"[Yahoo watchlist] Fetching {sym} ({idx}/{total})"
+        print(msg, flush=True)
+        logger.info(msg)
+        try:
+            ticker = YahooTicker(sym, asynchronous=False)
+            price_data = ticker.price
+            data = price_data.get(sym) if isinstance(price_data, dict) else None
+            if isinstance(data, dict):
+                quotes.append(yahoo_to_quote(sym, data))
+            else:
+                logger.warning("Yahoo returned no price payload for %s", sym)
+        except Exception as exc:
+            logger.warning("Yahoo fetch failed for %s: %s", sym, exc)
+        if idx < total:
+            time.sleep(YAHOO_SYMBOL_SLEEP_S)
+    return quotes
+
+
+def fetch_universe_quotes_from_yahoo(symbols: List[str]) -> List[dict]:
+    quotes: List[dict] = []
+    total = len(symbols)
+    for idx, sym in enumerate(symbols, start=1):
+        msg = f"[UniverseYahoo] Fetching {sym} ({idx}/{total})"
+        print(msg, flush=True)
+        logger.info(msg)
+        try:
+            ticker = YahooTicker(sym, asynchronous=False)
+            price_data = ticker.price
+            data = price_data.get(sym) if isinstance(price_data, dict) else None
+            if isinstance(data, dict):
+                quote = yahoo_to_quote(sym, data)
+                if quote.get("last"):
+                    quotes.append(quote)
+                _, _, market_cap = _extract_yahoo_valuation({}, data)
+                if market_cap:
+                    upsert_quote_valuation(sym, None, None, market_cap)
+            else:
+                logger.warning("Yahoo returned no universe payload for %s", sym)
+        except Exception as exc:
+            logger.warning("Yahoo universe fetch failed for %s: %s", sym, exc)
+        if idx < total:
+            time.sleep(YAHOO_SYMBOL_SLEEP_S)
+    return quotes
+
+
+def fetch_watchlist_quotes_with_fallback(symbols: List[str]) -> tuple[str, List[dict]]:
+    api_key = _load_finnhub_api_key()
+    if api_key:
+        try:
+            quotes = fetch_quotes_from_finnhub(
+                symbols,
+                api_key=api_key,
+                sleep_s=FINNHUB_WATCHLIST_SYMBOL_SLEEP_S,
+                label="Finnhub watchlist",
+            )
+            return "finnhub", quotes
+        except Exception as exc:
+            logger.warning("Finnhub watchlist cycle failed, falling back to Yahoo: %s", exc)
+    return "yahoo", fetch_watchlist_quotes_from_yahoo(symbols)
+
+
+def fetch_universe_quotes_with_fallback(symbols: List[str]) -> tuple[str, List[dict]]:
+    api_key = _load_finnhub_api_key()
+    if api_key:
+        try:
+            quotes = fetch_quotes_from_finnhub(
+                symbols,
+                api_key=api_key,
+                sleep_s=FINNHUB_UNIVERSE_SYMBOL_SLEEP_S,
+                label="Finnhub universe",
+            )
+            return "finnhub", quotes
+        except Exception as exc:
+            logger.warning("Finnhub universe cycle failed, falling back to Yahoo: %s", exc)
+    return "yahoo", fetch_universe_quotes_from_yahoo(symbols)
+
+
+def refresh_watchlist_valuations_from_yahoo(symbols: List[str]) -> None:
+    """Fetch Yahoo valuation fields one symbol at a time with a long pause."""
+    total = len(symbols)
+    for idx, sym in enumerate(symbols, start=1):
+        msg = f"[Valuation loop] symbol {idx}/{total}: {sym}"
+        print(msg, flush=True)
+        logger.info(msg)
+        try:
+            ticker = YahooTicker(sym, asynchronous=False)
+            summary_data = ticker.summary_detail
+            price_data = ticker.price
+            data = summary_data.get(sym) if isinstance(summary_data, dict) else None
+            pd = price_data.get(sym) if isinstance(price_data, dict) else None
+            trailing_pe, forward_pe, market_cap = _extract_yahoo_valuation(
+                data if isinstance(data, dict) else {},
+                pd if isinstance(pd, dict) else None,
+            )
+            upsert_quote_valuation(sym, trailing_pe, forward_pe, market_cap)
+            cap_str = f"${market_cap/1e9:.2f}B" if market_cap else "N/A"
+            logger.info(
+                f"[Valuation] {sym}: P/E={trailing_pe}, Fwd P/E={forward_pe}, MktCap={cap_str}"
+            )
+        except Exception as exc:
+            logger.warning("Yahoo valuation fetch failed for %s: %s", sym, exc)
+        if idx < total:
+            time.sleep(YAHOO_VALUATION_SYMBOL_SLEEP_S)
 
 
 def _extract_yahoo_valuation(
@@ -534,6 +774,25 @@ def get_stale_valuation_symbols(symbols: List[str], max_age_s: float) -> List[st
     return [row[0] for row in rows]
 
 
+def count_null_market_cap_symbols(symbols: List[str]) -> int:
+    """Return how many of the given symbols have NULL market_cap in watchlist_quotes."""
+    if not symbols:
+        return 0
+    placeholders = ", ".join("?" * len(symbols))
+    with sync_db_session() as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM watchlist_quotes
+            WHERE symbol IN ({placeholders})
+              AND market_cap IS NOT NULL
+            """,
+            (*symbols,),
+        ).fetchone()
+    filled = row[0] if row else 0
+    return len(symbols) - filled
+
+
 def read_latest_bid_ask(symbol: str) -> tuple[float | None, float | None]:
     with sync_db_session() as conn:
         bid_row = conn.execute(
@@ -606,7 +865,12 @@ def read_active_symbols() -> List[str]:
     cutoff_ms = int(time.time() * 1000) - (ACTIVE_TTL_S * 1000)
     with sync_db_session() as conn:
         rows = conn.execute(
-            "SELECT symbol FROM active_symbols WHERE last_requested >= ?",
+            """
+            SELECT symbol
+            FROM active_symbols
+            WHERE last_requested >= ?
+            ORDER BY last_requested DESC
+            """,
             (cutoff_ms,),
         ).fetchall()
     return [r[0] for r in rows]
@@ -656,7 +920,7 @@ async def connect_ib_with_manager(
                         logger.error("Exhausted TWS clientId range while attempting to connect")
                         return False, client_id
                     break
-                logger.warning(f"TWS connect failed {host}:{port} (clientId={candidate}): {exc}")
+                logger.debug(f"TWS connect failed {host}:{port} (clientId={candidate}): {exc}")
         else:
             # Exhausted ports without a clientId-in-use signal; wait for reconnect loop.
             return False, candidate
@@ -688,6 +952,12 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
     def _num_shards() -> int:
         return len(ib_shards)
 
+    def _quote_symbols() -> List[str]:
+        return list(dict.fromkeys(watchlist + active_symbols))
+
+    def _quote_symbol_set() -> set[str]:
+        return set(_quote_symbols())
+
     def _shard_for_symbol(sym: str) -> int:
         """Determine which shard a symbol should be assigned to (round-robin by watchlist index)."""
         if sym in symbol_to_shard:
@@ -695,7 +965,10 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
         try:
             idx = watchlist.index(sym)
         except ValueError:
-            idx = hash(sym)
+            try:
+                idx = _quote_symbols().index(sym)
+            except ValueError:
+                idx = hash(sym)
         shard_idx = idx % _num_shards()
         return shard_idx
 
@@ -861,7 +1134,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
 
             if kind == "quote":
                 queued_quote_symbols.discard(sym)
-                if sym not in watchlist:
+                if sym not in _quote_symbol_set():
                     continue
                 if sym in tickers:
                     logger.debug("Skipping quote subscribe for %s; already subscribed", sym)
@@ -921,13 +1194,16 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 current = []
 
             if current != watchlist:
-                added = set(current) - set(watchlist)
-                removed = set(watchlist) - set(current)
+                previous_symbols = _quote_symbol_set()
                 watchlist = current
-                await asyncio.to_thread(clear_statuses_not_in, watchlist)
+                current_symbols = _quote_symbol_set()
+                added = current_symbols - previous_symbols
+                removed = previous_symbols - current_symbols
+                await asyncio.to_thread(clear_statuses_not_in, list(current_symbols))
                 logger.info(
-                    "Watchlist refresh: %s symbols total, +%s, -%s, symbols=%s",
+                    "Watchlist refresh: watchlist=%s quote_universe=%s +%s -%s symbols=%s",
                     len(watchlist),
+                    len(current_symbols),
                     len(added),
                     len(removed),
                     ",".join(watchlist) if watchlist else "(empty)",
@@ -953,10 +1229,11 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
             await asyncio.sleep(WATCHLIST_REFRESH_S)
 
     async def _adjust_shards():
-        """Spin up or tear down extra IB shards based on watchlist size."""
+        """Spin up or tear down extra IB shards based on quote-subscription demand."""
+        quote_symbols = _quote_symbols()
         desired = 1
-        if len(watchlist) > SHARD_THRESHOLD:
-            desired = min(math.ceil(len(watchlist) / SHARD_THRESHOLD), MAX_SHARDS)
+        if len(quote_symbols) > SHARD_THRESHOLD:
+            desired = min(math.ceil(len(quote_symbols) / SHARD_THRESHOLD), MAX_SHARDS)
 
         # Spin up new shards
         while len(ib_shards) < desired:
@@ -975,8 +1252,8 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 if ok:
                     shard_client_ids[new_idx] = final_cid
                     logger.info(
-                        "Shard %d connected (clientId=%d) for %d-symbol watchlist",
-                        new_idx, final_cid, len(watchlist),
+                        "Shard %d connected (clientId=%d) for %d-symbol quote universe",
+                        new_idx, final_cid, len(quote_symbols),
                     )
                 else:
                     logger.warning("Shard %d failed to connect, will retry on reconnect", new_idx)
@@ -1012,16 +1289,35 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 current = []
 
             if current != active_symbols:
-                added = set(current) - set(active_symbols)
-                removed = set(active_symbols) - set(current)
+                previous_quote_symbols = _quote_symbol_set()
+                previous_active_symbols = set(active_symbols)
                 active_symbols = current
+                current_quote_symbols = _quote_symbol_set()
+                active_added = set(active_symbols) - previous_active_symbols
+                active_removed = previous_active_symbols - set(active_symbols)
+                quote_added = current_quote_symbols - previous_quote_symbols
+                quote_removed = previous_quote_symbols - current_quote_symbols
 
-                for sym in removed:
+                await asyncio.to_thread(clear_statuses_not_in, list(current_quote_symbols))
+
+                for sym in active_removed:
                     cancel_realtime_subscription(sym)
 
+                for sym in quote_removed:
+                    cancel_quote_subscription(sym)
+                    drop_symbol_state(sym)
+
+                await _adjust_shards()
+
                 if _primary_ib().isConnected():
-                    for sym in added:
+                    for sym in quote_added:
+                        set_symbol_state(sym, STATE_QUEUED, "queued for paced quote subscription")
+                        queue_subscription("quote", sym, "active_symbol")
+                    for sym in active_added:
                         queue_subscription("realtime", sym, "active_symbol")
+                else:
+                    for sym in quote_added:
+                        set_symbol_state(sym, STATE_QUEUED, "active symbol loaded before IB connection")
 
             await asyncio.sleep(ACTIVE_REFRESH_S)
 
@@ -1040,17 +1336,18 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
     async def status_summary_loop():
         while True:
             await asyncio.sleep(STATUS_SUMMARY_S)
-            if not watchlist:
+            quote_symbols = _quote_symbols()
+            if not quote_symbols:
                 continue
-            waiting = [sym for sym in watchlist if symbol_states.get(sym) == STATE_WAITING]
-            queued = [sym for sym in watchlist if symbol_states.get(sym) == STATE_QUEUED]
-            live = [sym for sym in watchlist if symbol_states.get(sym) == STATE_LIVE]
-            errors = [sym for sym in watchlist if symbol_states.get(sym) == STATE_ERROR]
-            missing = [sym for sym in watchlist if sym not in tickers]
+            waiting = [sym for sym in quote_symbols if symbol_states.get(sym) == STATE_WAITING]
+            queued = [sym for sym in quote_symbols if symbol_states.get(sym) == STATE_QUEUED]
+            live = [sym for sym in quote_symbols if symbol_states.get(sym) == STATE_LIVE]
+            errors = [sym for sym in quote_symbols if symbol_states.get(sym) == STATE_ERROR]
+            missing = [sym for sym in quote_symbols if sym not in tickers]
             shard_info = f" shards={_num_shards()}" if _num_shards() > 1 else ""
             logger.info(
-                "Watchlist status summary: total=%s subscribed=%s live=%s waiting=%s queued=%s errors=%s missing_ticker=%s%s",
-                len(watchlist),
+                "Quote status summary: total=%s subscribed=%s live=%s waiting=%s queued=%s errors=%s missing_ticker=%s%s",
+                len(quote_symbols),
                 len(tickers),
                 len(live),
                 len(waiting),
@@ -1070,83 +1367,118 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
 
     async def yahoo_loop():
         while True:
-            await asyncio.sleep(YAHOO_POLL_S)
+            cycle_started = time.monotonic()
             if _any_shard_connected():
+                await asyncio.sleep(FINNHUB_WATCHLIST_POLL_S)
                 continue
-            if not watchlist:
+            symbols = _quote_symbols()
+            if not symbols:
+                await asyncio.sleep(FINNHUB_WATCHLIST_POLL_S)
                 continue
             try:
-                t = YahooTicker(watchlist, asynchronous=True)
-                price_data = t.price
-                if isinstance(price_data, dict):
-                    for sym in watchlist:
-                        data = price_data.get(sym)
-                        if isinstance(data, dict):
-                            q = yahoo_to_quote(sym, data)
-                            await asyncio.to_thread(upsert_quote, q)
+                source = "Finnhub" if _load_finnhub_api_key() else "Yahoo"
+                start_msg = (
+                    f"[Quote fallback] Starting {source} refresh for {len(symbols)} symbols; "
+                    f"next cycle in {int(FINNHUB_WATCHLIST_POLL_S)}s"
+                )
+                print(start_msg, flush=True)
+                logger.info(start_msg)
+                selected_source, quotes = await asyncio.to_thread(
+                    fetch_watchlist_quotes_with_fallback, symbols
+                )
+                for q in quotes:
+                    await asyncio.to_thread(upsert_quote, q)
+                logger.info(
+                    "[Quote fallback] %s returned %d/%d quotes",
+                    selected_source,
+                    len(quotes),
+                    len(symbols),
+                )
             except Exception as exc:
-                logger.warning(f"Yahoo poll failed: {exc}")
+                logger.warning(f"Quote fallback poll failed: {exc}")
+            elapsed = time.monotonic() - cycle_started
+            await asyncio.sleep(max(0.0, FINNHUB_WATCHLIST_POLL_S - elapsed))
 
     async def yahoo_valuation_loop():
         while True:
-            if not watchlist:
+            symbols = _quote_symbols()
+            if not symbols:
                 await asyncio.sleep(YAHOO_VALUATION_CHECK_S)
                 continue
             stale_symbols = await asyncio.to_thread(
-                get_stale_valuation_symbols, watchlist, YAHOO_VALUATION_MAX_AGE_S
+                get_stale_valuation_symbols, symbols, YAHOO_VALUATION_MAX_AGE_S
             )
             if not stale_symbols:
-                logger.info(f"[Valuation] All {len(watchlist)} symbols up-to-date, next check in {YAHOO_VALUATION_CHECK_S}s")
+                logger.info(f"[Valuation] All {len(symbols)} quote symbols up-to-date, next check in {YAHOO_VALUATION_CHECK_S}s")
                 await asyncio.sleep(YAHOO_VALUATION_CHECK_S)
                 continue
-            logger.info(f"[Valuation] {len(stale_symbols)} stale symbols to refresh: {','.join(stale_symbols[:10])}{'...' if len(stale_symbols) > 10 else ''}")
-            # Process in small batches with rate-limiting sleeps
-            batch_size = 20
-            for i in range(0, len(stale_symbols), batch_size):
-                batch = stale_symbols[i : i + batch_size]
-                try:
-                    t = YahooTicker(batch, asynchronous=True)
-                    summary_data = t.summary_detail
-                    price_data = t.price
-                    if isinstance(summary_data, dict):
-                        for sym in batch:
-                            data = summary_data.get(sym)
-                            pd = price_data.get(sym) if isinstance(price_data, dict) else None
-                            trailing_pe, forward_pe, market_cap = _extract_yahoo_valuation(data, pd)
-                            await asyncio.to_thread(
-                                upsert_quote_valuation, sym, trailing_pe, forward_pe, market_cap
-                            )
-                            cap_str = f"${market_cap/1e9:.2f}B" if market_cap else "N/A"
-                            logger.info(f"[Valuation] {sym}: P/E={trailing_pe}, Fwd P/E={forward_pe}, MktCap={cap_str}")
-                except Exception as exc:
-                    logger.warning(f"Yahoo valuation poll failed: {exc}")
-                # Rate-limit between batches to avoid Yahoo API blocking
-                if i + batch_size < len(stale_symbols):
-                    await asyncio.sleep(1.5)
-            await asyncio.sleep(YAHOO_VALUATION_CHECK_S)
+            loop_msg = (
+                f"[Valuation loop] Starting Yahoo valuation refresh for {len(stale_symbols)} symbols: "
+                f"{','.join(stale_symbols[:10])}{'...' if len(stale_symbols) > 10 else ''}"
+            )
+            print(loop_msg, flush=True)
+            logger.info(loop_msg)
+            await asyncio.to_thread(refresh_watchlist_valuations_from_yahoo, stale_symbols)
+            null_count = await asyncio.to_thread(count_null_market_cap_symbols, symbols)
+            if null_count > 0:
+                logger.info(f"[Valuation] {null_count}/{len(symbols)} quote symbols still missing market_cap, retrying in {YAHOO_VALUATION_FAST_RETRY_S}s")
+                await asyncio.sleep(YAHOO_VALUATION_FAST_RETRY_S)
+            else:
+                logger.info(f"[Valuation] All quote symbols market caps filled, next check in {YAHOO_VALUATION_CHECK_S}s")
+                await asyncio.sleep(YAHOO_VALUATION_CHECK_S)
 
     async def backfill_loop():
         last_backfill: Dict[str, float] = {}
-        cursor = 0
+        tail_cursor = 0
         while True:
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
             ib = _primary_ib()
-            if not ib.isConnected():
-                continue
+            tws_connected = ib.isConnected()
+            urgent_requests = await asyncio.to_thread(
+                pop_historical_priority_requests,
+                URGENT_HISTORICAL_BATCH_SIZE,
+            )
+            for request in urgent_requests:
+                sym = request["symbol"]
+                request_bar_size = "1 day" if request["bar_size"] == "1d" else "1 min"
+                request_what = request["what_to_show"]
+                request_duration = request["duration"]
+                try:
+                    if tws_connected and request_bar_size == "1 min" and request_what == "TRADES":
+                        await asyncio.to_thread(invalidate_yahoo_cache, [sym])
+                    await get_historical_bars(
+                        symbol=sym,
+                        ib=ib,
+                        tws_connected=tws_connected,
+                        duration=request_duration,
+                        bar_size=request_bar_size,
+                        what_to_show=request_what,
+                    )
+                    await asyncio.to_thread(refresh_snapshot_from_db, sym)
+                except Exception as exc:
+                    logger.debug(f"Urgent historical fetch failed for {sym}: {exc}")
+                    await asyncio.to_thread(
+                        enqueue_historical_priority,
+                        sym,
+                        request["bar_size"],
+                        request_what,
+                        request_duration,
+                    )
+                if tws_connected:
+                    await asyncio.sleep(TWS_HISTORICAL_REQUEST_SLEEP_S)
+                else:
+                    await asyncio.sleep(YAHOO_HISTORICAL_REQUEST_SLEEP_S)
+
             priority = list(dict.fromkeys(active_symbols + watchlist))
             tail = [sym for sym in universe_symbols if sym not in set(priority)]
-            symbols = priority + tail
-            if not symbols:
-                continue
-            if cursor >= len(symbols):
-                cursor = 0
-            batch: list[str] = []
-            priority_budget = min(len(priority), UNIVERSE_BATCH_SIZE)
-            batch.extend(priority[:priority_budget])
+            batch = priority[:UNIVERSE_BATCH_SIZE]
+
             while len(batch) < UNIVERSE_BATCH_SIZE and tail:
-                idx = cursor % len(tail)
-                batch.append(tail[idx])
-                cursor += 1
+                if tail_cursor >= len(tail):
+                    tail_cursor = 0
+                batch.append(tail[tail_cursor])
+                tail_cursor = (tail_cursor + 1) % len(tail)
+
             for sym in list(dict.fromkeys(batch)):
                 now = time.time()
                 if now - last_backfill.get(sym, 0) < 300:
@@ -1156,30 +1488,36 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                     await get_historical_bars(
                         symbol=sym,
                         ib=ib,
-                        tws_connected=True,
+                        tws_connected=tws_connected,
                         duration=BACKGROUND_INTRADAY_DURATION,
                         bar_size="1 min",
                     )
+                    if tws_connected:
+                        await asyncio.sleep(TWS_HISTORICAL_REQUEST_SLEEP_S)
+                        await get_historical_bars(
+                            symbol=sym,
+                            ib=ib,
+                            tws_connected=True,
+                            duration="30 D",
+                            bar_size="1 min",
+                            what_to_show="BID",
+                        )
+                        await asyncio.sleep(TWS_HISTORICAL_REQUEST_SLEEP_S)
+                        await get_historical_bars(
+                            symbol=sym,
+                            ib=ib,
+                            tws_connected=True,
+                            duration="30 D",
+                            bar_size="1 min",
+                            what_to_show="ASK",
+                        )
+                        await asyncio.sleep(TWS_HISTORICAL_REQUEST_SLEEP_S)
+                    else:
+                        await asyncio.sleep(YAHOO_HISTORICAL_REQUEST_SLEEP_S)
                     await get_historical_bars(
                         symbol=sym,
                         ib=ib,
-                        tws_connected=True,
-                        duration="30 D",
-                        bar_size="1 min",
-                        what_to_show="BID",
-                    )
-                    await get_historical_bars(
-                        symbol=sym,
-                        ib=ib,
-                        tws_connected=True,
-                        duration="30 D",
-                        bar_size="1 min",
-                        what_to_show="ASK",
-                    )
-                    await get_historical_bars(
-                        symbol=sym,
-                        ib=ib,
-                        tws_connected=True,
+                        tws_connected=tws_connected,
                         duration=DEFAULT_DAILY_DURATION,
                         bar_size="1 day",
                     )
@@ -1187,6 +1525,8 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                     await asyncio.to_thread(refresh_snapshot_from_db, sym)
                 except Exception as exc:
                     logger.debug(f"Backfill failed for {sym}: {exc}")
+                if not tws_connected:
+                    await asyncio.sleep(YAHOO_HISTORICAL_SYMBOL_SLEEP_S)
 
     async def snapshot_loop():
         cursor = 0
@@ -1207,62 +1547,142 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 except Exception as exc:
                     logger.debug(f"Snapshot refresh failed for {sym}: {exc}")
 
+    async def universe_yahoo_loop():
+        """Fetch Yahoo prices and market caps for all non-watchlist universe symbols.
+
+        Runs every UNIVERSE_YAHOO_INTERVAL_S (1 hour by default). This ensures the
+        heatmap has price data even for symbols that TWS snapshots fail on, and
+        populates market_cap in watchlist_quotes so the heatmap can size by market cap.
+        """
+        await asyncio.sleep(30)  # Let primary loops settle first
+        while True:
+            watchlist_set = set(watchlist)
+            queue = [sym for sym in universe_symbols if sym not in watchlist_set]
+            if not queue:
+                await asyncio.sleep(UNIVERSE_YAHOO_INTERVAL_S)
+                continue
+
+            logger.info("[UniverseYahoo] Fetching Yahoo price+marketcap for %d non-watchlist symbols", len(queue))
+            batch_size = 50
+            fetched = 0
+            for i in range(0, len(queue), batch_size):
+                batch = queue[i:i + batch_size]
+                try:
+                    t = YahooTicker(batch, asynchronous=True)
+                    price_data = t.price
+                    summary_data = t.summary_detail
+                    if isinstance(price_data, dict):
+                        for sym in batch:
+                            data = price_data.get(sym)
+                            if not isinstance(data, dict):
+                                continue
+                            q = yahoo_to_quote(sym, data)
+                            if q.get("last"):
+                                snapshot = _snapshot_from_quote(q)
+                                await asyncio.to_thread(_upsert_market_snapshot, snapshot)
+                                fetched += 1
+                            # Market cap from summary_detail or price
+                            sd = summary_data.get(sym) if isinstance(summary_data, dict) else None
+                            _, _, market_cap = _extract_yahoo_valuation(
+                                sd if isinstance(sd, dict) else {}, data
+                            )
+                            if market_cap:
+                                await asyncio.to_thread(
+                                    upsert_quote_valuation, sym, None, None, market_cap
+                                )
+                except Exception as exc:
+                    logger.warning("[UniverseYahoo] Batch %d failed: %s", i // batch_size, exc)
+                if i + batch_size < len(queue):
+                    await asyncio.sleep(1.5)
+
+            logger.info("[UniverseYahoo] Done: %d/%d symbols with prices", fetched, len(queue))
+            null_count = await asyncio.to_thread(count_null_market_cap_symbols, queue)
+            if null_count > 0:
+                logger.info("[UniverseYahoo] %d/%d symbols still missing market_cap, retrying in %ds",
+                            null_count, len(queue), int(UNIVERSE_YAHOO_FAST_RETRY_S))
+                await asyncio.sleep(UNIVERSE_YAHOO_FAST_RETRY_S)
+            else:
+                logger.info("[UniverseYahoo] All market caps filled, next run in %ds",
+                            int(UNIVERSE_YAHOO_INTERVAL_S))
+                await asyncio.sleep(UNIVERSE_YAHOO_INTERVAL_S)
+
     async def universe_price_loop():
         """Slowly pull snapshot quotes for the full ticker universe (for heatmap).
 
-        Iterates one symbol at a time with ~1s gaps. Skips watchlist symbols
-        (they already get live updates). Full cycle takes ~6 minutes for 350 symbols.
+        Iterates one symbol at a time. When TWS is connected it uses snapshots.
+        When TWS is disconnected it falls back to Finnhub first, then Yahoo.
         """
         await asyncio.sleep(15)  # Let other loops settle first
         while True:
             ib = _primary_ib()
-            if not ib.isConnected():
-                await asyncio.sleep(30)
-                continue
-
             watchlist_set = set(watchlist)
             queue = [sym for sym in universe_symbols if sym not in watchlist_set]
             if not queue:
                 await asyncio.sleep(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S)
                 continue
 
-            logger.info("[UniversePrice] Starting slow price cycle: %d symbols (skipping %d watchlist)",
-                        len(queue), len(watchlist_set))
-            fetched = 0
-            total = len(queue)
-            for i, sym in enumerate(queue):
-                if not ib.isConnected():
-                    break
-                try:
-                    contract = Stock(sym, "SMART", "USD")
-                    snap_ticker = ib.reqMktData(contract, genericTickList="", snapshot=True)
-                    # Give TWS time to fill the snapshot; yield to event loop
-                    for _ in range(5):
-                        await asyncio.sleep(0.1)
-                    q = ticker_to_quote(sym, snap_ticker)
-                    if q is not None:
-                        snapshot = _snapshot_from_quote(q)
-                        await asyncio.to_thread(_upsert_market_snapshot, snapshot)
-                        fetched += 1
-                    else:
-                        # Even without a valid quote, write what we have so the
-                        # heatmap shows the symbol exists (with stale/pending status)
-                        await asyncio.to_thread(refresh_snapshot_from_db, sym)
+            if ib.isConnected():
+                logger.info("[UniversePrice] Starting slow TWS cycle: %d symbols (skipping %d watchlist)",
+                            len(queue), len(watchlist_set))
+                fetched = 0
+                total = len(queue)
+                for i, sym in enumerate(queue):
+                    if not ib.isConnected():
+                        break
+                    q = None
                     try:
-                        ib.cancelMktData(contract)
-                    except Exception:
-                        pass
+                        contract = Stock(sym, "SMART", "USD")
+                        snap_ticker = ib.reqMktData(contract, genericTickList="", snapshot=True)
+                        # Give TWS time to fill the snapshot; yield to event loop
+                        for _ in range(5):
+                            await asyncio.sleep(0.1)
+                        q = ticker_to_quote(sym, snap_ticker)
+                        if q is not None:
+                            snapshot = _snapshot_from_quote(q)
+                            await asyncio.to_thread(_upsert_market_snapshot, snapshot)
+                            fetched += 1
+                        else:
+                            # Even without a valid quote, write what we have so the
+                            # heatmap shows the symbol exists (with stale/pending status)
+                            await asyncio.to_thread(refresh_snapshot_from_db, sym)
+                        try:
+                            ib.cancelMktData(contract)
+                        except Exception:
+                            pass
+                    except Exception as exc:
+                        logger.debug(f"[UniversePrice] Snapshot failed for {sym}: {exc}")
+
+                    await asyncio.sleep(UNIVERSE_SNAPSHOT_SLEEP_S)
+
+                    logger.info("[UniversePrice] %d/%d %s %s",
+                                i + 1, total, sym,
+                                f"last={q['last']}" if q else "no data")
+
+                logger.info("[UniversePrice] TWS cycle complete: %d/%d symbols updated, next cycle in %ds",
+                            fetched, len(queue), int(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S))
+            else:
+                source_hint = "Finnhub" if _load_finnhub_api_key() else "Yahoo"
+                logger.info(
+                    "[UniversePrice] Starting %s fallback cycle: %d symbols (skipping %d watchlist)",
+                    source_hint,
+                    len(queue),
+                    len(watchlist_set),
+                )
+                try:
+                    selected_source, quotes = await asyncio.to_thread(
+                        fetch_universe_quotes_with_fallback, queue
+                    )
+                    for q in quotes:
+                        await asyncio.to_thread(upsert_quote, q)
+                    logger.info(
+                        "[UniversePrice] %s fallback cycle complete: %d/%d symbols updated, next cycle in %ds",
+                        selected_source,
+                        len(quotes),
+                        len(queue),
+                        int(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S),
+                    )
                 except Exception as exc:
-                    logger.debug(f"[UniversePrice] Snapshot failed for {sym}: {exc}")
-
-                await asyncio.sleep(UNIVERSE_SNAPSHOT_SLEEP_S)
-
-                logger.info("[UniversePrice] %d/%d %s %s",
-                            i + 1, total, sym,
-                            f"last={q['last']}" if q else "no data")
-
-            logger.info("[UniversePrice] Cycle complete: %d/%d symbols updated, next cycle in %ds",
-                        fetched, len(queue), int(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S))
+                    logger.warning("[UniversePrice] Fallback cycle failed: %s", exc)
             await asyncio.sleep(UNIVERSE_SNAPSHOT_CYCLE_PAUSE_S)
 
     async def reconnect_loop():
@@ -1284,9 +1704,10 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                             queued_quote_symbols.clear()
                             queued_realtime_symbols.clear()
                             subscription_queue.clear()
-                            if watchlist:
-                                await asyncio.to_thread(invalidate_yahoo_cache, watchlist)
-                            for sym in watchlist:
+                            quote_symbols = _quote_symbols()
+                            if quote_symbols:
+                                await asyncio.to_thread(invalidate_yahoo_cache, quote_symbols)
+                            for sym in quote_symbols:
                                 queue_subscription("quote", sym, "reconnect")
                             for sym in active_symbols:
                                 queue_subscription("realtime", sym, "reconnect")
@@ -1297,7 +1718,9 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                                 cancel_quote_subscription(sym)
                                 queue_subscription("quote", sym, f"shard{i}_reconnect")
                         logger.info("Shard %d reconnected (clientId=%d)", i, new_id)
-            await asyncio.sleep(2.0)
+                    else:
+                        logger.debug("Shard %d not connected, will retry in 10s", i)
+            await asyncio.sleep(10.0)
 
     try:
         # Connect primary shard
@@ -1318,6 +1741,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
             backfill_loop(),
             snapshot_loop(),
             universe_price_loop(),
+            universe_yahoo_loop(),
             reconnect_loop(),
         )
     finally:

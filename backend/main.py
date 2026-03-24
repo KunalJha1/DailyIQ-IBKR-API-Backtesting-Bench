@@ -5,8 +5,13 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ib_insync import IB
@@ -14,11 +19,15 @@ from ib_insync import IB
 from db_utils import run_db, sync_db_session
 from historical import (
     DEFAULT_INTRADAY_DURATION,
+    URGENT_HISTORICAL_WAIT_S,
+    enqueue_historical_priority,
     get_historical_bars,
+    read_cached_series,
     read_bars_window,
+    seed_duration_for_bar_size,
 )
 from ibkr_utils import IbkrClientIdManager, is_client_id_in_use_error
-from runtime_paths import resource_path
+from runtime_paths import data_dir, resource_path
 from score_worker import TechnicalsScorer, read_scores
 from technicals import compute_indicators_for_symbols
 
@@ -34,6 +43,389 @@ DEFAULT_TWS_PORTS = (7497, 7496)
 DEFAULT_TWS_CLIENT_ID = 1000
 PORTFOLIO_ROLE = "portfolio:reader"
 TICKERS_PATH = resource_path("data", "tickers.json")
+SETTINGS_PATH = data_dir() / "tws-settings.json"
+FINNHUB_TEST_SYMBOL = "AAPL"
+FINNHUB_HTTP_TIMEOUT_S = 10.0
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _manual_account_ref(account_id: str) -> str:
+    return f"manual:{account_id}"
+
+
+def _ibkr_account_ref(account_code: str) -> str:
+    return f"ibkr:{account_code}"
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper()
+
+
+def _normalize_currency(currency: str) -> str:
+    value = (currency or "USD").strip().upper()
+    return value or "USD"
+
+
+def _load_settings_payload(settings_path: Path | None = None) -> dict:
+    path = settings_path or SETTINGS_PATH
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("Failed to read settings from %s: %s", path, exc)
+        return {}
+
+
+def _write_settings_payload(payload: dict, settings_path: Path | None = None) -> None:
+    path = settings_path or SETTINGS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _current_finnhub_status(payload: dict | None = None) -> dict:
+    data = payload if isinstance(payload, dict) else _load_settings_payload()
+    api_key = str(data.get("finnhubApiKey") or "").strip()
+    connected = bool(data.get("finnhubConnected")) or bool(api_key)
+    if not api_key:
+        return {
+            "status": "disconnected",
+            "message": "No API key saved",
+            "hasKey": False,
+            "validatedAt": None,
+        }
+    return {
+        "status": "connected" if connected else "disconnected",
+        "message": str(data.get("finnhubStatusMessage") or "Finnhub key saved"),
+        "hasKey": True,
+        "validatedAt": int(data.get("finnhubValidatedAt") or 0) or None,
+    }
+
+
+def _validate_finnhub_key(api_key: str) -> tuple[bool, str]:
+    token = str(api_key or "").strip()
+    if not token:
+        return True, "Finnhub key cleared"
+
+    url = (
+        "https://finnhub.io/api/v1/quote?"
+        + urlencode({"symbol": FINNHUB_TEST_SYMBOL, "token": token})
+    )
+    try:
+        with urlopen(url, timeout=FINNHUB_HTTP_TIMEOUT_S) as response:
+            payload = response.read().decode("utf-8")
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            return False, "Unexpected Finnhub response"
+        if data.get("error"):
+            return False, str(data["error"])
+        price = float(data.get("c") or 0)
+        if price <= 0:
+            return False, "Finnhub returned no usable quote"
+        return True, f"Finnhub validated with {FINNHUB_TEST_SYMBOL}"
+    except HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="ignore").strip()
+        except Exception:
+            pass
+        return False, body or f"HTTP {exc.code}"
+    except URLError as exc:
+        return False, f"Network error: {exc.reason}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def read_live_portfolio_snapshot() -> dict:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    ib = IB()
+    manager = IbkrClientIdManager(start=DEFAULT_TWS_CLIENT_ID)
+    last_error: str | None = None
+    leased_client_id: int | None = None
+
+    try:
+        leased_client_id = manager.acquire(PORTFOLIO_ROLE, preferred_id=DEFAULT_TWS_CLIENT_ID)
+        for tws_port in DEFAULT_TWS_PORTS:
+            try:
+                ib.connect(
+                    DEFAULT_TWS_HOST,
+                    tws_port,
+                    clientId=leased_client_id,
+                    readonly=True,
+                    timeout=4,
+                )
+
+                positions = []
+                for item in ib.reqPositions():
+                    contract = item.contract
+                    symbol = (getattr(contract, "localSymbol", None) or contract.symbol or "").upper()
+                    position = float(item.position or 0)
+                    multiplier = float(getattr(contract, "multiplier", None) or 1)
+                    raw_avg_cost = float(item.avgCost or 0)
+                    average_cost = raw_avg_cost / multiplier if multiplier else raw_avg_cost
+                    cost_basis = average_cost * position
+                    account_code = item.account
+
+                    positions.append({
+                        "accountId": _ibkr_account_ref(account_code),
+                        "account": account_code,
+                        "accountCode": account_code,
+                        "source": "ibkr",
+                        "editable": False,
+                        "symbol": symbol,
+                        "name": getattr(contract, "description", None) or contract.symbol,
+                        "currency": contract.currency,
+                        "exchange": contract.exchange,
+                        "primaryExchange": getattr(contract, "primaryExchange", None),
+                        "secType": contract.secType,
+                        "quantity": position,
+                        "avgCost": average_cost,
+                        "costBasis": cost_basis,
+                        "currentPrice": None,
+                        "marketValue": None,
+                        "unrealizedPnl": None,
+                        "realizedPnl": None,
+                    })
+
+                positions.sort(key=lambda row: (str(row["account"]), str(row["symbol"])))
+
+                cash_balances = []
+                try:
+                    seen_cash: set[tuple[str, str]] = set()
+                    for av in ib.accountSummary():
+                        if av.tag == "CashBalance" and av.currency not in ("BASE", ""):
+                            key = (av.account, av.currency)
+                            if key not in seen_cash:
+                                seen_cash.add(key)
+                                balance = float(av.value or 0)
+                                if balance != 0:
+                                    cash_balances.append({
+                                        "id": f"{_ibkr_account_ref(av.account)}:{av.currency}",
+                                        "accountId": _ibkr_account_ref(av.account),
+                                        "account": av.account,
+                                        "accountCode": av.account,
+                                        "source": "ibkr",
+                                        "editable": False,
+                                        "currency": av.currency,
+                                        "balance": balance,
+                                    })
+                except Exception:
+                    pass
+
+                account_codes = sorted({row["accountCode"] for row in positions} | {cash["accountCode"] for cash in cash_balances})
+                accounts = [
+                    {
+                        "id": _ibkr_account_ref(account_code),
+                        "name": account_code,
+                        "source": "ibkr",
+                        "editable": False,
+                        "accountCode": account_code,
+                    }
+                    for account_code in account_codes
+                ]
+
+                return {
+                    "connected": True,
+                    "host": DEFAULT_TWS_HOST,
+                    "port": tws_port,
+                    "accounts": accounts,
+                    "positions": positions,
+                    "cashBalances": cash_balances,
+                    "updatedAt": _now_ms(),
+                    "clientId": leased_client_id,
+                }
+            except Exception as exc:
+                last_error = str(exc)
+                if is_client_id_in_use_error(exc) and leased_client_id is not None:
+                    manager.mark_rejected(leased_client_id)
+                    leased_client_id = manager.acquire(
+                        PORTFOLIO_ROLE,
+                        preferred_id=leased_client_id + 1,
+                    )
+            finally:
+                if ib.isConnected():
+                    ib.disconnect()
+    finally:
+        try:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
+        if leased_client_id is not None:
+            manager.release(leased_client_id)
+
+    return {
+        "connected": False,
+        "host": DEFAULT_TWS_HOST,
+        "port": None,
+        "accounts": [],
+        "positions": [],
+        "cashBalances": [],
+        "updatedAt": _now_ms(),
+        "error": last_error,
+    }
+
+
+def _read_manual_accounts(conn) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, name, created_at, updated_at
+        FROM portfolio_manual_accounts
+        ORDER BY LOWER(name), id
+        """
+    ).fetchall()
+    return [
+        {
+            "id": _manual_account_ref(row[0]),
+            "name": row[1],
+            "source": "manual",
+            "editable": True,
+            "accountCode": None,
+            "createdAt": row[2],
+            "updatedAt": row[3],
+        }
+        for row in rows
+    ]
+
+
+def _read_manual_positions(conn, account_names: dict[str, str]) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, account_id, symbol, name, currency, exchange, primary_exchange,
+               sec_type, quantity, avg_cost
+        FROM portfolio_manual_positions
+        ORDER BY account_id, symbol
+        """
+    ).fetchall()
+    positions = []
+    for row in rows:
+        quantity = float(row[8] or 0)
+        avg_cost = float(row[9] or 0)
+        positions.append({
+            "id": row[0],
+            "accountId": _manual_account_ref(row[1]),
+            "account": account_names.get(row[1], row[1]),
+            "accountCode": None,
+            "source": "manual",
+            "editable": True,
+            "symbol": row[2],
+            "name": row[3] or row[2],
+            "currency": row[4],
+            "exchange": row[5] or "",
+            "primaryExchange": row[6],
+            "secType": row[7] or "STK",
+            "quantity": quantity,
+            "avgCost": avg_cost,
+            "costBasis": quantity * avg_cost,
+            "currentPrice": None,
+            "marketValue": None,
+            "unrealizedPnl": None,
+            "realizedPnl": None,
+        })
+    return positions
+
+
+def _read_manual_cash(conn, account_names: dict[str, str]) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, account_id, currency, balance
+        FROM portfolio_manual_cash_balances
+        ORDER BY account_id, currency
+        """
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "accountId": _manual_account_ref(row[1]),
+            "account": account_names.get(row[1], row[1]),
+            "accountCode": None,
+            "source": "manual",
+            "editable": True,
+            "currency": row[2],
+            "balance": float(row[3] or 0),
+        }
+        for row in rows
+    ]
+
+
+def _read_portfolio_groups(conn) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT g.id, g.name, m.account_ref
+        FROM portfolio_groups g
+        LEFT JOIN portfolio_group_memberships m ON m.group_id = g.id
+        ORDER BY LOWER(g.name), g.id, m.account_ref
+        """
+    ).fetchall()
+    groups: dict[str, dict] = {}
+    for group_id, name, account_ref in rows:
+        group = groups.setdefault(group_id, {
+            "id": group_id,
+            "name": name,
+            "accountRefs": [],
+        })
+        if account_ref:
+            group["accountRefs"].append(account_ref)
+    return list(groups.values())
+
+
+def read_manual_portfolio_state() -> dict:
+    with sync_db_session() as conn:
+        accounts = _read_manual_accounts(conn)
+        manual_name_map = {account["id"].replace("manual:", ""): account["name"] for account in accounts}
+        positions = _read_manual_positions(conn, manual_name_map)
+        cash_balances = _read_manual_cash(conn, manual_name_map)
+        groups = _read_portfolio_groups(conn)
+    return {
+        "accounts": accounts,
+        "positions": positions,
+        "cashBalances": cash_balances,
+        "groups": groups,
+    }
+
+
+def build_unified_portfolio_snapshot() -> dict:
+    live = read_live_portfolio_snapshot()
+    manual = read_manual_portfolio_state()
+    accounts = [*live.get("accounts", []), *manual["accounts"]]
+    groups = manual["groups"]
+    accounts_by_ref = {account["id"]: account for account in accounts}
+    for account in accounts:
+        account["groupIds"] = []
+        account["groupNames"] = []
+    for group in groups:
+        group_account_refs = [ref for ref in group["accountRefs"] if ref in accounts_by_ref]
+        group["accountIds"] = group_account_refs
+        group["accountNames"] = [accounts_by_ref[ref]["name"] for ref in group_account_refs]
+        for account_ref in group_account_refs:
+            account = accounts_by_ref[account_ref]
+            account["groupIds"].append(group["id"])
+            account["groupNames"].append(group["name"])
+    return {
+        "connected": live.get("connected", False),
+        "host": live.get("host", DEFAULT_TWS_HOST),
+        "port": live.get("port"),
+        "accounts": sorted(accounts, key=lambda account: (account["source"], account["name"].lower(), account["id"])),
+        "groups": sorted(groups, key=lambda group: group["name"].lower()),
+        "positions": [*live.get("positions", []), *manual["positions"]],
+        "cashBalances": [*live.get("cashBalances", []), *manual["cashBalances"]],
+        "updatedAt": max(live.get("updatedAt", 0), _now_ms()),
+        "error": live.get("error"),
+    }
 
 
 def _is_valid_quote_row(row: tuple) -> bool:
@@ -221,125 +613,426 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        return {"status": "ok", "finnhub": _current_finnhub_status()}
+
+    @app.get("/settings/finnhub/status")
+    async def finnhub_status():
+        return _current_finnhub_status()
+
+    class FinnhubValidationPayload(BaseModel):
+        apiKey: str = ""
+
+    @app.post("/settings/finnhub/validate")
+    async def validate_finnhub(payload: FinnhubValidationPayload):
+        settings = _load_settings_payload()
+        candidate_key = str(payload.apiKey or "").strip()
+        ok, message = _validate_finnhub_key(candidate_key)
+
+        if not ok:
+            return {
+                "ok": False,
+                **_current_finnhub_status(settings),
+                "message": message,
+            }
+
+        settings["finnhubApiKey"] = candidate_key
+        settings["finnhubConnected"] = bool(candidate_key)
+        settings["finnhubStatusMessage"] = (
+            message if candidate_key else "Finnhub key cleared"
+        )
+        settings["finnhubValidatedAt"] = _now_ms() if candidate_key else None
+        _write_settings_payload(settings)
+
+        return {
+            "ok": True,
+            **_current_finnhub_status(settings),
+        }
+
+    class ManualAccountPayload(BaseModel):
+        name: str
+        groupIds: list[str] = []
+
+    class ManualPositionPayload(BaseModel):
+        symbol: str
+        quantity: float
+        avgCost: float
+        currency: str = "USD"
+        name: str = ""
+        exchange: str = ""
+        primaryExchange: str | None = None
+        secType: str = "STK"
+
+    class ManualCashPayload(BaseModel):
+        currency: str = "USD"
+        balance: float
+
+    class PortfolioGroupPayload(BaseModel):
+        name: str
+        accountIds: list[str] = []
 
     @app.get("/portfolio/positions")
     async def get_portfolio_positions():
-        def _read_positions_sync() -> dict:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            ib = IB()
-            manager = IbkrClientIdManager(start=DEFAULT_TWS_CLIENT_ID)
-            last_error: str | None = None
-            leased_client_id: int | None = None
+        return await asyncio.to_thread(read_live_portfolio_snapshot)
 
-            try:
-                leased_client_id = manager.acquire(PORTFOLIO_ROLE, preferred_id=DEFAULT_TWS_CLIENT_ID)
-                for tws_port in DEFAULT_TWS_PORTS:
-                    try:
-                        ib.connect(
-                            DEFAULT_TWS_HOST,
-                            tws_port,
-                            clientId=leased_client_id,
-                            readonly=True,
-                            timeout=4,
-                        )
+    @app.get("/portfolio")
+    async def get_portfolio():
+        return await asyncio.to_thread(build_unified_portfolio_snapshot)
 
-                        positions = []
-                        for item in ib.reqPositions():
-                            contract = item.contract
-                            symbol = (getattr(contract, "localSymbol", None) or contract.symbol or "").upper()
-                            position = float(item.position or 0)
-                            multiplier = float(getattr(contract, "multiplier", None) or 1)
-                            raw_avg_cost = float(item.avgCost or 0)
-                            average_cost = raw_avg_cost / multiplier if multiplier else raw_avg_cost
-                            cost_basis = average_cost * position
+    @app.get("/portfolio/manual")
+    async def get_manual_portfolio():
+        return await run_db(read_manual_portfolio_state)
 
-                            positions.append({
-                                "account": item.account,
-                                "symbol": symbol,
-                                "name": getattr(contract, "description", None) or contract.symbol,
-                                "currency": contract.currency,
-                                "exchange": contract.exchange,
-                                "primaryExchange": getattr(contract, "primaryExchange", None),
-                                "secType": contract.secType,
-                                "quantity": position,
-                                "avgCost": average_cost,
-                                "costBasis": cost_basis,
-                                "currentPrice": None,
-                                "marketValue": None,
-                                "unrealizedPnl": None,
-                                "realizedPnl": None,
-                            })
+    @app.post("/portfolio/manual/accounts")
+    async def create_manual_account(payload: ManualAccountPayload):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Account name is required.")
 
-                        positions.sort(key=lambda row: str(row["symbol"]))
+        def _create():
+            with sync_db_session() as conn:
+                now = _now_ms()
+                account_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO portfolio_manual_accounts (id, name, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (account_id, name, now, now),
+                )
+                for group_id in payload.groupIds:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO portfolio_group_memberships (group_id, account_ref, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (group_id, _manual_account_ref(account_id), now),
+                    )
+                return {"id": account_id, "name": name}
 
-                        # Fetch cash balances per currency from account summary
-                        cash_balances = []
-                        try:
-                            seen_cash: set[tuple[str, str]] = set()
-                            for av in ib.accountSummary():
-                                if av.tag == "CashBalance" and av.currency not in ("BASE", ""):
-                                    key = (av.account, av.currency)
-                                    if key not in seen_cash:
-                                        seen_cash.add(key)
-                                        balance = float(av.value or 0)
-                                        if balance != 0:
-                                            cash_balances.append({
-                                                "account": av.account,
-                                                "currency": av.currency,
-                                                "balance": balance,
-                                            })
-                        except Exception:
-                            pass
+        return await run_db(_create)
 
-                        return {
-                            "connected": True,
-                            "host": DEFAULT_TWS_HOST,
-                            "port": tws_port,
-                            "positions": positions,
-                            "cashBalances": cash_balances,
-                            "updatedAt": int(time.time() * 1000),
-                            "clientId": leased_client_id,
-                        }
-                    except Exception as exc:
-                        last_error = str(exc)
-                        if is_client_id_in_use_error(exc) and leased_client_id is not None:
-                            manager.mark_rejected(leased_client_id)
-                            leased_client_id = manager.acquire(
-                                PORTFOLIO_ROLE,
-                                preferred_id=leased_client_id + 1,
-                            )
-                    finally:
-                        if ib.isConnected():
-                            ib.disconnect()
-            finally:
-                try:
-                    pending = asyncio.all_tasks(loop)
-                    for task in pending:
-                        task.cancel()
-                    if pending:
-                        loop.run_until_complete(
-                            asyncio.gather(*pending, return_exceptions=True)
-                        )
-                except Exception:
-                    pass
-                asyncio.set_event_loop(None)
-                loop.close()
-                if leased_client_id is not None:
-                    manager.release(leased_client_id)
+    @app.put("/portfolio/manual/accounts/{account_id}")
+    async def update_manual_account(account_id: str, payload: ManualAccountPayload):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Account name is required.")
 
-            return {
-                "connected": False,
-                "host": DEFAULT_TWS_HOST,
-                "port": None,
-                "positions": [],
-                "cashBalances": [],
-                "updatedAt": int(time.time() * 1000),
-                "error": last_error,
-            }
+        def _update():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id FROM portfolio_manual_accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Manual account not found.")
+                now = _now_ms()
+                conn.execute(
+                    "UPDATE portfolio_manual_accounts SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, now, account_id),
+                )
+                conn.execute(
+                    "DELETE FROM portfolio_group_memberships WHERE account_ref = ?",
+                    (_manual_account_ref(account_id),),
+                )
+                for group_id in payload.groupIds:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO portfolio_group_memberships (group_id, account_ref, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (group_id, _manual_account_ref(account_id), now),
+                    )
+                return {"id": account_id, "name": name}
 
-        return await asyncio.to_thread(_read_positions_sync)
+        return await run_db(_update)
+
+    @app.delete("/portfolio/manual/accounts/{account_id}")
+    async def delete_manual_account(account_id: str):
+        def _delete():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id FROM portfolio_manual_accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Manual account not found.")
+                conn.execute("DELETE FROM portfolio_manual_accounts WHERE id = ?", (account_id,))
+                conn.execute(
+                    "DELETE FROM portfolio_group_memberships WHERE account_ref = ?",
+                    (_manual_account_ref(account_id),),
+                )
+                return {"deleted": True}
+
+        return await run_db(_delete)
+
+    @app.post("/portfolio/manual/accounts/{account_id}/positions")
+    async def create_manual_position(account_id: str, payload: ManualPositionPayload):
+        symbol = _normalize_symbol(payload.symbol)
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required.")
+
+        def _create():
+            with sync_db_session() as conn:
+                account_row = conn.execute(
+                    "SELECT id FROM portfolio_manual_accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                if not account_row:
+                    raise HTTPException(status_code=404, detail="Manual account not found.")
+                existing = conn.execute(
+                    """
+                    SELECT id FROM portfolio_manual_positions
+                    WHERE account_id = ? AND symbol = ?
+                    """,
+                    (account_id, symbol),
+                ).fetchone()
+                if existing:
+                    raise HTTPException(status_code=400, detail="Position already exists for that symbol.")
+                now = _now_ms()
+                position_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO portfolio_manual_positions (
+                        id, account_id, symbol, name, currency, exchange, primary_exchange,
+                        sec_type, quantity, avg_cost, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        position_id,
+                        account_id,
+                        symbol,
+                        payload.name.strip(),
+                        _normalize_currency(payload.currency),
+                        payload.exchange.strip(),
+                        payload.primaryExchange.strip() if payload.primaryExchange else None,
+                        (payload.secType or "STK").strip().upper(),
+                        payload.quantity,
+                        payload.avgCost,
+                        now,
+                        now,
+                    ),
+                )
+                return {"id": position_id, "symbol": symbol}
+
+        return await run_db(_create)
+
+    @app.put("/portfolio/manual/positions/{position_id}")
+    async def update_manual_position(position_id: str, payload: ManualPositionPayload):
+        symbol = _normalize_symbol(payload.symbol)
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required.")
+
+        def _update():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id, account_id FROM portfolio_manual_positions WHERE id = ?",
+                    (position_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Manual position not found.")
+                duplicate = conn.execute(
+                    """
+                    SELECT id FROM portfolio_manual_positions
+                    WHERE account_id = ? AND symbol = ? AND id <> ?
+                    """,
+                    (row[1], symbol, position_id),
+                ).fetchone()
+                if duplicate:
+                    raise HTTPException(status_code=400, detail="Another position already uses that symbol.")
+                conn.execute(
+                    """
+                    UPDATE portfolio_manual_positions
+                    SET symbol = ?, name = ?, currency = ?, exchange = ?, primary_exchange = ?,
+                        sec_type = ?, quantity = ?, avg_cost = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        symbol,
+                        payload.name.strip(),
+                        _normalize_currency(payload.currency),
+                        payload.exchange.strip(),
+                        payload.primaryExchange.strip() if payload.primaryExchange else None,
+                        (payload.secType or "STK").strip().upper(),
+                        payload.quantity,
+                        payload.avgCost,
+                        _now_ms(),
+                        position_id,
+                    ),
+                )
+                return {"id": position_id, "symbol": symbol}
+
+        return await run_db(_update)
+
+    @app.delete("/portfolio/manual/positions/{position_id}")
+    async def delete_manual_position(position_id: str):
+        def _delete():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id FROM portfolio_manual_positions WHERE id = ?",
+                    (position_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Manual position not found.")
+                conn.execute("DELETE FROM portfolio_manual_positions WHERE id = ?", (position_id,))
+                return {"deleted": True}
+
+        return await run_db(_delete)
+
+    @app.post("/portfolio/manual/accounts/{account_id}/cash-balances")
+    async def create_manual_cash_balance(account_id: str, payload: ManualCashPayload):
+        currency = _normalize_currency(payload.currency)
+
+        def _create():
+            with sync_db_session() as conn:
+                account_row = conn.execute(
+                    "SELECT id FROM portfolio_manual_accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                if not account_row:
+                    raise HTTPException(status_code=404, detail="Manual account not found.")
+                existing = conn.execute(
+                    """
+                    SELECT id FROM portfolio_manual_cash_balances
+                    WHERE account_id = ? AND currency = ?
+                    """,
+                    (account_id, currency),
+                ).fetchone()
+                if existing:
+                    raise HTTPException(status_code=400, detail="Cash balance already exists for that currency.")
+                now = _now_ms()
+                cash_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO portfolio_manual_cash_balances (
+                        id, account_id, currency, balance, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (cash_id, account_id, currency, payload.balance, now, now),
+                )
+                return {"id": cash_id, "currency": currency}
+
+        return await run_db(_create)
+
+    @app.put("/portfolio/manual/cash-balances/{cash_id}")
+    async def update_manual_cash_balance(cash_id: str, payload: ManualCashPayload):
+        currency = _normalize_currency(payload.currency)
+
+        def _update():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id, account_id FROM portfolio_manual_cash_balances WHERE id = ?",
+                    (cash_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Manual cash balance not found.")
+                duplicate = conn.execute(
+                    """
+                    SELECT id FROM portfolio_manual_cash_balances
+                    WHERE account_id = ? AND currency = ? AND id <> ?
+                    """,
+                    (row[1], currency, cash_id),
+                ).fetchone()
+                if duplicate:
+                    raise HTTPException(status_code=400, detail="Another cash balance already uses that currency.")
+                conn.execute(
+                    """
+                    UPDATE portfolio_manual_cash_balances
+                    SET currency = ?, balance = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (currency, payload.balance, _now_ms(), cash_id),
+                )
+                return {"id": cash_id, "currency": currency}
+
+        return await run_db(_update)
+
+    @app.delete("/portfolio/manual/cash-balances/{cash_id}")
+    async def delete_manual_cash_balance(cash_id: str):
+        def _delete():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id FROM portfolio_manual_cash_balances WHERE id = ?",
+                    (cash_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Manual cash balance not found.")
+                conn.execute("DELETE FROM portfolio_manual_cash_balances WHERE id = ?", (cash_id,))
+                return {"deleted": True}
+
+        return await run_db(_delete)
+
+    @app.post("/portfolio/manual/groups")
+    async def create_portfolio_group(payload: PortfolioGroupPayload):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Group name is required.")
+
+        def _create():
+            with sync_db_session() as conn:
+                now = _now_ms()
+                group_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO portfolio_groups (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (group_id, name, now, now),
+                )
+                for account_ref in payload.accountIds:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO portfolio_group_memberships (group_id, account_ref, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (group_id, account_ref, now),
+                    )
+                return {"id": group_id, "name": name}
+
+        return await run_db(_create)
+
+    @app.put("/portfolio/manual/groups/{group_id}")
+    async def update_portfolio_group(group_id: str, payload: PortfolioGroupPayload):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Group name is required.")
+
+        def _update():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id FROM portfolio_groups WHERE id = ?",
+                    (group_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Portfolio group not found.")
+                now = _now_ms()
+                conn.execute(
+                    "UPDATE portfolio_groups SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, now, group_id),
+                )
+                conn.execute("DELETE FROM portfolio_group_memberships WHERE group_id = ?", (group_id,))
+                for account_ref in payload.accountIds:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO portfolio_group_memberships (group_id, account_ref, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (group_id, account_ref, now),
+                    )
+                return {"id": group_id, "name": name}
+
+        return await run_db(_update)
+
+    @app.delete("/portfolio/manual/groups/{group_id}")
+    async def delete_portfolio_group(group_id: str):
+        def _delete():
+            with sync_db_session() as conn:
+                row = conn.execute(
+                    "SELECT id FROM portfolio_groups WHERE id = ?",
+                    (group_id,),
+                ).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Portfolio group not found.")
+                conn.execute("DELETE FROM portfolio_groups WHERE id = ?", (group_id,))
+                return {"deleted": True}
+
+        return await run_db(_delete)
 
     class WatchlistPayload(BaseModel):
         symbols: list[str]
@@ -615,6 +1308,8 @@ def create_app() -> FastAPI:
         Otherwise falls back to the full fetch+cache flow.
         """
         symbol = symbol.upper()
+        db_bar_size = "1d" if bar_size in ("1 day", "1d") else "1m"
+        requested_duration = duration if duration else (DEFAULT_INTRADAY_DURATION if db_bar_size == "1m" else "30 Y")
         # Mark symbol as active so the worker can prioritize TWS backfill + realtime bars.
         def _touch_active():
             with sync_db_session() as conn:
@@ -632,7 +1327,49 @@ def create_app() -> FastAPI:
 
         # Fast path: windowed read from DB cache (no network fetch)
         if ts_start is not None or ts_end is not None or limit is not None:
-            db_bar_size = "1d" if bar_size in ("1 day", "1d") else "1m"
+            result = await run_db(
+                read_bars_window,
+                symbol,
+                db_bar_size,
+                what_to_show,
+                ts_start,
+                ts_end,
+                limit,
+            )
+            payload = {
+                "symbol": symbol,
+                "bars": result["bars"],
+                "source": "cache",
+                "count": result["count"],
+                "whatToShow": what_to_show.upper(),
+                "ts_min": result["ts_min"],
+                "ts_max": result["ts_max"],
+            }
+            if result["count"] > 0:
+                return payload
+
+            await run_db(
+                enqueue_historical_priority,
+                symbol,
+                db_bar_size,
+                what_to_show,
+                requested_duration,
+            )
+            try:
+                await asyncio.wait_for(
+                    get_historical_bars(
+                        symbol=symbol,
+                        ib=None,
+                        tws_connected=False,
+                        duration=seed_duration_for_bar_size(bar_size),
+                        bar_size=bar_size,
+                        what_to_show=what_to_show,
+                    ),
+                    timeout=URGENT_HISTORICAL_WAIT_S,
+                )
+            except Exception:
+                pass
+
             result = await run_db(
                 read_bars_window,
                 symbol,
@@ -645,22 +1382,54 @@ def create_app() -> FastAPI:
             return {
                 "symbol": symbol,
                 "bars": result["bars"],
-                "source": "cache",
+                "source": "cache" if result["count"] else "none",
                 "count": result["count"],
                 "whatToShow": what_to_show.upper(),
                 "ts_min": result["ts_min"],
                 "ts_max": result["ts_max"],
             }
 
-        # Full path: fetch from TWS/Yahoo if cache is stale, then return
-        bars, source = await get_historical_bars(
-            symbol=symbol,
-            ib=None,
-            tws_connected=False,
-            duration=duration,
-            bar_size=bar_size,
-            what_to_show=what_to_show,
+        cached = await run_db(
+            read_cached_series,
+            symbol,
+            db_bar_size,
+            what_to_show,
+            requested_duration,
         )
+        if cached["count"] > 0:
+            if not cached["is_fresh"]:
+                await run_db(
+                    enqueue_historical_priority,
+                    symbol,
+                    db_bar_size,
+                    what_to_show,
+                    requested_duration,
+                )
+            bars, source = cached["bars"], "cache"
+        else:
+            await run_db(
+                enqueue_historical_priority,
+                symbol,
+                db_bar_size,
+                what_to_show,
+                requested_duration,
+            )
+            bars: list[dict] = []
+            source = "none"
+            try:
+                bars, source = await asyncio.wait_for(
+                    get_historical_bars(
+                        symbol=symbol,
+                        ib=None,
+                        tws_connected=False,
+                        duration=seed_duration_for_bar_size(bar_size),
+                        bar_size=bar_size,
+                        what_to_show=what_to_show,
+                    ),
+                    timeout=URGENT_HISTORICAL_WAIT_S,
+                )
+            except Exception:
+                pass
         return {
             "symbol": symbol,
             "bars": bars,

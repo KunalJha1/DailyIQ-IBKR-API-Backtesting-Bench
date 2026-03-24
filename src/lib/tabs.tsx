@@ -11,6 +11,7 @@ import { useLayout } from "./layout";
 
 export type TabType =
   | "dashboard"
+  | "screener"
   | "chart"
   | "options"
   | "backtest"
@@ -27,6 +28,7 @@ export interface Tab {
 /** All available tab presets — shown in the "+" menu */
 export const tabPresets: { type: TabType; title: string }[] = [
   { type: "dashboard", title: "Dashboard" },
+  { type: "screener", title: "Screener" },
   { type: "chart", title: "Charting" },
   { type: "options", title: "Options Analysis" },
   { type: "backtest", title: "Backtesting" },

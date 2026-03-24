@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, List, Union
 
 from runtime_paths import data_dir
+from schema import ensure_all_schema
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,8 @@ _schema_ready = False
 
 def _ensure_tables(conn: sqlite3.Connection) -> None:
     """Create tables that must exist before the app starts serving requests."""
+    ensure_all_schema(conn)
+    return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS technical_scores (
             symbol           TEXT PRIMARY KEY,

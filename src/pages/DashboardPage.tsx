@@ -14,7 +14,7 @@ const COMPONENT_TYPES = [
   { type: "quote", label: "Quote Card", defaultW: 4, defaultH: 8 },
   { type: "watchlist", label: "Watchlist", defaultW: 4, defaultH: 10 },
   { type: "minichart", label: "Mini Chart", defaultW: 4, defaultH: 8 },
-  { type: "ibkr-portfolio", label: "IBKR Portfolio", defaultW: 8, defaultH: 12 },
+  { type: "ibkr-portfolio", label: "Portfolio", defaultW: 8, defaultH: 12 },
 ] as const;
 
 export default function DashboardPage() {

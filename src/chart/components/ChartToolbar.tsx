@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import type { Timeframe, ChartType, YScaleMode } from '../types';
+import type { Timeframe, ChartType } from '../types';
+import type { ActiveIndicator } from '../types';
 import { TIMEFRAMES, CHART_TYPES } from '../constants';
 import {
   ChevronDown,
@@ -16,6 +17,7 @@ import {
 } from 'lucide-react';
 import { SEARCHABLE_SYMBOLS } from '../../lib/market-data';
 import ComponentLinkMenu from '../../components/ComponentLinkMenu';
+import IndicatorPanel from './IndicatorPanel';
 
 interface ChartToolbarProps {
   symbol: string;
@@ -27,6 +29,13 @@ interface ChartToolbarProps {
   onIndicatorPanelToggle: () => void;
   onStrategyPanelToggle: () => void;
   onScriptEditorToggle: () => void;
+  indicatorPanelOpen?: boolean;
+  strategyPanelOpen?: boolean;
+  onIndicatorPanelClose?: () => void;
+  onStrategyPanelClose?: () => void;
+  onAddIndicator?: (name: string) => void;
+  onToggleStrategy?: (name: string) => void;
+  activeIndicators?: ActiveIndicator[];
   dataSource?: 'tws' | 'yahoo' | 'cache' | 'mock';
   loading?: boolean;
   linkChannel?: number | null;
@@ -36,8 +45,6 @@ interface ChartToolbarProps {
   onZoomIn?: () => void;
   onZoomOut?: () => void;
   onZoomReset?: () => void;
-  yScaleMode?: YScaleMode;
-  onYScaleModeChange?: (mode: YScaleMode) => void;
 }
 
 export default function ChartToolbar({
@@ -50,6 +57,13 @@ export default function ChartToolbar({
   onIndicatorPanelToggle,
   onStrategyPanelToggle,
   onScriptEditorToggle,
+  indicatorPanelOpen = false,
+  strategyPanelOpen = false,
+  onIndicatorPanelClose,
+  onStrategyPanelClose,
+  onAddIndicator,
+  onToggleStrategy,
+  activeIndicators = [],
   dataSource = 'mock',
   loading = false,
   linkChannel = null,
@@ -59,8 +73,6 @@ export default function ChartToolbar({
   onZoomIn,
   onZoomOut,
   onZoomReset,
-  yScaleMode = 'auto',
-  onYScaleModeChange,
 }: ChartToolbarProps) {
   const [symbolInput, setSymbolInput] = useState(symbol);
   const [chartTypeOpen, setChartTypeOpen] = useState(false);
@@ -240,14 +252,24 @@ export default function ChartToolbar({
 
       <div className="w-px h-4 bg-border-default" />
 
-      <button
-        onClick={onStrategyPanelToggle}
-        className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-text-secondary
-                   hover:text-text-primary hover:bg-hover rounded-btn transition-colors duration-120"
-      >
-        <BrainCircuit size={13} />
-        <span className="font-mono">Strategies</span>
-      </button>
+      <div className="relative">
+        <button
+          onClick={onStrategyPanelToggle}
+          className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-text-secondary
+                     hover:text-text-primary hover:bg-hover rounded-btn transition-colors duration-120"
+        >
+          <BrainCircuit size={13} />
+          <span className="font-mono">Strategies</span>
+        </button>
+        <IndicatorPanel
+          open={strategyPanelOpen}
+          onClose={() => onStrategyPanelClose?.()}
+          onAddIndicator={onAddIndicator ?? (() => {})}
+          onToggleIndicator={onToggleStrategy}
+          activeIndicators={activeIndicators}
+          mode="strategy"
+        />
+      </div>
 
       {/* Chart type dropdown */}
       <div className="relative mx-1" ref={dropdownRef}>
@@ -282,14 +304,22 @@ export default function ChartToolbar({
       <div className="w-px h-4 bg-border-default" />
 
       {/* Indicators button */}
-      <button
-        onClick={onIndicatorPanelToggle}
-        className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-text-secondary
-                   hover:text-text-primary hover:bg-hover rounded-btn transition-colors duration-120 mx-1"
-      >
-        <Activity size={12} />
-        <span>Indicators</span>
-      </button>
+      <div className="relative mx-1">
+        <button
+          onClick={onIndicatorPanelToggle}
+          className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-text-secondary
+                     hover:text-text-primary hover:bg-hover rounded-btn transition-colors duration-120"
+        >
+          <Activity size={12} />
+          <span>Indicators</span>
+        </button>
+        <IndicatorPanel
+          open={indicatorPanelOpen}
+          onClose={() => onIndicatorPanelClose?.()}
+          onAddIndicator={onAddIndicator ?? (() => {})}
+          activeIndicators={activeIndicators}
+        />
+      </div>
 
       <div className="w-px h-4 bg-border-default" />
 
@@ -319,32 +349,6 @@ export default function ChartToolbar({
       </div>
 
       <div className="w-px h-4 bg-border-default" />
-
-      {/* Y-axis scale mode */}
-      <div className="flex items-center gap-0.5 mx-1">
-        <button
-          onClick={() => onYScaleModeChange?.('auto')}
-          className={`px-1.5 py-0.5 text-[10px] font-mono rounded-btn transition-colors duration-120
-            ${yScaleMode === 'auto'
-              ? 'text-blue bg-blue/10'
-              : 'text-text-muted hover:text-text-secondary hover:bg-hover'
-            }`}
-          title="Auto scale"
-        >
-          Auto
-        </button>
-        <button
-          onClick={() => onYScaleModeChange?.('log')}
-          className={`px-1.5 py-0.5 text-[10px] font-mono rounded-btn transition-colors duration-120
-            ${yScaleMode === 'log'
-              ? 'text-blue bg-blue/10'
-              : 'text-text-muted hover:text-text-secondary hover:bg-hover'
-            }`}
-          title="Logarithmic scale"
-        >
-          Log
-        </button>
-      </div>
 
       {/* Script button */}
       <button

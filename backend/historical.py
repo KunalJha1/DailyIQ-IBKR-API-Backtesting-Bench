@@ -14,6 +14,7 @@ from db_utils import (
     execute_one_tx_with_retry,
     sync_db_session,
 )
+from schema import ensure_historical_schema
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,13 @@ YAHOO_1M_MAX_DAYS = 29
 DEFAULT_INTRADAY_DURATION = "30 D"
 BACKGROUND_INTRADAY_DURATION = "1 Y"
 DEFAULT_DAILY_DURATION = "30 Y"
+SEED_INTRADAY_DURATION = "5 D"
+SEED_DAILY_DURATION = "2 Y"
 MAX_INTRADAY_LOOKBACK_DAYS = 365
 MAX_DAILY_LOOKBACK_DAYS = 365 * 30
 TWS_INTRADAY_CHUNK_DAYS = 30
 TWS_DAILY_CHUNK_YEARS = 10
+URGENT_HISTORICAL_WAIT_S = 4.0
 
 # Per-symbol async locks to prevent concurrent fetches for the same symbol+bar_size.
 # Key: "{symbol}:{bar_size}" (e.g. "HIMS:1m")
@@ -188,6 +192,9 @@ def _incremental_yahoo_period(last_ts_ms: int | None, default: str, is_daily: bo
 
 def _ensure_schema(conn: sqlite3.Connection):
     """Create tables + indexes on first use."""
+    ensure_historical_schema(conn)
+    conn.commit()
+    return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ohlcv_1m (
             symbol   TEXT    NOT NULL,
@@ -425,6 +432,116 @@ def _cached_extent(
     if row and row[0] is not None:
         return row[0], row[1]
     return None, None
+
+
+def read_cached_series(
+    symbol: str,
+    bar_size: str = "1m",
+    what_to_show: str = "TRADES",
+    duration: str = DEFAULT_INTRADAY_DURATION,
+) -> dict:
+    """Return cached bars plus freshness metadata for a series."""
+    is_daily = bar_size in ("1 day", "1d")
+    db_bar_size = "1d" if is_daily else "1m"
+    what_to_show = _normalize_what_to_show(what_to_show)
+    cache_key = _cache_key_for_series(db_bar_size, what_to_show)
+    ttl = CACHE_TTL_DAILY if is_daily else CACHE_TTL
+    table = _table_for_series(db_bar_size, what_to_show)
+    lookback_days = _duration_to_days(
+        duration,
+        MAX_DAILY_LOOKBACK_DAYS if is_daily else MAX_INTRADAY_LOOKBACK_DAYS,
+    )
+    lookback_days = max(1, min(
+        lookback_days,
+        MAX_DAILY_LOOKBACK_DAYS if is_daily else MAX_INTRADAY_LOOKBACK_DAYS,
+    ))
+
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        is_fresh, source = _cache_fresh(conn, symbol, cache_key, ttl)
+        bars = _read_cached(conn, symbol, limit_days=lookback_days, table=table)
+        ts_min, ts_max = _cached_extent(conn, symbol, table)
+
+    return {
+        "bars": bars,
+        "count": len(bars),
+        "is_fresh": is_fresh,
+        "source": source,
+        "ts_min": ts_min,
+        "ts_max": ts_max,
+    }
+
+
+def enqueue_historical_priority(
+    symbol: str,
+    bar_size: str = "1m",
+    what_to_show: str = "TRADES",
+    duration: str = DEFAULT_INTRADAY_DURATION,
+) -> None:
+    """Upsert an urgent historical fetch request visible across processes."""
+    db_bar_size = "1d" if bar_size in ("1 day", "1d") else "1m"
+    mode = _normalize_what_to_show(what_to_show)
+    now_ms = int(time.time() * 1000)
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        execute_one_tx_with_retry(
+            conn,
+            """
+            INSERT INTO historical_priority_queue (
+                symbol, bar_size, what_to_show, duration, requested_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, bar_size, what_to_show) DO UPDATE SET
+                duration = excluded.duration,
+                requested_at = excluded.requested_at
+            """,
+            (symbol, db_bar_size, mode, duration, now_ms),
+        )
+
+
+def pop_historical_priority_requests(limit: int = 4) -> list[dict]:
+    """Atomically claim the most recently requested urgent historical jobs."""
+    if limit <= 0:
+        return []
+
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        rows = cur.execute(
+            """
+            SELECT symbol, bar_size, what_to_show, duration, requested_at
+            FROM historical_priority_queue
+            ORDER BY requested_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        if rows:
+            cur.executemany(
+                """
+                DELETE FROM historical_priority_queue
+                WHERE symbol = ? AND bar_size = ? AND what_to_show = ?
+                """,
+                [(row[0], row[1], row[2]) for row in rows],
+            )
+        conn.commit()
+
+    return [
+        {
+            "symbol": row[0],
+            "bar_size": row[1],
+            "what_to_show": row[2],
+            "duration": row[3],
+            "requested_at": row[4],
+        }
+        for row in rows
+    ]
+
+
+def seed_duration_for_bar_size(bar_size: str) -> str:
+    """Return a smaller first-response fetch window for cold-cache requests."""
+    return SEED_DAILY_DURATION if bar_size in ("1 day", "1d") else SEED_INTRADAY_DURATION
 
 
 def _write_bars(
@@ -721,15 +838,25 @@ async def get_historical_bars(
         async with _raw_db_session() as conn:
             _init_schema(conn)
             is_fresh, cached_source = _cache_fresh(conn, symbol, cache_key, ttl)
+            last_ts_ms = _latest_bar_ts(conn, symbol, table)
+            earliest_ts_ms = _earliest_bar_ts(conn, symbol, table)
             if is_fresh:
                 cached = _read_cached(conn, symbol, limit_days=lookback_days, table=table)
                 if cached:
+                    has_full_coverage = False
+                    if earliest_ts_ms is not None:
+                        cached_span_days = (time.time() - earliest_ts_ms / 1000) / 86400
+                        has_full_coverage = cached_span_days >= (lookback_days * 0.8)
+                    if has_full_coverage:
+                        logger.info(
+                            f"Cache hit for {symbol} {cache_key} ({len(cached)} bars, source={cached_source})"
+                        )
+                        return cached, "cache"
                     logger.info(
-                        f"Cache hit for {symbol} {cache_key} ({len(cached)} bars, source={cached_source})"
+                        f"Fresh cache for {symbol} {cache_key} is too shallow for {lookback_days}d; "
+                        "requesting deeper history"
                     )
-                    return cached, "cache"
-            last_ts_ms = _latest_bar_ts(conn, symbol, table)
-            earliest_ts_ms = _earliest_bar_ts(conn, symbol, table)
+                    last_ts_ms = None
             if last_ts_ms is not None:
                 gap_days = (time.time() - last_ts_ms / 1000) / 86400
                 logger.info(

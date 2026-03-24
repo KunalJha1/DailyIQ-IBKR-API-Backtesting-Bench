@@ -1,8 +1,32 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTws } from "./tws";
 
+export type PortfolioSource = "ibkr" | "manual";
+
+export interface PortfolioAccount {
+  id: string;
+  name: string;
+  source: PortfolioSource;
+  editable: boolean;
+  accountCode?: string | null;
+  groupIds: string[];
+  groupNames: string[];
+}
+
+export interface PortfolioGroup {
+  id: string;
+  name: string;
+  accountIds: string[];
+  accountNames: string[];
+}
+
 export interface PortfolioPosition {
+  id?: string;
+  accountId: string;
   account: string;
+  accountCode?: string | null;
+  source: PortfolioSource;
+  editable: boolean;
   symbol: string;
   name: string;
   currency: string;
@@ -19,7 +43,12 @@ export interface PortfolioPosition {
 }
 
 export interface CashBalance {
+  id?: string;
+  accountId: string;
   account: string;
+  accountCode?: string | null;
+  source: PortfolioSource;
+  editable: boolean;
   currency: string;
   balance: number;
 }
@@ -28,6 +57,8 @@ export interface PortfolioSnapshot {
   connected: boolean;
   host: string;
   port: number | null;
+  accounts: PortfolioAccount[];
+  groups: PortfolioGroup[];
   positions: PortfolioPosition[];
   cashBalances: CashBalance[];
   updatedAt: number;
@@ -38,79 +69,226 @@ const EMPTY_SNAPSHOT: PortfolioSnapshot = {
   connected: false,
   host: "127.0.0.1",
   port: null,
+  accounts: [],
+  groups: [],
   positions: [],
   cashBalances: [],
   updatedAt: 0,
 };
 
-const CACHE_KEY = "portfolio_snapshot";
+const CACHE_KEY = "portfolio_snapshot_v2";
 
-// Module-level cache so data survives component unmount/remount (page navigation)
 let cachedSnapshot: PortfolioSnapshot | null = null;
 
 function loadCachedSnapshot(): PortfolioSnapshot | null {
   if (cachedSnapshot) return cachedSnapshot;
   try {
     const raw = sessionStorage.getItem(CACHE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as PortfolioSnapshot;
-      cachedSnapshot = parsed;
-      return parsed;
-    }
-  } catch { /* ignore parse errors */ }
-  return null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PortfolioSnapshot>;
+    const snapshot: PortfolioSnapshot = {
+      ...EMPTY_SNAPSHOT,
+      ...parsed,
+      accounts: parsed.accounts ?? [],
+      groups: parsed.groups ?? [],
+      positions: parsed.positions ?? [],
+      cashBalances: parsed.cashBalances ?? [],
+    };
+    cachedSnapshot = snapshot;
+    return snapshot;
+  } catch {
+    return null;
+  }
 }
 
-function saveCachedSnapshot(snap: PortfolioSnapshot) {
-  cachedSnapshot = snap;
+function saveCachedSnapshot(snapshot: PortfolioSnapshot) {
+  cachedSnapshot = snapshot;
   try {
-    sessionStorage.setItem(CACHE_KEY, JSON.stringify(snap));
-  } catch { /* ignore quota errors */ }
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
-export function usePortfolioData(): PortfolioSnapshot & { loading: boolean } {
+export interface ManualAccountPayload {
+  name: string;
+  groupIds: string[];
+}
+
+export interface ManualPositionPayload {
+  symbol: string;
+  quantity: number;
+  avgCost: number;
+  currency: string;
+  name?: string;
+  exchange?: string;
+  primaryExchange?: string | null;
+  secType?: string;
+}
+
+export interface ManualCashPayload {
+  currency: string;
+  balance: number;
+}
+
+export interface PortfolioGroupPayload {
+  name: string;
+  accountIds: string[];
+}
+
+async function parseJsonOrThrow<T>(res: Response): Promise<T> {
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    const detail =
+      body && typeof body === "object" && "detail" in body && typeof (body as { detail?: unknown }).detail === "string"
+        ? (body as { detail: string }).detail
+        : `Request failed (${res.status})`;
+    throw new Error(detail);
+  }
+  return body as T;
+}
+
+export function usePortfolioData(): PortfolioSnapshot & {
+  loading: boolean;
+  refresh: () => Promise<void>;
+  createManualAccount: (payload: ManualAccountPayload) => Promise<void>;
+  updateManualAccount: (accountId: string, payload: ManualAccountPayload) => Promise<void>;
+  deleteManualAccount: (accountId: string) => Promise<void>;
+  createManualPosition: (accountId: string, payload: ManualPositionPayload) => Promise<void>;
+  updateManualPosition: (positionId: string, payload: ManualPositionPayload) => Promise<void>;
+  deleteManualPosition: (positionId: string) => Promise<void>;
+  createManualCashBalance: (accountId: string, payload: ManualCashPayload) => Promise<void>;
+  updateManualCashBalance: (cashId: string, payload: ManualCashPayload) => Promise<void>;
+  deleteManualCashBalance: (cashId: string) => Promise<void>;
+  createGroup: (payload: PortfolioGroupPayload) => Promise<void>;
+  updateGroup: (groupId: string, payload: PortfolioGroupPayload) => Promise<void>;
+  deleteGroup: (groupId: string) => Promise<void>;
+} {
   const { sidecarPort } = useTws();
   const initial = loadCachedSnapshot();
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot>(initial ?? EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(!initial);
 
-  useEffect(() => {
+  const fetchSnapshot = useCallback(async () => {
     if (!sidecarPort) {
-      setSnapshot((prev) => prev.positions.length ? prev : EMPTY_SNAPSHOT);
       setLoading(false);
+      setSnapshot((prev) => (prev.accounts.length || prev.positions.length || prev.cashBalances.length ? prev : EMPTY_SNAPSHOT));
       return;
     }
+    try {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/portfolio`);
+      const payload = await parseJsonOrThrow<Partial<PortfolioSnapshot>>(res);
+      const next: PortfolioSnapshot = {
+        ...EMPTY_SNAPSHOT,
+        ...payload,
+        accounts: payload.accounts ?? [],
+        groups: payload.groups ?? [],
+        positions: payload.positions ?? [],
+        cashBalances: payload.cashBalances ?? [],
+      };
+      setSnapshot(next);
+      saveCachedSnapshot(next);
+    } finally {
+      setLoading(false);
+    }
+  }, [sidecarPort]);
 
+  useEffect(() => {
     let cancelled = false;
 
-    async function fetchPortfolio() {
-      try {
-        const res = await fetch(`http://127.0.0.1:${sidecarPort}/portfolio/positions`);
-        if (!res.ok) return;
-        const raw = (await res.json()) as Partial<PortfolioSnapshot> & Omit<PortfolioSnapshot, "cashBalances">;
-        const payload: PortfolioSnapshot = { ...raw, cashBalances: raw.cashBalances ?? [] };
-        if (!cancelled) {
-          setSnapshot(payload);
-          saveCachedSnapshot(payload);
-          setLoading(false);
-        }
-      } catch {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+    async function poll() {
+      if (cancelled) return;
+      await fetchSnapshot();
     }
 
-    void fetchPortfolio();
-    const id = setInterval(() => {
-      void fetchPortfolio();
+    void poll();
+    const id = window.setInterval(() => {
+      void poll();
     }, 5000);
 
     return () => {
       cancelled = true;
-      clearInterval(id);
+      window.clearInterval(id);
     };
-  }, [sidecarPort]);
+  }, [fetchSnapshot]);
 
-  return useMemo(() => ({ ...snapshot, loading }), [snapshot, loading]);
+  const runMutation = useCallback(
+    async (path: string, init?: RequestInit) => {
+      if (!sidecarPort) throw new Error("Portfolio sidecar is not available.");
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}${path}`, init);
+      await parseJsonOrThrow<unknown>(res);
+      await fetchSnapshot();
+    },
+    [fetchSnapshot, sidecarPort],
+  );
+
+  return useMemo(
+    () => ({
+      ...snapshot,
+      loading,
+      refresh: fetchSnapshot,
+      createManualAccount: (payload: ManualAccountPayload) =>
+        runMutation("/portfolio/manual/accounts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      updateManualAccount: (accountId: string, payload: ManualAccountPayload) =>
+        runMutation(`/portfolio/manual/accounts/${accountId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      deleteManualAccount: (accountId: string) =>
+        runMutation(`/portfolio/manual/accounts/${accountId}`, { method: "DELETE" }),
+      createManualPosition: (accountId: string, payload: ManualPositionPayload) =>
+        runMutation(`/portfolio/manual/accounts/${accountId}/positions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      updateManualPosition: (positionId: string, payload: ManualPositionPayload) =>
+        runMutation(`/portfolio/manual/positions/${positionId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      deleteManualPosition: (positionId: string) =>
+        runMutation(`/portfolio/manual/positions/${positionId}`, { method: "DELETE" }),
+      createManualCashBalance: (accountId: string, payload: ManualCashPayload) =>
+        runMutation(`/portfolio/manual/accounts/${accountId}/cash-balances`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      updateManualCashBalance: (cashId: string, payload: ManualCashPayload) =>
+        runMutation(`/portfolio/manual/cash-balances/${cashId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      deleteManualCashBalance: (cashId: string) =>
+        runMutation(`/portfolio/manual/cash-balances/${cashId}`, { method: "DELETE" }),
+      createGroup: (payload: PortfolioGroupPayload) =>
+        runMutation("/portfolio/manual/groups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      updateGroup: (groupId: string, payload: PortfolioGroupPayload) =>
+        runMutation(`/portfolio/manual/groups/${groupId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      deleteGroup: (groupId: string) =>
+        runMutation(`/portfolio/manual/groups/${groupId}`, { method: "DELETE" }),
+    }),
+    [fetchSnapshot, loading, runMutation, snapshot],
+  );
 }

@@ -6,29 +6,39 @@ import { useTws } from '../lib/tws';
 import { linkBus } from '../lib/link-bus';
 import ChartCanvas from '../chart/components/ChartCanvas';
 import ChartToolbar from '../chart/components/ChartToolbar';
-import IndicatorPanel from '../chart/components/IndicatorPanel';
 import IndicatorLegend from '../chart/components/IndicatorLegend';
 import ScriptEditor from '../chart/components/ScriptEditor';
 import { interpretScript } from '../chart/scripting/interpreter';
-import { loadChartState, saveChartState, type PersistedChartIndicator, type ChartState } from '../lib/chart-state';
+import {
+  createDefaultPersistedChartIndicators,
+  loadChartState,
+  saveChartState,
+  type PersistedChartIndicator,
+  type ChartState,
+} from '../lib/chart-state';
+import { VOLUME_PANE_RATIO } from '../chart/constants';
 
 interface ChartPageProps {
   tabId?: string;
 }
 
 export default function ChartPage({ tabId }: ChartPageProps) {
+  const chartToolRailWidth = 56;
+  const defaultIndicatorsRef = useRef<PersistedChartIndicator[]>(createDefaultPersistedChartIndicators());
+  const chartOverlayRef = useRef<HTMLDivElement>(null);
   const makeDetachedPaneId = useCallback(() => `pane:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, []);
   const defaultChartState: ChartState = {
     symbol: 'AAPL',
     timeframe: '1D',
     chartType: 'candlestick',
     linkChannel: null,
-    indicators: [],
+    indicators: defaultIndicatorsRef.current,
     stopperPx: 80,
     indicatorColorDefaults: {},
   };
   const [persisted, setPersisted] = useState<ChartState | null>(() => (tabId ? loadChartState(tabId) : null));
   const initialState = persisted ?? defaultChartState;
+  const restoredIndicators = persisted?.indicators ?? defaultIndicatorsRef.current;
 
   const [symbol, setSymbol] = useState(initialState.symbol);
   const [timeframe, setTimeframe] = useState<Timeframe>(initialState.timeframe);
@@ -45,7 +55,9 @@ export default function ChartPage({ tabId }: ChartPageProps) {
   const [activeIndicators, setActiveIndicators] = useState<ActiveIndicator[]>([]);
   const [activeScripts, setActiveScripts] = useState<Map<string, ScriptResult>>(new Map());
   const [chartLayout, setChartLayout] = useState<ChartLayout | null>(null);
-  const [draggingIndicatorId, setDraggingIndicatorId] = useState<string | null>(null);
+  const [dragState, setDragState] = useState<{ indicatorId: string; sourcePaneId: string } | null>(null);
+  const [draggingMouse, setDraggingMouse] = useState<{ x: number; y: number } | null>(null);
+  const [dragHoverPaneId, setDragHoverPaneId] = useState<string | null>(null);
   const restoredIndicatorsRef = useRef(false);
 
   const engineRef = useRef<ChartEngine | null>(null);
@@ -184,7 +196,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
     setActiveIndicators([]);
     setActiveScripts(new Map());
     setChartLayout(null);
-    setDraggingIndicatorId(null);
+    setDragState(null);
     restoredIndicatorsRef.current = false;
 
     const engine = engineRef.current;
@@ -221,12 +233,12 @@ export default function ChartPage({ tabId }: ChartPageProps) {
 
   // Re-add persisted indicators once engine is ready
   useEffect(() => {
-    if (restoredIndicatorsRef.current || !engineRef.current || !persisted?.indicators?.length) return;
+    if (restoredIndicatorsRef.current || !engineRef.current || restoredIndicators.length === 0) return;
     restoredIndicatorsRef.current = true;
     const engine = engineRef.current;
-    applySerializedIndicators(engine, persisted.indicators);
+    applySerializedIndicators(engine, restoredIndicators);
     setActiveIndicators([...engine.getActiveIndicators()]);
-  }, [bars, persisted, applySerializedIndicators]);
+  }, [bars, restoredIndicators, applySerializedIndicators]);
 
   // Reconcile React/persisted indicator state back into the engine whenever
   // zoom/layout churn or fast refresh leaves the engine incomplete.
@@ -235,7 +247,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
     if (!engine || bars.length === 0) return;
     const desiredIndicators = activeIndicators.length > 0
       ? serializeIndicators(activeIndicators)
-      : (persisted?.indicators ?? []);
+      : restoredIndicators;
     if (desiredIndicators.length === 0) return;
 
     const engineIndicators = engine.getActiveIndicators();
@@ -246,7 +258,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
   }, [
     bars,
     activeIndicators,
-    persisted,
+    restoredIndicators,
     serializeIndicators,
     applySerializedIndicators,
     serializedIndicatorsMatch,
@@ -412,6 +424,95 @@ export default function ChartPage({ tabId }: ChartPageProps) {
     });
   }, []);
 
+  const beginIndicatorDrag = useCallback((indicatorId: string, sourcePaneId: string, clientX: number, clientY: number) => {
+    setDragState({ indicatorId, sourcePaneId });
+    const host = chartOverlayRef.current;
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    setDraggingMouse({
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!dragState || !chartLayout) return;
+
+    const updateDragState = (clientX: number, clientY: number) => {
+      const host = chartOverlayRef.current;
+      if (!host) return;
+      const rect = host.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      setDraggingMouse({ x, y });
+
+      const leftBound = chartToolRailWidth;
+      const rightBound = rect.width - chartLayout.priceAxisWidth;
+      if (x < leftBound || x > rightBound) {
+        setDragHoverPaneId(null);
+        return;
+      }
+
+      const hoveredPane = chartLayout.subPanes.find(
+        (pane) => y >= pane.top && y <= pane.top + pane.height,
+      );
+      if (hoveredPane) {
+        setDragHoverPaneId(hoveredPane.paneId === dragState.sourcePaneId ? null : hoveredPane.paneId);
+        return;
+      }
+
+      const newPaneHeight = 36;
+      const newPaneTop = rect.height - chartLayout.timeAxisHeight - newPaneHeight;
+      if (y >= newPaneTop && y <= newPaneTop + newPaneHeight) {
+        setDragHoverPaneId('__new__');
+        return;
+      }
+
+      if (y >= chartLayout.mainTop && y <= chartLayout.mainTop + chartLayout.mainHeight) {
+        setDragHoverPaneId(dragState.sourcePaneId === 'main' ? null : 'main');
+        return;
+      }
+
+      setDragHoverPaneId(null);
+    };
+
+    const handleMouseMove = (event: MouseEvent) => {
+      updateDragState(event.clientX, event.clientY);
+    };
+
+    const handleMouseUp = () => {
+      if (dragHoverPaneId) {
+        if (dragHoverPaneId === '__new__') {
+          handleMoveIndicatorToPane(dragState.indicatorId, makeDetachedPaneId());
+        } else {
+          handleMoveIndicatorToPane(dragState.indicatorId, dragHoverPaneId);
+        }
+      }
+      setDragState(null);
+      setDraggingMouse(null);
+      setDragHoverPaneId(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp, { once: true });
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [dragHoverPaneId, dragState, chartLayout, handleMoveIndicatorToPane, makeDetachedPaneId]);
+
+  const draggableVolumePanes = chartLayout
+    ? chartLayout.subPanes.flatMap((pane) => {
+        const volumeIndicator = activeIndicators.find(
+          (indicator) => pane.indicatorIds.includes(indicator.id) && indicator.name === 'Volume',
+        );
+        return volumeIndicator ? [{ pane, indicatorId: volumeIndicator.id }] : [];
+      })
+    : [];
+  const mainVolumeIndicator = activeIndicators.find(
+    (indicator) => indicator.name === 'Volume' && indicator.visible && indicator.paneId === 'main',
+  );
+
   return (
     <div className="flex flex-col h-full bg-base relative">
       <ChartToolbar
@@ -430,6 +531,13 @@ export default function ChartPage({ tabId }: ChartPageProps) {
           setStrategyPanelOpen(!strategyPanelOpen);
         }}
         onScriptEditorToggle={() => setScriptEditorOpen(!scriptEditorOpen)}
+        indicatorPanelOpen={indicatorPanelOpen}
+        strategyPanelOpen={strategyPanelOpen}
+        onIndicatorPanelClose={() => setIndicatorPanelOpen(false)}
+        onStrategyPanelClose={() => setStrategyPanelOpen(false)}
+        onAddIndicator={handleAddIndicator}
+        onToggleStrategy={handleToggleStrategy}
+        activeIndicators={activeIndicators}
         dataSource={source}
         loading={loading}
         linkChannel={linkChannel}
@@ -439,11 +547,9 @@ export default function ChartPage({ tabId }: ChartPageProps) {
         onZoomIn={() => engineRef.current?.zoomIn()}
         onZoomOut={() => engineRef.current?.zoomOut()}
         onZoomReset={() => engineRef.current?.resetZoom()}
-        yScaleMode={yScaleMode}
-        onYScaleModeChange={handleYScaleModeChange}
       />
 
-      <div className="flex flex-1 overflow-hidden relative">
+      <div ref={chartOverlayRef} className="flex flex-1 overflow-hidden relative">
         <ChartCanvas
           bars={bars}
           symbol={symbol}
@@ -457,53 +563,91 @@ export default function ChartPage({ tabId }: ChartPageProps) {
           onStopperPxChange={setStopperPx}
           onViewportChange={onViewportChange}
           onLayoutChange={setChartLayout}
+          yScaleMode={yScaleMode}
+          onYScaleModeChange={handleYScaleModeChange}
         >
-          {draggingIndicatorId && chartLayout && (
+          {chartLayout && mainVolumeIndicator && (
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                beginIndicatorDrag(mainVolumeIndicator.id, 'main', e.clientX, e.clientY);
+              }}
+              title="Drag volume out to its own pane"
+              style={{
+                position: 'absolute',
+                left: chartToolRailWidth,
+                right: chartLayout.priceAxisWidth,
+                top: chartLayout.mainTop + chartLayout.mainHeight * (1 - VOLUME_PANE_RATIO),
+                height: Math.max(48, chartLayout.mainHeight * VOLUME_PANE_RATIO),
+                cursor: 'grab',
+                pointerEvents: dragState ? 'none' : 'auto',
+                background: 'transparent',
+                zIndex: 4,
+              }}
+            />
+          )}
+          {draggableVolumePanes.map(({ pane, indicatorId }) => (
+            <div
+              key={`${pane.paneId}-volume-drag`}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
+              }}
+              title="Drag volume onto chart"
+              style={{
+                position: 'absolute',
+                left: chartToolRailWidth,
+                right: chartLayout?.priceAxisWidth ?? 70,
+                top: pane.top,
+                height: pane.height,
+                cursor: 'grab',
+                pointerEvents: dragState ? 'none' : 'auto',
+                background: 'transparent',
+                zIndex: 4,
+              }}
+            />
+          ))}
+          {dragState && chartLayout && (
             <>
               <div
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  handleMoveIndicatorToPane(draggingIndicatorId, 'main');
-                  setDraggingIndicatorId(null);
-                }}
                 style={{
                   position: 'absolute',
-                  left: 0,
+                  left: chartToolRailWidth,
                   right: chartLayout.priceAxisWidth,
                   top: chartLayout.mainTop,
                   height: chartLayout.mainHeight,
-                  border: '1px dashed rgba(26,86,219,0.5)',
-                  backgroundColor: 'rgba(26,86,219,0.08)',
+                  border: dragHoverPaneId === 'main'
+                    ? '1px solid rgba(26,86,219,0.8)'
+                    : '1px dashed rgba(26,86,219,0.5)',
+                  backgroundColor: dragHoverPaneId === 'main'
+                    ? 'rgba(26,86,219,0.14)'
+                    : 'rgba(26,86,219,0.08)',
                   color: '#8B949E',
                   fontFamily: '"JetBrains Mono", monospace',
                   fontSize: 10,
                   display: 'flex',
-                  alignItems: 'flex-start',
-                  justifyContent: 'flex-end',
-                  padding: 6,
-                  pointerEvents: 'auto',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  pointerEvents: 'none',
                 }}
               >
-                Overlay on Price
+                Drop on Chart
               </div>
               {chartLayout.subPanes.map((pane) => (
                 <div
                   key={pane.paneId}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    handleMoveIndicatorToPane(draggingIndicatorId, pane.paneId);
-                    setDraggingIndicatorId(null);
-                  }}
                   style={{
                     position: 'absolute',
-                    left: 0,
+                    left: chartToolRailWidth,
                     right: chartLayout.priceAxisWidth,
                     top: pane.top,
                     height: pane.height,
-                    border: '1px dashed rgba(139,148,158,0.35)',
-                    backgroundColor: 'rgba(139,148,158,0.06)',
+                    border: dragHoverPaneId === pane.paneId
+                      ? '1px solid rgba(139,148,158,0.65)'
+                      : '1px dashed rgba(139,148,158,0.35)',
+                    backgroundColor: dragHoverPaneId === pane.paneId
+                      ? 'rgba(139,148,158,0.12)'
+                      : 'rgba(139,148,158,0.06)',
                     color: '#8B949E',
                     fontFamily: '"JetBrains Mono", monospace',
                     fontSize: 10,
@@ -511,38 +655,57 @@ export default function ChartPage({ tabId }: ChartPageProps) {
                     alignItems: 'flex-start',
                     justifyContent: 'flex-end',
                     padding: 6,
-                    pointerEvents: 'auto',
+                    pointerEvents: 'none',
                   }}
                 >
                   Merge Pane
                 </div>
               ))}
               <div
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  handleMoveIndicatorToPane(draggingIndicatorId, makeDetachedPaneId());
-                  setDraggingIndicatorId(null);
-                }}
                 style={{
                   position: 'absolute',
-                  left: 0,
+                  left: chartToolRailWidth,
                   right: chartLayout.priceAxisWidth,
                   bottom: chartLayout.timeAxisHeight,
-                  height: 24,
-                  borderTop: '1px dashed rgba(245,158,11,0.5)',
-                  backgroundColor: 'rgba(245,158,11,0.08)',
+                  height: 36,
+                  borderTop: dragHoverPaneId === '__new__'
+                    ? '1px solid rgba(245,158,11,0.8)'
+                    : '1px dashed rgba(245,158,11,0.5)',
+                  backgroundColor: dragHoverPaneId === '__new__'
+                    ? 'rgba(245,158,11,0.14)'
+                    : 'rgba(245,158,11,0.08)',
                   color: '#F59E0B',
                   fontFamily: '"JetBrains Mono", monospace',
                   fontSize: 10,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  pointerEvents: 'auto',
+                  pointerEvents: 'none',
                 }}
               >
                 New Pane
               </div>
+              {draggingMouse && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: draggingMouse.x + 12,
+                    top: draggingMouse.y + 12,
+                    zIndex: 30,
+                    pointerEvents: 'none',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    backgroundColor: 'rgba(22,27,34,0.95)',
+                    color: '#E6EDF3',
+                    borderRadius: 4,
+                    padding: '4px 6px',
+                    fontFamily: '"JetBrains Mono", monospace',
+                    fontSize: 10,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Volume
+                </div>
+              )}
             </>
           )}
         </ChartCanvas>
@@ -550,6 +713,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
         <IndicatorLegend
           indicators={activeIndicators}
           activeScripts={activeScripts}
+          leftOffset={64}
           onUpdateParams={handleUpdateParams}
           onUpdateColor={handleUpdateColor}
           onUpdateLineWidth={handleUpdateLineWidth}
@@ -559,25 +723,18 @@ export default function ChartPage({ tabId }: ChartPageProps) {
           onSetDefaultColor={handleSetDefaultColor}
           onMoveUp={(id) => handleMoveIndicator(id, 'up')}
           onMoveDown={(id) => handleMoveIndicator(id, 'down')}
-          onDragStart={setDraggingIndicatorId}
-          onDragEnd={() => setDraggingIndicatorId(null)}
+          onDragStart={(id) => {
+            const indicator = activeIndicators.find((entry) => entry.id === id);
+            if (!indicator) return;
+            setDragState({ indicatorId: id, sourcePaneId: indicator.paneId });
+          }}
+          onDragEnd={() => {
+            setDragState(null);
+            setDraggingMouse(null);
+            setDragHoverPaneId(null);
+          }}
         />
 
-        <IndicatorPanel
-          open={indicatorPanelOpen}
-          onClose={() => setIndicatorPanelOpen(false)}
-          onAddIndicator={handleAddIndicator}
-          activeIndicators={activeIndicators}
-        />
-
-        <IndicatorPanel
-          open={strategyPanelOpen}
-          onClose={() => setStrategyPanelOpen(false)}
-          onAddIndicator={handleAddIndicator}
-          onToggleIndicator={handleToggleStrategy}
-          activeIndicators={activeIndicators}
-          mode="strategy"
-        />
 
         <ScriptEditor
           open={scriptEditorOpen}

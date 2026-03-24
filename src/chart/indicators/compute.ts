@@ -95,6 +95,7 @@ import { computeMarketStructureSentiment } from './oscillators/marketStructure';
 import { computeMarketSentiment } from './oscillators/marketSentiment';
 import { computeTrendAngle } from './oscillators/trendAngle';
 import { computeOBV } from './volume/obv';
+import { computeVolume } from './volume/volume';
 import { computeVolumeProfile } from './volume/volumeProfile';
 import { computeMarketSentimentStrategy } from './overlays/marketSentimentStrategy';
 
@@ -135,6 +136,7 @@ const computeFns: Record<string, (bars: OHLCVBar[], params: Record<string, numbe
   'Market Sentiment': computeMarketSentiment,
   'Market Sentiment Signal': computeMarketSentimentStrategy,
   'Trend Angle': computeTrendAngle,
+  Volume: computeVolume,
   OBV: computeOBV,
   'Volume Profile': computeVolumeProfile,
 };

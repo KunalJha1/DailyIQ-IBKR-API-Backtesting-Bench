@@ -1,7 +1,19 @@
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { ChartEngine } from '../core/ChartEngine';
-import type { OHLCVBar, ChartType, Timeframe, ScriptResult, ChartBrandingMode, ChartLayout, DrawingTool } from '../types';
-import { Minus, TrendingUp, Trash2 } from 'lucide-react';
+import type {
+  OHLCVBar,
+  ChartType,
+  Timeframe,
+  ScriptResult,
+  ChartBrandingMode,
+  ChartLayout,
+  DrawingTool,
+  DrawingAnchor,
+  DrawingSelection,
+  YScaleMode,
+} from '../types';
+import { PRICE_AXIS_WIDTH } from '../constants';
+import { Brush, Crosshair, Lock, LockOpen, RotateCcw, Trash2, Type, ZoomIn, ZoomOut } from 'lucide-react';
 
 interface ChartCanvasProps {
   bars: OHLCVBar[];
@@ -16,6 +28,8 @@ interface ChartCanvasProps {
   brandingMode?: ChartBrandingMode;
   onViewportChange?: (startIdx: number, endIdx: number) => void;
   onLayoutChange?: (layout: ChartLayout) => void;
+  yScaleMode?: YScaleMode;
+  onYScaleModeChange?: (mode: YScaleMode) => void;
   children?: React.ReactNode;
 }
 
@@ -32,11 +46,19 @@ export default function ChartCanvas({
   brandingMode = 'none',
   onViewportChange,
   onLayoutChange,
+  yScaleMode = 'auto',
+  onYScaleModeChange,
   children,
 }: ChartCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const textInputRef = useRef<HTMLInputElement>(null);
   const [activeTool, setActiveTool] = useState<DrawingTool>('none');
+  const [yAxisHovered, setYAxisHovered] = useState(false);
+  const [drawingHovered, setDrawingHovered] = useState(false);
+  const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
+  const [pendingTextAnchor, setPendingTextAnchor] = useState<DrawingAnchor | null>(null);
+  const [pendingTextValue, setPendingTextValue] = useState('');
 
   // Initialize engine
   useEffect(() => {
@@ -106,6 +128,20 @@ export default function ChartCanvas({
     engineRef.current?.setOnViewportChange(onViewportChange ?? null);
   }, [onViewportChange, engineRef]);
 
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setOnTextPlacementRequest((anchor) => {
+      setPendingTextAnchor(anchor);
+      setPendingTextValue('');
+    });
+    engine.setOnDrawingSelectionChange(setSelectedDrawing);
+    return () => {
+      engine.setOnTextPlacementRequest(null);
+      engine.setOnDrawingSelectionChange(null);
+    };
+  }, [engineRef]);
+
   // Update live mode / stopper
   useEffect(() => {
     const engine = engineRef.current;
@@ -131,6 +167,8 @@ export default function ChartCanvas({
 
   const handleSelectTool = useCallback((tool: DrawingTool) => {
     const nextTool = activeTool === tool ? 'none' : tool;
+    setPendingTextAnchor(null);
+    setPendingTextValue('');
     setActiveTool(nextTool);
     engineRef.current?.setDrawingTool(nextTool);
   }, [activeTool, engineRef]);
@@ -139,7 +177,44 @@ export default function ChartCanvas({
     engineRef.current?.clearDrawings();
     setActiveTool('none');
     engineRef.current?.setDrawingTool('none');
+    setPendingTextAnchor(null);
+    setPendingTextValue('');
   }, [engineRef]);
+
+  const handleZoomIn = useCallback(() => {
+    engineRef.current?.zoomIn();
+  }, [engineRef]);
+
+  const handleZoomOut = useCallback(() => {
+    engineRef.current?.zoomOut();
+  }, [engineRef]);
+
+  const handleZoomReset = useCallback(() => {
+    engineRef.current?.resetZoom();
+  }, [engineRef]);
+
+  const handleToggleSelectedLock = useCallback(() => {
+    if (!selectedDrawing) return;
+    engineRef.current?.setDrawingLocked(selectedDrawing.id, !selectedDrawing.locked);
+  }, [engineRef, selectedDrawing]);
+
+  const handleCommitText = useCallback(() => {
+    if (!pendingTextAnchor) return;
+    const value = pendingTextValue.trim();
+    if (!value) {
+      setPendingTextAnchor(null);
+      setPendingTextValue('');
+      return;
+    }
+    engineRef.current?.addTextDrawing(pendingTextAnchor, value);
+    setPendingTextAnchor(null);
+    setPendingTextValue('');
+  }, [engineRef, pendingTextAnchor, pendingTextValue]);
+
+  const handleCancelText = useCallback(() => {
+    setPendingTextAnchor(null);
+    setPendingTextValue('');
+  }, []);
 
   const toolButtonClass = (tool: DrawingTool) => [
     'w-9 h-9 rounded-md border transition-colors flex items-center justify-center',
@@ -148,21 +223,53 @@ export default function ChartCanvas({
       : 'bg-base/80 border-border-default text-text-secondary hover:bg-hover hover:text-text-primary',
   ].join(' ');
 
+  const handleCanvasPointerMove = useCallback((event: ReactMouseEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    setYAxisHovered(x >= rect.width - PRICE_AXIS_WIDTH && y >= 0 && y <= rect.height);
+    setDrawingHovered(!!engineRef.current?.getHoveredDrawingId());
+  }, [engineRef]);
+
+  const handleCanvasPointerLeave = useCallback(() => {
+    setYAxisHovered(false);
+    setDrawingHovered(false);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingTextAnchor) return;
+    textInputRef.current?.focus();
+  }, [pendingTextAnchor]);
+
+  const pendingTextPosition = pendingTextAnchor
+    ? engineRef.current?.anchorToCanvasPoint(pendingTextAnchor) ?? null
+    : null;
+
   return (
-    <div ref={containerRef} className="flex-1 relative overflow-hidden">
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0"
-        style={{ cursor: activeTool === 'none' ? 'crosshair' : 'copy' }}
-      />
-      <div className="absolute left-3 top-3 z-20 flex flex-col gap-2 rounded-lg border border-border-default bg-base/90 p-2 shadow-lg backdrop-blur-sm">
+    <div className="flex flex-1 overflow-hidden">
+      <div className="flex w-14 shrink-0 flex-col items-center gap-2 border-r border-border-default bg-panel/95 px-2 py-3">
+        <div className="mb-1 text-[9px] font-mono uppercase tracking-[0.18em] text-text-muted [writing-mode:vertical-rl] rotate-180">
+          Draw
+        </div>
+        <button
+          type="button"
+          className={toolButtonClass('none')}
+          onClick={() => handleSelectTool('none')}
+          title="Crosshair / selection"
+        >
+          <Crosshair size={16} />
+        </button>
         <button
           type="button"
           className={toolButtonClass('trendline')}
           onClick={() => handleSelectTool('trendline')}
           title="Trendline"
         >
-          <Minus size={16} />
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <circle cx="2.5" cy="13" r="1.5" fill="currentColor" stroke="none" />
+            <line x1="3.5" y1="12" x2="12.5" y2="3" />
+            <circle cx="13.5" cy="3" r="1.5" fill="currentColor" stroke="none" />
+          </svg>
         </button>
         <button
           type="button"
@@ -170,7 +277,69 @@ export default function ChartCanvas({
           onClick={() => handleSelectTool('fibRetracement')}
           title="Fibonacci retracement"
         >
-          <TrendingUp size={16} />
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" strokeLinecap="round">
+            <line x1="2" y1="2"    x2="14" y2="2"    stroke="#9CA3AF" strokeWidth="1.5" />
+            <line x1="2" y1="4.5"  x2="14" y2="4.5"  stroke="#1A56DB" strokeWidth="1.5" />
+            <line x1="2" y1="7"    x2="14" y2="7"    stroke="#00C853" strokeWidth="1.5" />
+            <line x1="2" y1="9.5"  x2="14" y2="9.5"  stroke="#4ADE80" strokeWidth="1.5" />
+            <line x1="2" y1="12"   x2="14" y2="12"   stroke="#F59E0B" strokeWidth="1.5" />
+            <line x1="2" y1="14.5" x2="14" y2="14.5" stroke="#FF3D71" strokeWidth="1.5" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={toolButtonClass('brush')}
+          onClick={() => handleSelectTool('brush')}
+          title="Brush"
+        >
+          <Brush size={16} />
+        </button>
+        <button
+          type="button"
+          className={toolButtonClass('text')}
+          onClick={() => handleSelectTool('text')}
+          title="Text"
+        >
+          <Type size={16} />
+        </button>
+        <div className="my-1 h-px w-8 bg-border-default" />
+        <button
+          type="button"
+          className="w-9 h-9 rounded-md border border-border-default bg-base/80 text-text-secondary hover:bg-hover hover:text-text-primary flex items-center justify-center transition-colors"
+          onClick={handleZoomIn}
+          title="Zoom in"
+        >
+          <ZoomIn size={16} />
+        </button>
+        <button
+          type="button"
+          className="w-9 h-9 rounded-md border border-border-default bg-base/80 text-text-secondary hover:bg-hover hover:text-text-primary flex items-center justify-center transition-colors"
+          onClick={handleZoomOut}
+          title="Zoom out"
+        >
+          <ZoomOut size={16} />
+        </button>
+        <button
+          type="button"
+          className="w-9 h-9 rounded-md border border-border-default bg-base/80 text-text-secondary hover:bg-hover hover:text-text-primary flex items-center justify-center transition-colors"
+          onClick={handleZoomReset}
+          title="Reset zoom"
+        >
+          <RotateCcw size={16} />
+        </button>
+        <div className="my-1 h-px w-8 bg-border-default" />
+        <button
+          type="button"
+          className={`w-9 h-9 rounded-md border flex items-center justify-center transition-colors ${
+            selectedDrawing
+              ? 'border-border-default bg-base/80 text-text-secondary hover:bg-hover hover:text-text-primary'
+              : 'border-border-default/60 bg-base/40 text-text-muted/50'
+          }`}
+          onClick={handleToggleSelectedLock}
+          title={selectedDrawing ? (selectedDrawing.locked ? 'Unlock drawing' : 'Lock drawing') : 'Select a drawing to lock'}
+          disabled={!selectedDrawing}
+        >
+          {selectedDrawing?.locked ? <Lock size={16} /> : <LockOpen size={16} />}
         </button>
         <button
           type="button"
@@ -181,32 +350,127 @@ export default function ChartCanvas({
           <Trash2 size={16} />
         </button>
       </div>
-      {children}
-      {liveMode && (
+
+      <div ref={containerRef} className="flex-1 relative overflow-hidden">
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0"
+          onMouseMove={handleCanvasPointerMove}
+          onMouseLeave={handleCanvasPointerLeave}
+          style={{ cursor: yAxisHovered ? 'ns-resize' : activeTool !== 'none' ? 'copy' : drawingHovered ? 'move' : 'crosshair' }}
+        />
+        {yAxisHovered && (
+          <div className="pointer-events-none absolute right-5 top-1/2 z-20 flex h-16 w-4 -translate-y-1/2 flex-col items-center justify-center rounded-full border border-blue/40 bg-base/85 shadow-lg backdrop-blur-sm">
+            <div className="h-1.5 w-1.5 rounded-full bg-blue/90" />
+            <div className="my-1 h-6 w-px bg-blue/80" />
+            <div className="flex flex-col gap-1">
+              <div className="h-0.5 w-2 rounded-full bg-blue/80" />
+              <div className="h-0.5 w-2 rounded-full bg-blue/80" />
+            </div>
+          </div>
+        )}
+        {/* Auto / Log scale buttons pinned to bottom of y-axis */}
         <div
-          className="absolute right-2 bottom-1 flex items-center gap-2"
+          className="pointer-events-auto absolute z-10 flex flex-col gap-1"
           style={{
-            height: 20,
-            padding: '0 6px',
-            backgroundColor: 'rgba(13,17,23,0.7)',
-            border: '1px solid rgba(33,38,45,0.7)',
-            borderRadius: 4,
-            backdropFilter: 'blur(2px)',
+            right: 4,
+            bottom: 6 + 24,
+            width: PRICE_AXIS_WIDTH - 8,
           }}
         >
-          <span className="text-[9px] font-mono text-text-muted">Stop</span>
-          <input
-            type="range"
-            min={0}
-            max={200}
-            step={2}
-            value={stopperPx}
-            onChange={(e) => onStopperPxChange?.(Number(e.target.value))}
-            style={{ width: 90 }}
-          />
-          <span className="text-[9px] font-mono text-text-muted">{stopperPx}px</span>
+          <button
+            onClick={() => onYScaleModeChange?.('auto')}
+            className={`w-full px-1.5 py-0.5 text-[9px] font-mono rounded transition-colors duration-120 ${
+              yScaleMode === 'auto'
+                ? 'text-blue bg-blue/15 border border-blue/30'
+                : 'text-text-muted bg-base/70 border border-white/[0.06] hover:text-text-secondary hover:bg-hover'
+            }`}
+            title="Auto scale"
+          >
+            Auto
+          </button>
+          <button
+            onClick={() => onYScaleModeChange?.('log')}
+            className={`w-full px-1.5 py-0.5 text-[9px] font-mono rounded transition-colors duration-120 ${
+              yScaleMode === 'log'
+                ? 'text-blue bg-blue/15 border border-blue/30'
+                : 'text-text-muted bg-base/70 border border-white/[0.06] hover:text-text-secondary hover:bg-hover'
+            }`}
+            title="Logarithmic scale"
+          >
+            Log
+          </button>
         </div>
-      )}
+        {pendingTextAnchor && pendingTextPosition && (
+          <div
+            className="absolute z-30 flex w-52 flex-col gap-2 rounded-md border border-white/[0.08] bg-[#161B22]/95 p-2 shadow-xl shadow-black/40 backdrop-blur-sm"
+            style={{
+              left: Math.min(Math.max(8, pendingTextPosition.x + 12), Math.max(8, (containerRef.current?.offsetWidth ?? 220) - 216)),
+              top: Math.min(Math.max(8, pendingTextPosition.y + 12), Math.max(8, (containerRef.current?.offsetHeight ?? 120) - 88)),
+            }}
+          >
+            <div className="text-[9px] font-mono uppercase tracking-[0.16em] text-text-muted">Chart Text</div>
+            <input
+              ref={textInputRef}
+              value={pendingTextValue}
+              onChange={(e) => setPendingTextValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleCommitText();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  handleCancelText();
+                }
+              }}
+              placeholder="Add note"
+              className="h-8 w-full rounded-sm border border-white/[0.08] bg-black/20 px-2 text-[11px] text-white/75 outline-none placeholder:text-white/20"
+            />
+            <div className="flex items-center justify-end gap-1">
+              <button
+                type="button"
+                className="rounded-sm px-2 py-1 text-[10px] text-text-muted transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                onClick={handleCancelText}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-sm bg-blue/15 px-2 py-1 text-[10px] text-blue transition-colors hover:bg-blue/25"
+                onClick={handleCommitText}
+              >
+                Place
+              </button>
+            </div>
+          </div>
+        )}
+        {children}
+        {liveMode && (
+          <div
+            className="absolute right-2 bottom-1 flex items-center gap-2"
+            style={{
+              height: 20,
+              padding: '0 6px',
+              backgroundColor: 'rgba(13,17,23,0.7)',
+              border: '1px solid rgba(33,38,45,0.7)',
+              borderRadius: 4,
+              backdropFilter: 'blur(2px)',
+            }}
+          >
+            <span className="text-[9px] font-mono text-text-muted">Stop</span>
+            <input
+              type="range"
+              min={0}
+              max={200}
+              step={2}
+              value={stopperPx}
+              onChange={(e) => onStopperPxChange?.(Number(e.target.value))}
+              style={{ width: 90 }}
+            />
+            <span className="text-[9px] font-mono text-text-muted">{stopperPx}px</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
