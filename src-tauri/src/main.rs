@@ -204,14 +204,26 @@ fn probe_tws_ports() -> Option<ProbeResult> {
     None
 }
 
-/// Stub for spawning a tab as a new native window (future drag-out support)
+/// Spawn a detached tab as a new native window (drag-out support)
 #[tauri::command]
-fn spawn_tab_window(app_handle: tauri::AppHandle, label: String, title: String) -> Result<(), String> {
-    let url = tauri::WindowUrl::App("index.html".into());
+fn spawn_tab_window(
+    app_handle: tauri::AppHandle,
+    label: String,
+    title: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let url = tauri::WindowUrl::App(format!("index.html?detached={}", label).into());
     let builder = tauri::WindowBuilder::new(&app_handle, &label, url)
         .title(&title)
-        .inner_size(1440.0, 900.0)
-        .min_inner_size(1280.0, 800.0);
+        .inner_size(width, height)
+        .min_inner_size(800.0, 600.0)
+        .position(x, y);
+
+    #[cfg(target_os = "windows")]
+    let builder = builder.decorations(false);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -532,20 +544,25 @@ fn main() {
         })
         .on_window_event(|event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
-                // Prevent the window from closing until child processes are killed.
-                // Using CloseRequested (not Destroyed) because on Windows, Destroyed
-                // fires too late — the runtime may already be partially torn down.
-                api.prevent_close();
-                let window = event.window().clone();
-                let state: tauri::State<SidecarState> = window.state();
-                if let Some(child) = state.child.lock().unwrap().take() {
-                    child.kill();
+                let label = event.window().label().to_string();
+                // Only kill the sidecar when the main window closes.
+                // Detached tab windows close freely without touching the sidecar.
+                if label == "main" {
+                    // Prevent the window from closing until child processes are killed.
+                    // Using CloseRequested (not Destroyed) because on Windows, Destroyed
+                    // fires too late — the runtime may already be partially torn down.
+                    api.prevent_close();
+                    let window = event.window().clone();
+                    let state: tauri::State<SidecarState> = window.state();
+                    if let Some(child) = state.child.lock().unwrap().take() {
+                        child.kill();
+                    }
+                    if let Some(worker) = state.worker_child.lock().unwrap().take() {
+                        worker.kill();
+                    }
+                    *state.port.lock().unwrap() = None;
+                    let _ = window.close();
                 }
-                if let Some(worker) = state.worker_child.lock().unwrap().take() {
-                    worker.kill();
-                }
-                *state.port.lock().unwrap() = None;
-                let _ = window.close();
             }
         })
         .run(tauri::generate_context!())

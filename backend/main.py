@@ -5,6 +5,7 @@ import asyncio
 from collections import defaultdict
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -139,6 +140,44 @@ def _validate_finnhub_key(api_key: str) -> tuple[bool, str]:
         return False, f"Network error: {exc.reason}"
     except Exception as exc:
         return False, str(exc)
+
+
+PORTFOLIO_CACHE_TTL_S = 60.0
+_portfolio_cache_lock = threading.Lock()
+_portfolio_cache: dict | None = None
+_portfolio_cache_time: float = 0.0
+_portfolio_last_good: dict | None = None
+
+
+def read_live_portfolio_snapshot_cached(force: bool = False) -> dict:
+    global _portfolio_cache, _portfolio_cache_time, _portfolio_last_good
+
+    now = time.monotonic()
+    if not force:
+        with _portfolio_cache_lock:
+            if _portfolio_cache is not None and (now - _portfolio_cache_time) < PORTFOLIO_CACHE_TTL_S:
+                return _portfolio_cache
+
+    result = read_live_portfolio_snapshot()
+
+    with _portfolio_cache_lock:
+        if result.get("connected"):
+            _portfolio_last_good = result
+            _portfolio_cache = result
+        else:
+            if _portfolio_last_good is not None:
+                _portfolio_cache = {
+                    **_portfolio_last_good,
+                    "connected": False,
+                    "stale": True,
+                    "staleSince": result.get("updatedAt", _now_ms()),
+                    "error": result.get("error"),
+                }
+            else:
+                _portfolio_cache = result
+        _portfolio_cache_time = now
+
+    return _portfolio_cache
 
 
 def read_live_portfolio_snapshot() -> dict:
@@ -400,8 +439,8 @@ def read_manual_portfolio_state() -> dict:
     }
 
 
-def build_unified_portfolio_snapshot() -> dict:
-    live = read_live_portfolio_snapshot()
+def build_unified_portfolio_snapshot(force: bool = False) -> dict:
+    live = read_live_portfolio_snapshot_cached(force=force)
     manual = read_manual_portfolio_state()
     accounts = [*live.get("accounts", []), *manual["accounts"]]
     groups = manual["groups"]
@@ -970,8 +1009,8 @@ def create_app() -> FastAPI:
         return await asyncio.to_thread(read_live_portfolio_snapshot)
 
     @app.get("/portfolio")
-    async def get_portfolio():
-        return await asyncio.to_thread(build_unified_portfolio_snapshot)
+    async def get_portfolio(force: bool = False):
+        return await asyncio.to_thread(build_unified_portfolio_snapshot, force)
 
     @app.get("/portfolio/manual")
     async def get_manual_portfolio():

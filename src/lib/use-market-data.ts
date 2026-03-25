@@ -114,18 +114,9 @@ export function useWatchlistData(symbols: string[]): WatchlistDataResult {
         const payload = await res.json();
         const quotes = (payload.snapshots as Array<Record<string, unknown>>) || [];
         if (cancelled) return;
-        const returned = new Set<string>();
         for (const q of quotes) {
           const sym = q.symbol as string;
-          if (sym) {
-            returned.add(sym);
-            updateLiveQuote(sym, q);
-          }
-        }
-        for (const sym of symbols) {
-          if (!returned.has(sym)) {
-            deleteLiveQuote(sym);
-          }
+          if (sym) updateLiveQuote(sym, q);
         }
       } catch {
         // Ignore transient errors
@@ -133,7 +124,7 @@ export function useWatchlistData(symbols: string[]): WatchlistDataResult {
     }
 
     fetchQuotes();
-    const id = setInterval(fetchQuotes, 1500);
+    const id = setInterval(fetchQuotes, 3000);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -190,7 +181,7 @@ export function useQuoteData(quoteId: string, symbol: string): Quote | null {
     }
 
     fetchQuote();
-    const id = setInterval(fetchQuote, 1500);
+    const id = setInterval(fetchQuote, 3000);
     return () => {
       cancelled = true;
       clearInterval(id);

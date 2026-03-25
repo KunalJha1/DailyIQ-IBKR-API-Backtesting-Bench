@@ -23,6 +23,10 @@
 
 ---
 
+<img src="public/dailyiq-brand-resources/preview-v-0.1.0.png" alt="DailyIQ platform preview" width="100%" />
+
+---
+
 ## Platform at a Glance
 
 | Coverage | API Surface | Chart Engine | App Model |

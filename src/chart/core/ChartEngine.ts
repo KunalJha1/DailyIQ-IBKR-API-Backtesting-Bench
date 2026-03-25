@@ -83,6 +83,8 @@ export class ChartEngine {
   private stopperPx = 0;
   private subPaneHeightOverrides: Map<string, number> = new Map();
   private subPaneScaleModes: Map<string, YScaleMode> = new Map();
+  private collapsedPanes: Set<string> = new Set();
+  private maximizedPaneId: string | null = null;
   private brandingMode: ChartBrandingMode = 'none';
   private brandingImage: HTMLImageElement | null = null;
   private symbolBrandingSymbol = '';
@@ -578,6 +580,65 @@ export class ChartEngine {
 
   getSubPaneScaleMode(paneId: string): YScaleMode {
     return this.subPaneScaleModes.get(paneId) ?? 'auto';
+  }
+
+  movePane(paneId: string, direction: 'up' | 'down') {
+    const panes = this.getAssignedSubPanes();
+    const paneIndex = panes.findIndex(p => p.paneId === paneId);
+    if (paneIndex === -1) return;
+    const targetIndex = direction === 'up' ? paneIndex - 1 : paneIndex + 1;
+    if (targetIndex < 0 || targetIndex >= panes.length) return;
+
+    // Swap two pane groups in the flat indicators array
+    const newPaneOrder = [...panes];
+    [newPaneOrder[paneIndex], newPaneOrder[targetIndex]] = [newPaneOrder[targetIndex], newPaneOrder[paneIndex]];
+
+    const mainInds = this.activeIndicators.filter(i => i.paneId === 'main');
+    const subPaneInds = newPaneOrder.flatMap(p =>
+      this.activeIndicators.filter(i => i.paneId === p.paneId)
+    );
+    const rest = this.activeIndicators.filter(
+      i => i.paneId !== 'main' && !panes.some(p => p.paneId === i.paneId)
+    );
+    this.activeIndicators = [...mainInds, ...subPaneInds, ...rest];
+    this.markDirty();
+  }
+
+  removePane(paneId: string) {
+    this.activeIndicators = this.activeIndicators.filter(ind => ind.paneId !== paneId);
+    this.collapsedPanes.delete(paneId);
+    this.subPaneHeightOverrides.delete(paneId);
+    this.subPaneScaleModes.delete(paneId);
+    if (this.maximizedPaneId === paneId) this.maximizedPaneId = null;
+    this.markDirty();
+  }
+
+  collapsePane(paneId: string) {
+    this.collapsedPanes.add(paneId);
+    this.markDirty();
+  }
+
+  expandPane(paneId: string) {
+    this.collapsedPanes.delete(paneId);
+    this.markDirty();
+  }
+
+  isPaneCollapsed(paneId: string): boolean {
+    return this.collapsedPanes.has(paneId);
+  }
+
+  maximizePane(paneId: string) {
+    this.maximizedPaneId = paneId;
+    this.markDirty();
+  }
+
+  unmaximizePane() {
+    this.maximizedPaneId = null;
+    this.markDirty();
+  }
+
+  getMaximizedPane(): string | null {
+    return this.maximizedPaneId;
   }
 
   /** Set result for a single script by id. Pass null to remove. */

@@ -115,6 +115,8 @@ export interface SubPaneLayout {
   top: number;
   height: number;
   yScaleMode: YScaleMode;
+  collapsed: boolean;
+  maximized: boolean;
 }
 
 export interface ScriptPlot {

@@ -55,6 +55,8 @@ export interface CashBalance {
 
 export interface PortfolioSnapshot {
   connected: boolean;
+  stale?: boolean;
+  staleSince?: number;
   host: string;
   port: number | null;
   accounts: PortfolioAccount[];
@@ -174,25 +176,59 @@ export function usePortfolioData(): PortfolioSnapshot & {
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot>(initial ?? EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(!initial);
 
-  const fetchSnapshot = useCallback(async () => {
+  const fetchSnapshot = useCallback(async (force = false) => {
     if (!sidecarPort) {
       setLoading(false);
       setSnapshot((prev) => (prev.accounts.length || prev.positions.length || prev.cashBalances.length ? prev : EMPTY_SNAPSHOT));
       return;
     }
     try {
-      const res = await fetch(`http://127.0.0.1:${sidecarPort}/portfolio`);
+      const url = force
+        ? `http://127.0.0.1:${sidecarPort}/portfolio?force=true`
+        : `http://127.0.0.1:${sidecarPort}/portfolio`;
+      const res = await fetch(url);
       const payload = await parseJsonOrThrow<Partial<PortfolioSnapshot>>(res);
-      const next: PortfolioSnapshot = {
-        ...EMPTY_SNAPSHOT,
-        ...payload,
-        accounts: payload.accounts ?? [],
-        groups: payload.groups ?? [],
-        positions: payload.positions ?? [],
-        cashBalances: payload.cashBalances ?? [],
-      };
-      setSnapshot(next);
-      saveCachedSnapshot(next);
+
+      const hasData =
+        (payload.positions?.length ?? 0) > 0 ||
+        (payload.accounts?.length ?? 0) > 0 ||
+        (payload.cashBalances?.length ?? 0) > 0;
+
+      setSnapshot((prev) => {
+        if (hasData) {
+          const next: PortfolioSnapshot = {
+            ...EMPTY_SNAPSHOT,
+            ...payload,
+            accounts: payload.accounts ?? [],
+            groups: payload.groups ?? [],
+            positions: payload.positions ?? [],
+            cashBalances: payload.cashBalances ?? [],
+          };
+          saveCachedSnapshot(next);
+          return next;
+        }
+        // Disconnected or empty — keep previous real data, just update connection status
+        if (prev.positions.length > 0 || prev.accounts.length > 0 || prev.cashBalances.length > 0) {
+          return {
+            ...prev,
+            connected: payload.connected ?? false,
+            stale: payload.stale ?? true,
+            staleSince: payload.staleSince ?? prev.staleSince,
+            error: payload.error,
+          };
+        }
+        // No previous data either
+        return {
+          ...EMPTY_SNAPSHOT,
+          ...payload,
+          accounts: payload.accounts ?? [],
+          groups: payload.groups ?? [],
+          positions: payload.positions ?? [],
+          cashBalances: payload.cashBalances ?? [],
+        };
+      });
+    } catch {
+      // Network error: preserve existing data entirely
     } finally {
       setLoading(false);
     }
@@ -209,7 +245,7 @@ export function usePortfolioData(): PortfolioSnapshot & {
     void poll();
     const id = window.setInterval(() => {
       void poll();
-    }, 5000);
+    }, 60000);
 
     return () => {
       cancelled = true;
@@ -222,7 +258,7 @@ export function usePortfolioData(): PortfolioSnapshot & {
       if (!sidecarPort) throw new Error("Portfolio sidecar is not available.");
       const res = await fetch(`http://127.0.0.1:${sidecarPort}${path}`, init);
       await parseJsonOrThrow<unknown>(res);
-      await fetchSnapshot();
+      await fetchSnapshot(true);
     },
     [fetchSnapshot, sidecarPort],
   );
@@ -231,7 +267,7 @@ export function usePortfolioData(): PortfolioSnapshot & {
     () => ({
       ...snapshot,
       loading,
-      refresh: fetchSnapshot,
+      refresh: () => fetchSnapshot(true),
       createManualAccount: (payload: ManualAccountPayload) =>
         runMutation("/portfolio/manual/accounts", {
           method: "POST",
