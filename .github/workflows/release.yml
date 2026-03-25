@@ -130,5 +130,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: DailyIQ ${{ github.ref_name }}
           releaseBody: See assets for downloadable installers.
-          releaseDraft: true
+          releaseDraft: false
           args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json
