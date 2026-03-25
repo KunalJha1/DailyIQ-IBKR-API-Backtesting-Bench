@@ -6,7 +6,7 @@
   <img src="public/dailyiq-brand-resources/daily-iq-topbar-logo-black.svg" alt="DailyIQ" width="320" />
 </picture>
 
-**Desktop trading research workspace for IBKR users with live watchlists, technical scoring, options analytics, historical caching, and a modular Tauri-based UI.**
+**Desktop trading research workspace for users with live watchlists, technical scoring, options analytics, historical caching, and a modular Tauri-based UI.**
 
 ![Python](https://img.shields.io/badge/Python-3.11--3.12-3776AB?style=flat&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Sidecar-009688?style=flat&logo=fastapi&logoColor=white)
@@ -33,7 +33,7 @@
 
 ## What This Project Is
 
-DailyIQ is a desktop-first market research and trading workspace built around Interactive Brokers connectivity. The application combines a React/TypeScript frontend, a Tauri desktop shell, and a FastAPI sidecar backed by local SQLite storage.
+DailyIQ is a desktop-first market research and trading workspace built around IBKR connectivity (along with backups). The application combines a React/TypeScript frontend, a Tauri desktop shell, and a FastAPI sidecar backed by local SQLite storage.
 
 It is designed to give traders a fast local workspace for:
 
@@ -275,40 +275,3 @@ python3 -m py_compile backend/main.py backend/worker_watchlist.py backend/db_uti
 Backend regression tests live under `backend/tests/`.
 
 ---
-
-## Current Status
-
-This repository contains the working source code for the desktop application.
-
-Implemented and actively represented in the codebase:
-
-- desktop shell and updater flow
-- dashboard workspace system
-- live and fallback market data ingestion
-- charting engine and indicators
-- heatmap and screener views
-- options chain collection and display
-- IBKR and manual portfolio support
-- Supabase-based desktop authentication
-
-Present as scaffolded tabs or evolving areas:
-
-- Backtesting
-- Simulations
-- Market Bias
-
-Those sections already exist in the app shell, but their product depth is not yet at the same level as the charting, options, portfolio, watchlist, and heatmap systems.
-
----
-
-## Security Notes
-
-- Do not commit credentials, API keys, tokens, or IBKR account details.
-- Treat `data/tws-settings.json` and local SQLite state as machine-local runtime data.
-- Prefer the existing client ID lease and worker model over hard-coded IBKR client IDs.
-
----
-
-## License
-
-[MIT](LICENSE)
