@@ -13,7 +13,25 @@ import type {
   YScaleMode,
 } from '../types';
 import { PRICE_AXIS_WIDTH } from '../constants';
-import { Brush, Crosshair, Lock, LockOpen, RotateCcw, Trash2, Type, ZoomIn, ZoomOut } from 'lucide-react';
+import { Brush, Crosshair, Lock, LockOpen, RotateCcw, Trash2, Type, ZoomIn, ZoomOut, Check } from 'lucide-react';
+
+const DRAWING_COLOR_PALETTE = [
+  '#60A5FA',
+  '#00C853',
+  '#FF3D71',
+  '#F59E0B',
+  '#8B5CF6',
+  '#EC4899',
+  '#22D3EE',
+  '#FFFFFF',
+];
+
+interface DrawingContextMenu {
+  drawingId: string;
+  color: string;
+  x: number;
+  y: number;
+}
 
 interface ChartCanvasProps {
   bars: OHLCVBar[];
@@ -28,8 +46,13 @@ interface ChartCanvasProps {
   brandingMode?: ChartBrandingMode;
   onViewportChange?: (startIdx: number, endIdx: number) => void;
   onLayoutChange?: (layout: ChartLayout) => void;
+  onEngineReady?: () => void;
   yScaleMode?: YScaleMode;
   onYScaleModeChange?: (mode: YScaleMode) => void;
+  pendingViewportShift?: number;
+  onViewportShiftApplied?: () => void;
+  updateMode?: 'full' | 'tail';
+  tailChangeOffset?: number;
   children?: React.ReactNode;
 }
 
@@ -46,8 +69,13 @@ export default function ChartCanvas({
   brandingMode = 'none',
   onViewportChange,
   onLayoutChange,
+  onEngineReady,
   yScaleMode = 'auto',
   onYScaleModeChange,
+  pendingViewportShift = 0,
+  onViewportShiftApplied,
+  updateMode = 'full',
+  tailChangeOffset = 0,
   children,
 }: ChartCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -59,6 +87,7 @@ export default function ChartCanvas({
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
   const [pendingTextAnchor, setPendingTextAnchor] = useState<DrawingAnchor | null>(null);
   const [pendingTextValue, setPendingTextValue] = useState('');
+  const [ctxMenu, setCtxMenu] = useState<DrawingContextMenu | null>(null);
 
   // Initialize engine
   useEffect(() => {
@@ -68,12 +97,13 @@ export default function ChartCanvas({
     const engine = new ChartEngine(canvas);
     engineRef.current = engine;
     engine.setDrawingTool('none');
+    onEngineReady?.();
 
     return () => {
       engine.destroy();
       engineRef.current = null;
     };
-  }, [engineRef]);
+  }, [engineRef, onEngineReady]);
 
   // ResizeObserver
   const handleResize = useCallback(() => {
@@ -98,12 +128,26 @@ export default function ChartCanvas({
     return () => ro.disconnect();
   }, [handleResize]);
 
-  // Update data
+  // Update data — use incremental path for poll-driven tail updates
   useEffect(() => {
-    engineRef.current?.setData(bars);
     const engine = engineRef.current;
-    if (engine) onLayoutChange?.(engine.getLayout());
-  }, [bars, engineRef, onLayoutChange]);
+    if (!engine) return;
+    if (updateMode === 'tail' && bars.length > 0) {
+      engine.updateTail(bars, tailChangeOffset);
+    } else {
+      engine.setData(bars);
+    }
+    onLayoutChange?.(engine.getLayout());
+  }, [bars, updateMode, tailChangeOffset, engineRef, onLayoutChange]);
+
+  useEffect(() => {
+    if (!pendingViewportShift) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.shiftViewportBy(pendingViewportShift);
+    onLayoutChange?.(engine.getLayout());
+    onViewportShiftApplied?.();
+  }, [pendingViewportShift, engineRef, onLayoutChange, onViewportShiftApplied]);
 
   // Update chart type
   useEffect(() => {
@@ -121,6 +165,7 @@ export default function ChartCanvas({
 
   useEffect(() => {
     engineRef.current?.setBrandingSymbol(symbol ?? '');
+    engineRef.current?.resetViewport();
   }, [symbol, engineRef]);
 
   // Wire viewport change callback
@@ -136,9 +181,24 @@ export default function ChartCanvas({
       setPendingTextValue('');
     });
     engine.setOnDrawingSelectionChange(setSelectedDrawing);
+    engine.setOnDrawingContextMenu((info) => {
+      const containerRect = containerRef.current?.getBoundingClientRect();
+      if (!containerRect) return;
+      setCtxMenu({
+        drawingId: info.drawingId,
+        color: info.color,
+        x: Math.min(info.screenX - containerRect.left, containerRect.width - 160),
+        y: Math.min(info.screenY - containerRect.top, containerRect.height - 140),
+      });
+    });
+    engine.setOnDrawingHoverChange((hoveredId) => {
+      setDrawingHovered(!!hoveredId);
+    });
     return () => {
       engine.setOnTextPlacementRequest(null);
       engine.setOnDrawingSelectionChange(null);
+      engine.setOnDrawingContextMenu(null);
+      engine.setOnDrawingHoverChange(null);
     };
   }, [engineRef]);
 
@@ -215,6 +275,29 @@ export default function ChartCanvas({
     setPendingTextAnchor(null);
     setPendingTextValue('');
   }, []);
+
+  const handleCtxDelete = useCallback(() => {
+    if (!ctxMenu) return;
+    engineRef.current?.deleteDrawing(ctxMenu.drawingId);
+    setCtxMenu(null);
+  }, [engineRef, ctxMenu]);
+
+  const handleCtxColor = useCallback((color: string) => {
+    if (!ctxMenu) return;
+    engineRef.current?.setDrawingColor(ctxMenu.drawingId, color);
+    setCtxMenu(prev => prev ? { ...prev, color } : null);
+  }, [engineRef, ctxMenu]);
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'y'))) {
+        setCtxMenu(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [ctxMenu]);
 
   const toolButtonClass = (tool: DrawingTool) => [
     'w-9 h-9 rounded-md border transition-colors flex items-center justify-center',
@@ -444,7 +527,45 @@ export default function ChartCanvas({
             </div>
           </div>
         )}
-        {children}
+        {ctxMenu && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }} />
+            <div
+              className="absolute z-50 flex flex-col rounded-md border border-white/[0.1] bg-[#161B22]/95 shadow-xl shadow-black/50 backdrop-blur-sm"
+              style={{ left: ctxMenu.x, top: ctxMenu.y, minWidth: 148 }}
+            >
+              <div className="px-3 pt-2.5 pb-1.5 text-[9px] font-mono uppercase tracking-[0.16em] text-text-muted">Drawing</div>
+              <div className="flex flex-wrap gap-1.5 px-3 pb-2">
+                {DRAWING_COLOR_PALETTE.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => handleCtxColor(c)}
+                    className="relative h-5 w-5 rounded-full border border-white/[0.12] transition-transform hover:scale-110"
+                    style={{ backgroundColor: c }}
+                    title={c}
+                  >
+                    {ctxMenu.color === c && (
+                      <Check size={11} className="absolute inset-0 m-auto" style={{ color: c === '#FFFFFF' ? '#000' : '#fff' }} />
+                    )}
+                  </button>
+                ))}
+              </div>
+              <div className="h-px bg-white/[0.08]" />
+              <button
+                type="button"
+                className="flex items-center gap-2 px-3 py-2 text-[11px] text-red transition-colors hover:bg-red/10"
+                onClick={handleCtxDelete}
+              >
+                <Trash2 size={13} />
+                Delete
+              </button>
+            </div>
+          </>
+        )}
+        <div style={{ pointerEvents: (drawingHovered || activeTool !== 'none' || selectedDrawing) ? 'none' : undefined }}>
+          {children}
+        </div>
         {liveMode && (
           <div
             className="absolute right-2 bottom-1 flex items-center gap-2"

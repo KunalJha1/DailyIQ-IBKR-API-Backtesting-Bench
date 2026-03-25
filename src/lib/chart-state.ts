@@ -107,7 +107,7 @@ function parseIndicators(value: unknown): PersistedChartIndicator[] {
 
 export function loadChartState(tabId: string): ChartState | null {
   try {
-    const raw = sessionStorage.getItem(KEY_PREFIX + tabId);
+    const raw = localStorage.getItem(KEY_PREFIX + tabId);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<ChartState> & {
       timeframe?: string;
@@ -121,7 +121,7 @@ export function loadChartState(tabId: string): ChartState | null {
       chartType: (typeof parsed.chartType === "string" ? parsed.chartType : "candlestick") as ChartType,
       linkChannel: typeof parsed.linkChannel === "number" ? parsed.linkChannel : null,
       indicators: hasIndicators ? parseIndicators(parsed.indicators) : createDefaultPersistedChartIndicators(),
-      stopperPx: typeof parsed.stopperPx === "number" ? parsed.stopperPx : 40,
+      stopperPx: typeof parsed.stopperPx === "number" ? parsed.stopperPx : 80,
       indicatorColorDefaults:
         parsed.indicatorColorDefaults && typeof parsed.indicatorColorDefaults === "object"
           ? (parsed.indicatorColorDefaults as Record<string, Record<string, string>>)
@@ -134,7 +134,7 @@ export function loadChartState(tabId: string): ChartState | null {
 
 export function saveChartState(tabId: string, state: ChartState): void {
   try {
-    sessionStorage.setItem(KEY_PREFIX + tabId, JSON.stringify(state));
+    localStorage.setItem(KEY_PREFIX + tabId, JSON.stringify(state));
   } catch {
     // Silently fail
   }

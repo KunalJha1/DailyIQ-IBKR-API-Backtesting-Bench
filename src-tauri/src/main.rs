@@ -194,7 +194,7 @@ fn probe_tws_ports() -> Option<ProbeResult> {
 
     for (port, conn_type) in &ports {
         let addr: SocketAddr = ([127, 0, 0, 1], *port).into();
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
             return Some(ProbeResult {
                 port: *port,
                 connection_type: conn_type.to_string(),
@@ -505,15 +505,19 @@ fn main() {
                 }
             }
 
-            // Auto-spawn the Python sidecar on app start
-            let state: tauri::State<SidecarState> = app.state();
-            match do_spawn_sidecar(&app.handle(), &state) {
-                Ok(port) => println!("Sidecar auto-started on port {}", port),
-                Err(e) => eprintln!("Sidecar auto-start failed (will retry on demand): {}", e),
-            }
-            if let Err(e) = do_spawn_worker(&app.handle(), &state) {
-                eprintln!("Worker auto-start failed (will retry on demand): {}", e);
-            }
+            // Spawn sidecar + worker in a background thread so the window
+            // opens immediately instead of blocking for up to ~11s.
+            let handle = app.handle();
+            std::thread::spawn(move || {
+                let state: tauri::State<SidecarState> = handle.state();
+                match do_spawn_sidecar(&handle, &state) {
+                    Ok(port) => println!("Sidecar auto-started on port {}", port),
+                    Err(e) => eprintln!("Sidecar auto-start failed (will retry on demand): {}", e),
+                }
+                if let Err(e) = do_spawn_worker(&handle, &state) {
+                    eprintln!("Worker auto-start failed (will retry on demand): {}", e);
+                }
+            });
 
             Ok(())
         })

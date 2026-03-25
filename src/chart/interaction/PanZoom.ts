@@ -82,11 +82,25 @@ export class PanZoom {
     const { sx } = this.getScale();
     const mouseX = (e.clientX - rect.left) / sx;
 
+    // Normalize delta to CSS pixels regardless of deltaMode
+    let deltaY = e.deltaY;
+    let deltaX = e.deltaX;
+    if (e.deltaMode === 1) {
+      // line mode (Firefox default) — ~20px per line
+      deltaY *= 20;
+      deltaX *= 20;
+    } else if (e.deltaMode === 2) {
+      // page mode
+      deltaY *= 400;
+      deltaX *= 400;
+    }
+
     // Wheel on price axis: scale Y
     if (this.viewport.isInPriceAxis(mouseX, this.canvasWidth, PRICE_AXIS_WIDTH)) {
       this.viewport.manualYScale = true;
       const range = this.viewport.priceMax - this.viewport.priceMin;
-      const scaleFactor = e.deltaY > 0 ? 1.05 : 0.95;
+      // Smooth exponential scale proportional to actual scroll amount
+      const scaleFactor = Math.exp(deltaY * 0.0008);
       const newRange = range * scaleFactor;
       const center = (this.viewport.priceMax + this.viewport.priceMin) / 2;
       this.viewport.priceMin = center - newRange / 2;
@@ -95,7 +109,17 @@ export class PanZoom {
       return;
     }
 
-    this.viewport.zoom(e.deltaY > 0 ? -1 : 1, mouseX);
+    // Trackpad horizontal scroll → pan
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+      this.viewport.pan(-deltaX);
+      this.onDirty();
+      return;
+    }
+
+    // Vertical scroll → smooth proportional zoom
+    // ~100px of scroll = ~1 zoom step; exponential so it feels linear
+    const zoomFactor = Math.exp(deltaY * 0.0012);
+    this.viewport.zoomBy(zoomFactor, mouseX);
     this.onDirty();
   }
 

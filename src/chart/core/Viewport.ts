@@ -13,6 +13,7 @@ export class Viewport {
   barsVisible: number = DEFAULT_BARS_VISIBLE;
   totalBars: number = 0;
   rightOffsetBars: number = 0;
+  private initialized: boolean = false;
 
   // Computed layout region for the main chart area
   chartLeft: number = 0;
@@ -68,10 +69,26 @@ export class Viewport {
     return slot ? slot.width : this.barWidth;
   }
 
+  /**
+   * Reset the viewport so the next setTotalBars call will auto-scroll to end.
+   * Call this when switching symbols to avoid staying stuck at old scroll position.
+   */
+  reset() {
+    this.initialized = false;
+    this.startIndex = 0;
+    this.manualYScale = false;
+  }
+
   setTotalBars(total: number) {
     this.totalBars = total;
-    // On first load, scroll to end
-    if (this.startIndex === 0 && total > 0) {
+    if (total === 0) {
+      this.initialized = false;
+      this.startIndex = 0;
+      return;
+    }
+    // On first non-empty load, scroll to end
+    if (!this.initialized) {
+      this.initialized = true;
       this.scrollToEnd();
       return;
     }
@@ -79,7 +96,9 @@ export class Viewport {
   }
 
   setRightOffsetBars(bars: number) {
-    this.rightOffsetBars = Math.max(0, bars);
+    const next = Math.max(0, bars);
+    if (next === this.rightOffsetBars) return;
+    this.rightOffsetBars = next;
   }
 
   setBarsVisible(bars: number) {
@@ -101,6 +120,11 @@ export class Viewport {
 
   scrollToEnd() {
     this.startIndex = this.getMaxStart();
+  }
+
+  shiftStartBy(deltaBars: number) {
+    if (!Number.isFinite(deltaBars) || deltaBars === 0) return;
+    this.startIndex = this.clampStart(this.startIndex + deltaBars);
   }
 
   pan(pixelDelta: number) {
@@ -133,21 +157,38 @@ export class Viewport {
     this.startIndex = this.clampStart(anchorBar - this.barsVisible * anchorRatio);
   }
 
+  /** Zoom by an explicit multiplicative factor (e.g. 1.05 = 5% more bars visible). */
+  zoomBy(factor: number, anchorPixelX: number) {
+    if (this.chartWidth <= 0) return;
+    const anchorRatio = (anchorPixelX - this.chartLeft) / this.chartWidth;
+    const anchorBar = this.pixelXToBar(anchorPixelX);
+
+    const newBarsVisible =
+      Math.max(MIN_BARS_VISIBLE, Math.min(MAX_BARS_VISIBLE, this.barsVisible * factor));
+
+    if (Math.abs(newBarsVisible - this.barsVisible) < 0.001) return;
+
+    this.barsVisible = newBarsVisible;
+    this.startIndex = this.clampStart(anchorBar - this.barsVisible * anchorRatio);
+  }
+
   /**
    * Auto-fit price range to visible data with padding.
    * Skipped when manualYScale is true.
    */
-  fitPriceRange(lows: number[], highs: number[]) {
+  fitPriceRange(bars: Array<{ low: number; high: number }>) {
     if (this.manualYScale) return;
 
     const start = Math.max(0, Math.floor(this.startIndex));
-    const end = Math.min(lows.length, Math.ceil(this.startIndex + this.barsVisible));
+    const end = Math.min(bars.length, Math.ceil(this.startIndex + this.barsVisible));
 
     let min = Infinity;
     let max = -Infinity;
     for (let i = start; i < end; i++) {
-      if (lows[i] < min) min = lows[i];
-      if (highs[i] > max) max = highs[i];
+      const bar = bars[i];
+      if (!bar) continue;
+      if (bar.low < min) min = bar.low;
+      if (bar.high > max) max = bar.high;
     }
 
     if (!isFinite(min) || !isFinite(max)) {
@@ -160,7 +201,8 @@ export class Viewport {
       if (minPos <= 0) {
         minPos = Infinity;
         for (let i = start; i < end; i++) {
-          const low = lows[i];
+          const low = bars[i]?.low;
+          if (low == null) continue;
           if (low > 0 && low < minPos) minPos = low;
         }
         if (!isFinite(minPos)) minPos = 1;

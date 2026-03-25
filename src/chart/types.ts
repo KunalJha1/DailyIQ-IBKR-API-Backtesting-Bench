@@ -24,6 +24,7 @@ export interface DrawingAnchor {
 export interface BaseDrawingShape {
   id: string;
   locked: boolean;
+  color?: string;
 }
 
 export interface TrendlineDrawing extends BaseDrawingShape {

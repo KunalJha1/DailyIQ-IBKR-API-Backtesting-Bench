@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -162,6 +164,38 @@ class OptionsCollectorTests(unittest.TestCase):
         self.assertIsNotNone(metrics.theta)
         self.assertIsNotNone(metrics.vega)
         self.assertIsNotNone(metrics.rho)
+
+    def test_is_regular_market_hours_matches_us_session(self) -> None:
+        eastern = ZoneInfo("America/New_York")
+        self.assertTrue(
+            options_collector.is_regular_market_hours(
+                datetime(2026, 3, 24, 10, 0, tzinfo=eastern)
+            )
+        )
+        self.assertFalse(
+            options_collector.is_regular_market_hours(
+                datetime(2026, 3, 24, 8, 59, tzinfo=eastern)
+            )
+        )
+        self.assertFalse(
+            options_collector.is_regular_market_hours(
+                datetime(2026, 3, 28, 10, 0, tzinfo=eastern)
+            )
+        )
+
+    def test_seconds_until_next_market_open_skips_to_next_weekday_session(self) -> None:
+        eastern = ZoneInfo("America/New_York")
+        before_open = datetime(2026, 3, 24, 8, 0, tzinfo=eastern)
+        after_close = datetime(2026, 3, 27, 16, 30, tzinfo=eastern)
+
+        self.assertEqual(
+            options_collector.seconds_until_next_market_open(before_open),
+            5400.0,
+        )
+        self.assertEqual(
+            options_collector.seconds_until_next_market_open(after_close),
+            234000.0,
+        )
 
     def test_normalize_option_chain_df_maps_contracts_and_snapshots(self) -> None:
         expiration = pd.Timestamp("2026-04-17")

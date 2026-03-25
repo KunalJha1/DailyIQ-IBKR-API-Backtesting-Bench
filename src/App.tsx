@@ -28,8 +28,7 @@ function SplashScreen({ label }: { label: string }) {
 function LayoutGate({ children }: { children: React.ReactNode }) {
   const { ready: layoutReady } = useLayout();
   const { ready: tabsReady } = useTabs();
-  const { ready: watchlistReady } = useWatchlist();
-  if (!layoutReady || !tabsReady || !watchlistReady) {
+  if (!layoutReady || !tabsReady) {
     return <SplashScreen label="Loading workspace" />;
   }
   return <>{children}</>;

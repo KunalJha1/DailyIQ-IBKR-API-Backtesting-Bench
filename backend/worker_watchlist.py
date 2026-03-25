@@ -1429,7 +1429,7 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
 
     async def backfill_loop():
         last_backfill: Dict[str, float] = {}
-        tail_cursor = 0
+        backfill_cursor = 0
         while True:
             await asyncio.sleep(1.0)
             ib = _primary_ib()
@@ -1471,13 +1471,17 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
 
             priority = list(dict.fromkeys(active_symbols + watchlist))
             tail = [sym for sym in universe_symbols if sym not in set(priority)]
-            batch = priority[:UNIVERSE_BATCH_SIZE]
+            ordered_symbols = priority + tail
+            if not ordered_symbols:
+                continue
 
-            while len(batch) < UNIVERSE_BATCH_SIZE and tail:
-                if tail_cursor >= len(tail):
-                    tail_cursor = 0
-                batch.append(tail[tail_cursor])
-                tail_cursor = (tail_cursor + 1) % len(tail)
+            if backfill_cursor >= len(ordered_symbols):
+                backfill_cursor = 0
+
+            batch = ordered_symbols[backfill_cursor:backfill_cursor + UNIVERSE_BATCH_SIZE]
+            if len(batch) < UNIVERSE_BATCH_SIZE and backfill_cursor > 0:
+                batch += ordered_symbols[:UNIVERSE_BATCH_SIZE - len(batch)]
+            backfill_cursor = (backfill_cursor + UNIVERSE_BATCH_SIZE) % len(ordered_symbols)
 
             for sym in list(dict.fromkeys(batch)):
                 now = time.time()

@@ -311,7 +311,7 @@ export default function DashboardToolbar({
           <span
             className={`font-mono text-[10px] ${marketOpen ? "text-green/70" : "text-white/30"}`}
           >
-            {countdown}
+            Time Till Open: {countdown}
           </span>
         </div>
       </div>

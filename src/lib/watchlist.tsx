@@ -22,6 +22,17 @@ export const DEFAULT_WATCHLIST_SYMBOLS = [
 
 const WATCHLIST_FILENAME = "watchlist.json";
 const SAVE_DEBOUNCE_MS = 800;
+const LS_KEY = "dailyiq-watchlist-symbols";
+
+function readLocalStorageSymbols(): string[] | null {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch { /* ignore */ }
+  return null;
+}
 
 interface WatchlistContextValue {
   symbols: string[];
@@ -113,8 +124,10 @@ async function fileSaveSymbols(syms: string[]) {
 }
 
 export function WatchlistProvider({ children }: { children: ReactNode }) {
-  const [symbols, setSymbolsState] = useState<string[]>([]);
-  const [ready, setReady] = useState(false);
+  const [symbols, setSymbolsState] = useState<string[]>(
+    () => readLocalStorageSymbols() ?? DEFAULT_WATCHLIST_SYMBOLS,
+  );
+  const ready = true;
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const symbolsRef = useRef(symbols);
   const sidecarPortRef = useRef<number | null>(null);
@@ -124,46 +137,45 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     const port = sidecarPortRef.current;
     if (port) {
       const ok = await apiSaveSymbols(syms, port);
-      if (ok) return; // API save succeeded — no need for file fallback
+      if (ok) return;
     }
     await fileSaveSymbols(syms);
   }
 
   function scheduleSave() {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(symbolsRef.current)); } catch { /* ignore */ }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       saveToDisk(symbolsRef.current);
     }, SAVE_DEBOUNCE_MS);
   }
 
-  // Load on mount — try API first, fall back to file
+  // Load persisted watchlist in the background (non-blocking).
+  // Start with file fallback (instant), then upgrade from API when sidecar is up.
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
-      // Resolve sidecar port once
+      // Try the instant local file first
+      const fileBased = await fileLoadSymbols();
+      if (!cancelled && fileBased && fileBased.length > 0) {
+        setSymbolsState(fileBased);
+        try { localStorage.setItem(LS_KEY, JSON.stringify(fileBased)); } catch { /* ignore */ }
+      }
+
+      // Resolve sidecar port and try API (may take a moment if sidecar is booting)
       const port = await getSidecarPort();
       sidecarPortRef.current = port;
-
-      let loaded: string[] | null = null;
-
-      if (port) {
-        // Poll until sidecar is ready (it may still be booting)
-        for (let i = 0; i < 10; i++) {
-          loaded = await apiLoadSymbols();
-          if (loaded !== null) break;
-          await new Promise((r) => setTimeout(r, 500));
+      if (port && !cancelled) {
+        const apiBased = await apiLoadSymbols();
+        if (!cancelled && apiBased && apiBased.length > 0) {
+          setSymbolsState(apiBased);
+          try { localStorage.setItem(LS_KEY, JSON.stringify(apiBased)); } catch { /* ignore */ }
         }
       }
-
-      // Fall back to JSON file if API unavailable
-      if (loaded === null) {
-        loaded = await fileLoadSymbols();
-      }
-
-      if (loaded && loaded.length > 0) {
-        setSymbolsState(loaded);
-      }
-      setReady(true);
     })();
+
+    return () => { cancelled = true; };
   }, []);
 
   // Schedule save on change (skip initial)

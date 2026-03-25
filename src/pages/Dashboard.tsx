@@ -1,5 +1,6 @@
-import { useState, useRef } from "react";
+import React, { Suspense, useState, useRef, useEffect } from "react";
 import { appWindow } from "@tauri-apps/api/window";
+import { checkUpdate } from "@tauri-apps/api/updater";
 import { useAuth } from "../lib/auth";
 import { useTabs, type TabType } from "../lib/tabs";
 import { useTws } from "../lib/tws";
@@ -7,16 +8,17 @@ import { isTauriRuntime, usePlatform } from "../lib/platform";
 import WindowControls from "../components/WindowControls";
 import TabBar from "../components/TabBar";
 import SettingsPanel from "../components/SettingsPanel";
-import DashboardPage from "./DashboardPage";
-import ScreenerPage from "./ScreenerPage";
-import ChartPage from "./ChartPage";
-import OptionsPage from "./OptionsPage";
-import BacktestPage from "./BacktestPage";
-import SimulationsPage from "./SimulationsPage";
-import HeatmapPage from "./HeatmapPage";
-import MarketBiasPage from "./MarketBiasPage";
 
-const pageByType: Record<TabType, React.FC<{ tabId?: string }>> = {
+const DashboardPage = React.lazy(() => import("./DashboardPage"));
+const ScreenerPage = React.lazy(() => import("./ScreenerPage"));
+const ChartPage = React.lazy(() => import("./ChartPage"));
+const OptionsPage = React.lazy(() => import("./OptionsPage"));
+const BacktestPage = React.lazy(() => import("./BacktestPage"));
+const SimulationsPage = React.lazy(() => import("./SimulationsPage"));
+const HeatmapPage = React.lazy(() => import("./HeatmapPage"));
+const MarketBiasPage = React.lazy(() => import("./MarketBiasPage"));
+
+const pageByType: Record<TabType, React.LazyExoticComponent<React.FC<{ tabId?: string }>>> = {
   dashboard: DashboardPage,
   screener: ScreenerPage,
   chart: ChartPage,
@@ -47,6 +49,13 @@ export default function Dashboard() {
       ? "yahoo" as const
       : "offline" as const;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+
+  useEffect(() => {
+    checkUpdate()
+      .then(({ shouldUpdate }) => { if (shouldUpdate) setUpdateAvailable(true); })
+      .catch(() => {});
+  }, []);
   const user = session?.user;
   const firstName =
     user?.user_metadata?.full_name?.split(" ")[0] ||
@@ -91,9 +100,12 @@ export default function Dashboard() {
             </p>
             <button
               onClick={() => setSettingsOpen(true)}
-              className="text-[11px] font-light text-white/30 transition-all duration-100 hover:text-white/80"
+              className="relative text-[11px] font-light text-white/30 transition-all duration-100 hover:text-white/80"
             >
               Settings
+              {updateAvailable && (
+                <span className="absolute -right-1.5 -top-0.5 h-[5px] w-[5px] rounded-full bg-red" />
+              )}
             </button>
           </div>
         )}
@@ -106,9 +118,12 @@ export default function Dashboard() {
               </p>
               <button
                 onClick={() => setSettingsOpen(true)}
-                className="text-[11px] font-light text-white/30 transition-all duration-100 hover:text-white/80"
+                className="relative text-[11px] font-light text-white/30 transition-all duration-100 hover:text-white/80"
               >
                 Settings
+                {updateAvailable && (
+                  <span className="absolute -right-1.5 -top-0.5 h-[5px] w-[5px] rounded-full bg-red" />
+                )}
               </button>
             </>
           )}
@@ -121,7 +136,13 @@ export default function Dashboard() {
 
       {/* Page content */}
       <main className="flex-1 overflow-hidden">
-        {ActivePage && <ActivePage tabId={activeTab?.id} />}
+        <Suspense fallback={
+          <div className="flex h-full items-center justify-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-white/30">Loading...</p>
+          </div>
+        }>
+          {ActivePage && <ActivePage tabId={activeTab?.id} />}
+        </Suspense>
       </main>
 
       {/* Bottom status bar */}
@@ -222,7 +243,7 @@ export default function Dashboard() {
         </div>
       </footer>
 
-      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} updateAvailable={updateAvailable} />
     </div>
   );
 }

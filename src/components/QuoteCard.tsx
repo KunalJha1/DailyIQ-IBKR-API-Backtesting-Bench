@@ -78,8 +78,8 @@ export default function QuoteCard({
     ? "flex min-w-0 flex-1 flex-col justify-center px-1.5 py-0.5"
     : "flex min-w-0 flex-1 flex-col justify-center rounded-sm border px-2 py-1.5";
   const metricLabelClassName = compactQuoteStrip
-    ? "text-[7px] font-medium uppercase tracking-[0.18em]"
-    : "text-[8px] font-medium uppercase tracking-wider";
+    ? "text-[8px] font-semibold uppercase tracking-[0.18em]"
+    : "text-[9px] font-semibold uppercase tracking-wider";
   const metricValueClassName = compactQuoteStrip
     ? "truncate font-mono text-[11px] font-semibold"
     : "truncate font-mono text-[13px] font-semibold";
@@ -238,7 +238,7 @@ export default function QuoteCard({
                   compactQuoteStrip ? "" : "border-green/20 bg-green/[0.04]"
                 }`}
               >
-                <p className={`${metricLabelClassName} text-green/50`}>Bid</p>
+                <p className={`${metricLabelClassName} text-green/70`}>Bid</p>
                 {quote.bid != null ? (
                   <p className={`${metricValueClassName} text-green`}>{formatPrice(quote.bid)}</p>
                 ) : (
@@ -250,7 +250,7 @@ export default function QuoteCard({
                   compactQuoteStrip ? "" : "border-blue/20 bg-blue/[0.04]"
                 }`}
               >
-                <p className={`${metricLabelClassName} text-[#58A6FF]/50`}>Mid</p>
+                <p className={`${metricLabelClassName} text-[#58A6FF]/70`}>Mid</p>
                 {quote.mid != null ? (
                   <p className={`${metricValueClassName} text-[#58A6FF]`}>{formatPrice(quote.mid)}</p>
                 ) : (
@@ -259,12 +259,12 @@ export default function QuoteCard({
               </div>
               <div
                 className={`${metricCellClassName} ${
-                  compactQuoteStrip ? "" : "border-red/20 bg-red/[0.04]"
+                  compactQuoteStrip ? "" : "border-[#FF1744]/25 bg-[#FF1744]/[0.06]"
                 }`}
               >
-                <p className={`${metricLabelClassName} text-red/50`}>Ask</p>
+                <p className={`${metricLabelClassName} text-[#FF1744]/70`}>Ask</p>
                 {quote.ask != null ? (
-                  <p className={`${metricValueClassName} text-red`}>{formatPrice(quote.ask)}</p>
+                  <p className={`${metricValueClassName} text-[#FF1744]`}>{formatPrice(quote.ask)}</p>
                 ) : (
                   <p className={metricEmptyClassName}>—</p>
                 )}

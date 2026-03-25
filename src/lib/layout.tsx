@@ -16,8 +16,38 @@ import {
   pickWorkspaceFile,
   loadWorkspaceFromPath,
   saveWorkspaceToLocalStorage,
+  exportWorkspace,
 } from "./layout-storage";
+import { loadChartState, saveChartState } from "./chart-state";
 import { isTauriRuntime } from "./platform";
+
+/**
+ * Write any embedded chartState entries from a workspace into localStorage
+ * so that ChartPage picks them up, then strip chartState from the tabs
+ * (it's only needed during serialization, not at runtime).
+ */
+function hydrateChartStates(ws: WorkspaceFile): WorkspaceFile {
+  for (const tab of ws.tabs) {
+    if (tab.chartState) {
+      saveChartState(tab.id, tab.chartState);
+    }
+  }
+  return {
+    ...ws,
+    tabs: ws.tabs.map(({ chartState: _, ...rest }) => rest),
+  };
+}
+
+/** Snapshot chart state from localStorage into each tab for serialization. */
+function collectChartStates(ws: WorkspaceFile): WorkspaceFile {
+  return {
+    ...ws,
+    tabs: ws.tabs.map((t) => {
+      const cs = loadChartState(t.id);
+      return cs ? { ...t, chartState: cs } : t;
+    }),
+  };
+}
 
 interface LayoutContextValue {
   workspace: WorkspaceFile | null;
@@ -42,6 +72,8 @@ interface LayoutContextValue {
   ) => void;
   /** Open file picker to load a different .diq workspace */
   loadFromFile: () => Promise<boolean>;
+  /** Export workspace (with chart state) via Save As dialog */
+  exportToFile: () => Promise<boolean>;
   flushSave: () => Promise<void>;
 }
 
@@ -59,6 +91,7 @@ const LayoutContext = createContext<LayoutContextValue>({
   setComponentLinkChannel: () => {},
   syncTabs: () => {},
   loadFromFile: async () => false,
+  exportToFile: async () => false,
   flushSave: async () => {},
 });
 
@@ -79,7 +112,10 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
     (async () => {
       const loaded = await loadWorkspace();
       if (cancelled) return;
-      let ws = loaded ?? getDefaultWorkspace();
+      const raw = loaded ?? getDefaultWorkspace();
+
+      // Hydrate any embedded chart state into localStorage, then strip it
+      let ws = hydrateChartStates(raw);
 
       // Normalize: any tab or component with null linkChannel defaults to Link 1
       ws = {
@@ -326,11 +362,17 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
     const loaded = await loadWorkspaceFromPath(filePath);
     if (!loaded) return false;
 
-    setWorkspace(loaded);
-    saveWorkspaceToLocalStorage(loaded);
-    // Also persist as the current workspace
-    await saveWorkspace(loaded);
+    const hydrated = hydrateChartStates(loaded);
+    setWorkspace(hydrated);
+    saveWorkspaceToLocalStorage(hydrated);
+    await saveWorkspace(hydrated);
     return true;
+  }, []);
+
+  const exportToFile = useCallback(async (): Promise<boolean> => {
+    if (!workspaceRef.current) return false;
+    const enriched = collectChartStates(workspaceRef.current);
+    return exportWorkspace(enriched);
   }, []);
 
   const flushSave = useCallback(async () => {
@@ -360,6 +402,7 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
         setComponentLinkChannel,
         syncTabs,
         loadFromFile,
+        exportToFile,
         flushSave,
       }}
     >

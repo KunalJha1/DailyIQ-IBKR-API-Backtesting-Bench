@@ -11,8 +11,7 @@ import type {
   DrawingShape,
   DrawingSelection,
 } from '../types';
-import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR, FONT_MONO_SMALL, VOLUME_PANE_RATIO } from '../constants';
-import { DEFAULT_BARS_VISIBLE } from '../constants';
+import { COLORS, PRICE_AXIS_WIDTH, TIME_AXIS_HEIGHT, SUB_PANE_HEIGHT, SUB_PANE_SEPARATOR, FONT_MONO_SMALL, VOLUME_PANE_RATIO, DEFAULT_BARS_VISIBLE, TIMEFRAME_MS } from '../constants';
 import { Viewport } from './Viewport';
 import { Renderer } from './Renderer';
 import { ScaleY } from './ScaleY';
@@ -90,6 +89,8 @@ export class ChartEngine {
   private _onViewportChange: ((startIdx: number, endIdx: number) => void) | null = null;
   private activeDrawingTool: DrawingTool = 'none';
   private drawings: DrawingShape[] = [];
+  private drawingUndoStack: DrawingShape[][] = [];
+  private drawingRedoStack: DrawingShape[][] = [];
   private drawingStart: DrawingAnchor | null = null;
   private drawingCurrent: DrawingAnchor | null = null;
   private drawingBrushPoints: DrawingAnchor[] = [];
@@ -103,6 +104,10 @@ export class ChartEngine {
   private selectedDrawingId: string | null = null;
   private _onTextPlacementRequest: ((anchor: DrawingAnchor) => void) | null = null;
   private _onDrawingSelectionChange: ((selection: DrawingSelection | null) => void) | null = null;
+  private _onDrawingContextMenu: ((info: { drawingId: string; color: string; screenX: number; screenY: number }) => void) | null = null;
+  private _onDrawingHoverChange: ((hoveredId: string | null) => void) | null = null;
+  private lastNotifiedViewportStart: number | null = null;
+  private lastNotifiedViewportEnd: number | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -129,19 +134,51 @@ export class ChartEngine {
 
   // --- Public API ---
 
+  resetViewport() {
+    this.viewport.reset();
+    this.markDirty();
+  }
+
   setData(bars: OHLCVBar[]) {
+    const prevLength = this.bars.length;
     const wasNearEnd = this.liveMode && this.viewport.isNearEnd(2);
     this.bars = bars;
+    this.viewport.setRightOffsetBars(this.computeRightOffsetBars());
     this.viewport.setTotalBars(bars.length);
     this.recomputeIndicators();
-    if (wasNearEnd) {
+    if (wasNearEnd && bars.length > prevLength) {
       this.viewport.scrollToEnd();
     }
     this.markDirty();
   }
 
+  /**
+   * Incremental tail update: replaces bars from changeOffset onward.
+   * Skips onViewportChange to avoid triggering pan-fetch cascades.
+   */
+  updateTail(bars: OHLCVBar[], _changeOffset: number) {
+    const prevLength = this.bars.length;
+    const wasNearEnd = this.liveMode && this.viewport.isNearEnd(2);
+    this.bars = bars;
+
+    this.viewport.setRightOffsetBars(this.computeRightOffsetBars());
+    if (bars.length !== prevLength) {
+      this.viewport.setTotalBars(bars.length);
+    }
+
+    this.recomputeIndicators();
+
+    if (wasNearEnd && bars.length > prevLength) {
+      this.viewport.scrollToEnd();
+    }
+
+    this.dirty = true;
+  }
+
   setOnViewportChange(cb: ((startIdx: number, endIdx: number) => void) | null) {
     this._onViewportChange = cb;
+    this.lastNotifiedViewportStart = null;
+    this.lastNotifiedViewportEnd = null;
   }
 
   getViewportRange(): { startIndex: number; endIndex: number } {
@@ -149,6 +186,12 @@ export class ChartEngine {
       startIndex: Math.max(0, Math.floor(this.viewport.startIndex)),
       endIndex: Math.min(this.bars.length, Math.ceil(this.viewport.endIndex)),
     };
+  }
+
+  shiftViewportBy(deltaBars: number) {
+    if (!Number.isFinite(deltaBars) || deltaBars === 0) return;
+    this.viewport.shiftStartBy(deltaBars);
+    this.markDirty();
   }
 
   setChartType(type: ChartType) {
@@ -265,6 +308,7 @@ export class ChartEngine {
   }
 
   clearDrawings() {
+    if (this.drawings.length > 0) this.pushDrawingUndo();
     this.drawings = [];
     this.setSelectedDrawingId(null);
     this.cancelDraftDrawing();
@@ -283,6 +327,7 @@ export class ChartEngine {
   addTextDrawing(anchor: DrawingAnchor, text: string) {
     const value = text.trim();
     if (!value) return;
+    this.pushDrawingUndo();
     const drawing: DrawingShape = {
       id: `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       type: 'text',
@@ -298,8 +343,72 @@ export class ChartEngine {
   setDrawingLocked(id: string, locked: boolean) {
     const drawing = this.drawings.find((item) => item.id === id);
     if (!drawing || drawing.locked === locked) return;
+    this.pushDrawingUndo();
     drawing.locked = locked;
     this.notifyDrawingSelectionChange();
+    this.markDirty();
+  }
+
+  setOnDrawingContextMenu(cb: ((info: { drawingId: string; color: string; screenX: number; screenY: number }) => void) | null) {
+    this._onDrawingContextMenu = cb;
+  }
+
+  setOnDrawingHoverChange(cb: ((hoveredId: string | null) => void) | null) {
+    this._onDrawingHoverChange = cb;
+  }
+
+  private cloneDrawings(): DrawingShape[] {
+    return this.drawings.map((d): DrawingShape => {
+      switch (d.type) {
+        case 'trendline':
+        case 'fibRetracement':
+          return { ...d, start: { ...d.start }, end: { ...d.end } };
+        case 'brush':
+          return { ...d, points: d.points.map(p => ({ ...p })) };
+        case 'text':
+          return { ...d, anchor: { ...d.anchor } };
+      }
+    });
+  }
+
+  private pushDrawingUndo() {
+    this.drawingUndoStack.push(this.cloneDrawings());
+    this.drawingRedoStack = [];
+    if (this.drawingUndoStack.length > 50) this.drawingUndoStack.shift();
+  }
+
+  undo() {
+    if (this.drawingUndoStack.length === 0) return;
+    this.drawingRedoStack.push(this.cloneDrawings());
+    this.drawings = this.drawingUndoStack.pop()!;
+    this.setSelectedDrawingId(null);
+    this.hoveredDrawingId = null;
+    this._onDrawingHoverChange?.(null);
+    this.markDirty();
+  }
+
+  redo() {
+    if (this.drawingRedoStack.length === 0) return;
+    this.drawingUndoStack.push(this.cloneDrawings());
+    this.drawings = this.drawingRedoStack.pop()!;
+    this.setSelectedDrawingId(null);
+    this.hoveredDrawingId = null;
+    this._onDrawingHoverChange?.(null);
+    this.markDirty();
+  }
+
+  deleteDrawing(id: string) {
+    this.pushDrawingUndo();
+    this.drawings = this.drawings.filter(d => d.id !== id);
+    if (this.selectedDrawingId === id) this.setSelectedDrawingId(null);
+    this.markDirty();
+  }
+
+  setDrawingColor(id: string, color: string) {
+    const drawing = this.drawings.find(d => d.id === id);
+    if (!drawing) return;
+    this.pushDrawingUndo();
+    drawing.color = color;
     this.markDirty();
   }
 
@@ -597,9 +706,16 @@ export class ChartEngine {
 
   private markDirty() {
     this.dirty = true;
-    if (this._onViewportChange && this.bars.length > 0) {
-      const start = Math.max(0, Math.floor(this.viewport.startIndex));
-      const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
+    this.notifyViewportChange();
+  }
+
+  private notifyViewportChange() {
+    if (!this._onViewportChange || this.bars.length === 0) return;
+    const start = Math.max(0, Math.floor(this.viewport.startIndex));
+    const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
+    if (start !== this.lastNotifiedViewportStart || end !== this.lastNotifiedViewportEnd) {
+      this.lastNotifiedViewportStart = start;
+      this.lastNotifiedViewportEnd = end;
       this._onViewportChange(start, end);
     }
   }
@@ -617,9 +733,6 @@ export class ChartEngine {
   }
 
   private render() {
-    const rightOffsetBars = this.computeRightOffsetBars();
-    this.viewport.setRightOffsetBars(rightOffsetBars);
-
     const layout = this.computeLayout();
     const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
 
@@ -632,9 +745,7 @@ export class ChartEngine {
 
     // Auto-fit price (skipped if manualYScale)
     if (this.bars.length > 0) {
-      const lows = this.bars.map(b => b.low);
-      const highs = this.bars.map(b => b.high);
-      this.viewport.fitPriceRange(lows, highs);
+      this.viewport.fitPriceRange(this.bars);
     }
 
     // Clear
@@ -729,6 +840,7 @@ export class ChartEngine {
     const chartTop = this.viewport.chartTop;
     const chartHeight = this.viewport.chartHeight;
     const halfBar = this.viewport.barWidth / 2;
+    const barDurationMs = TIMEFRAME_MS[tf] ?? TIMEFRAME_MS['1m'];
 
     type Session = 'pre' | 'post' | null;
     let runSession: Session = null;
@@ -743,14 +855,8 @@ export class ChartEngine {
 
     for (let i = start; i < end; i++) {
       const bar = this.bars[i];
-      const d = new Date(bar.time);
-      const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
-      const [hStr, mStr] = etStr.split(':');
-      const h = parseInt(hStr, 10);
-      const m = parseInt(mStr, 10);
-      const minuteOfDay = h * 60 + m;
-
-      let session: Session = null;
+      let minuteOfDay = -1;
+      let session = this.getExtendedSessionForBar(bar.time, barDurationMs);
       if (minuteOfDay >= 240 && minuteOfDay < 570) {
         session = 'pre';   // 04:00–09:29 ET
       } else if (minuteOfDay >= 960 && minuteOfDay < 1200) {
@@ -772,6 +878,43 @@ export class ChartEngine {
       const lastCx = this.viewport.barToPixelX(end - 1);
       flush(lastCx + halfBar);
     }
+  }
+
+  private getExtendedSessionForBar(startTimeMs: number, durationMs: number): 'pre' | 'post' | null {
+    const startEt = this.getEtDateParts(startTimeMs);
+    const endEt = this.getEtDateParts(Math.max(startTimeMs, startTimeMs + Math.max(1, durationMs) - 1));
+    if (startEt.year !== endEt.year || startEt.month !== endEt.month || startEt.day !== endEt.day) {
+      return null;
+    }
+
+    const startMinute = startEt.hour * 60 + startEt.minute;
+    const endMinuteExclusive = endEt.hour * 60 + endEt.minute + 1;
+    if (startMinute < 570 && endMinuteExclusive > 240) return 'pre';
+    if (startMinute < 1200 && endMinuteExclusive > 960) return 'post';
+    return null;
+  }
+
+  private getEtDateParts(tsMs: number): { year: number; month: number; day: number; hour: number; minute: number } {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(tsMs));
+    const getPart = (type: Intl.DateTimeFormatPartTypes) => {
+      const value = parts.find((part) => part.type === type)?.value ?? '0';
+      return parseInt(value, 10);
+    };
+    return {
+      year: getPart('year'),
+      month: getPart('month'),
+      day: getPart('day'),
+      hour: getPart('hour'),
+      minute: getPart('minute'),
+    };
   }
 
   private renderMainVolumeOverlays() {
@@ -880,7 +1023,7 @@ export class ChartEngine {
     if (!this.liveMode || this.stopperPx <= 0) return 0;
     const barWidth = this.viewport.barWidth;
     if (barWidth <= 0) return 0;
-    return this.stopperPx / barWidth;
+    return Math.round(this.stopperPx / barWidth);
   }
 
   private renderBranding(chartAreaWidth: number, mainHeight: number) {
@@ -1000,7 +1143,8 @@ export class ChartEngine {
     const isHovered = !isDraft && drawing.id === this.hoveredDrawingId && drawing.id !== this.draggedDrawingId;
     const isDragged = !isDraft && drawing.id === this.draggedDrawingId;
     const isActive = isHovered || isDragged;
-    const lineAccent = isDraft ? 'rgba(96,165,250,0.7)' : isSelected ? '#F59E0B' : isActive ? '#93C5FD' : '#60A5FA';
+    const baseColor = drawing.color || '#60A5FA';
+    const lineAccent = isDraft ? 'rgba(96,165,250,0.7)' : isSelected ? '#F59E0B' : isActive ? '#93C5FD' : baseColor;
 
     if (drawing.type === 'trendline') {
       const x1 = this.viewport.barToPixelX(drawing.start.barIndex);
@@ -1011,6 +1155,10 @@ export class ChartEngine {
       if (isDraft) {
         this.renderer.dashedLine(x1, y1, x2, y2, lineAccent, 1.5, [6, 4]);
       } else {
+        const ext = this.extendLineToChartBounds(x1, y1, x2, y2);
+        if (ext) {
+          this.renderer.dashedLine(ext[0], ext[1], ext[2], ext[3], lineAccent, lineWidth * 0.65, [4, 4]);
+        }
         this.renderer.line(x1, y1, x2, y2, lineAccent, lineWidth);
       }
       const handleSize = isActive ? 5 : 3;
@@ -1153,12 +1301,49 @@ export class ChartEngine {
     return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
   }
 
+  private extendLineToChartBounds(x1: number, y1: number, x2: number, y2: number): [number, number, number, number] | null {
+    const left = this.viewport.chartLeft;
+    const right = this.width - PRICE_AXIS_WIDTH;
+    const top = this.viewport.chartTop;
+    const bottom = this.viewport.chartTop + this.viewport.chartHeight;
+
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    if (dx === 0 && dy === 0) return null;
+
+    let tMin = -1e6;
+    let tMax = 1e6;
+
+    if (dx !== 0) {
+      const t1 = (left - x1) / dx;
+      const t2 = (right - x1) / dx;
+      tMin = Math.max(tMin, Math.min(t1, t2));
+      tMax = Math.min(tMax, Math.max(t1, t2));
+    } else if (x1 < left || x1 > right) {
+      return null;
+    }
+
+    if (dy !== 0) {
+      const t1 = (top - y1) / dy;
+      const t2 = (bottom - y1) / dy;
+      tMin = Math.max(tMin, Math.min(t1, t2));
+      tMax = Math.min(tMax, Math.max(t1, t2));
+    } else if (y1 < top || y1 > bottom) {
+      return null;
+    }
+
+    if (tMin >= tMax) return null;
+    return [x1 + dx * tMin, y1 + dy * tMin, x1 + dx * tMax, y1 + dy * tMax];
+  }
+
   private isNearDrawing(drawing: DrawingShape, mx: number, my: number): boolean {
     if (drawing.type === 'trendline') {
       const x1 = this.viewport.barToPixelX(drawing.start.barIndex);
       const y1 = this.viewport.priceToPixelY(drawing.start.price);
       const x2 = this.viewport.barToPixelX(drawing.end.barIndex);
       const y2 = this.viewport.priceToPixelY(drawing.end.price);
+      const ext = this.extendLineToChartBounds(x1, y1, x2, y2);
+      if (ext) return this.distToSegment(mx, my, ext[0], ext[1], ext[2], ext[3]) < 8;
       return this.distToSegment(mx, my, x1, y1, x2, y2) < 8;
     }
     if (drawing.type === 'brush') {
@@ -1379,8 +1564,7 @@ export class ChartEngine {
       }
     });
 
-    ranges.forEach(({ ind, meta, min, max }, index) => {
-      const output = meta.outputs[0];
+    ranges.forEach(({ ind: _ind, meta, min, max }, index) => {
       this.renderer.textSmall(
         `${meta.shortName} ${min.toFixed(1)}-${max.toFixed(1)}`,
         chartAreaWidth - 8,
@@ -1760,6 +1944,7 @@ export class ChartEngine {
       // Check endpoint handles first (higher priority than whole-drawing drag)
       const endpointHit = this.hitTestDrawingEndpoint(mx, my);
       if (endpointHit && !endpointHit.drawing.locked) {
+        this.pushDrawingUndo();
         this.setSelectedDrawingId(endpointHit.drawing.id);
         this.draggedDrawingId = endpointHit.drawing.id;
         this.dragMouseOrigin = this.anchorFromMouse(mx, my);
@@ -1773,6 +1958,7 @@ export class ChartEngine {
       if (hit) {
         this.setSelectedDrawingId(hit.id);
         if (!hit.locked) {
+          this.pushDrawingUndo();
           this.draggedDrawingId = hit.id;
           this.dragMouseOrigin = this.anchorFromMouse(mx, my);
           if (hit.type === 'trendline' || hit.type === 'fibRetracement') {
@@ -1864,6 +2050,7 @@ export class ChartEngine {
       const newHoveredId = hovered?.id ?? null;
       if (newHoveredId !== this.hoveredDrawingId) {
         this.hoveredDrawingId = newHoveredId;
+        this._onDrawingHoverChange?.(newHoveredId);
         this.markDirty();
       }
     }
@@ -1885,6 +2072,7 @@ export class ChartEngine {
         this._onTextPlacementRequest?.(start);
       } else if (this.activeDrawingTool === 'brush') {
         if (this.drawingBrushPoints.length >= 2) {
+          this.pushDrawingUndo();
           createdDrawingId = `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
           this.drawings.push({
             id: createdDrawingId,
@@ -1894,6 +2082,7 @@ export class ChartEngine {
           });
         }
       } else if (movedEnough) {
+        this.pushDrawingUndo();
         createdDrawingId = `drawing_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         this.drawings.push(
           this.activeDrawingTool === 'trendline'
@@ -1933,13 +2122,17 @@ export class ChartEngine {
     e.preventDefault();
     const { mx, my } = this.getCanvasPoint(e);
     const hit = this.hitTestDrawing(mx, my);
-    if (hit && !hit.locked) {
-      this.drawings = this.drawings.filter(d => d.id !== hit.id);
-      if (this.selectedDrawingId === hit.id) this.setSelectedDrawingId(null);
-      this.markDirty();
-    } else if (hit) {
+    if (hit) {
       this.setSelectedDrawingId(hit.id);
       this.markDirty();
+      if (this._onDrawingContextMenu) {
+        this._onDrawingContextMenu({
+          drawingId: hit.id,
+          color: hit.color || '#60A5FA',
+          screenX: e.clientX,
+          screenY: e.clientY,
+        });
+      }
     }
   };
 
@@ -1958,6 +2151,21 @@ export class ChartEngine {
     this.panZoom.onDoubleClick(e);
   };
 
+  private onKeyDown = (e: KeyboardEvent) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+    if (e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      this.undo();
+    } else if (e.key === 'z' && e.shiftKey) {
+      e.preventDefault();
+      this.redo();
+    } else if (e.key === 'y') {
+      e.preventDefault();
+      this.redo();
+    }
+  };
+
   private bindEvents() {
     this.canvas.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mousemove', this.onMouseMove);
@@ -1966,6 +2174,7 @@ export class ChartEngine {
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     this.canvas.addEventListener('dblclick', this.onDoubleClick);
     this.canvas.addEventListener('contextmenu', this.onContextMenu);
+    window.addEventListener('keydown', this.onKeyDown);
   }
 
   private unbindEvents() {
@@ -1976,5 +2185,6 @@ export class ChartEngine {
     this.canvas.removeEventListener('wheel', this.onWheel);
     this.canvas.removeEventListener('dblclick', this.onDoubleClick);
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
+    window.removeEventListener('keydown', this.onKeyDown);
   }
 }

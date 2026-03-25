@@ -1,4 +1,5 @@
 import type { TabType } from "./tabs";
+import type { ChartState } from "./chart-state";
 
 export interface LayoutComponent {
   id: string;
@@ -25,6 +26,8 @@ export interface TabState {
   locked: boolean;
   linkChannel: number | null;
   layout: TabLayout;
+  /** Serialized chart config — only present in .diq files, not kept in memory at runtime */
+  chartState?: ChartState;
 }
 
 export interface WorkspaceFile {

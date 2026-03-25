@@ -62,10 +62,11 @@ export default function ChartPage({ tabId }: ChartPageProps) {
   const paneDividerDragRef = useRef<{ paneId: string; startY: number; startHeight: number } | null>(null);
 
   const engineRef = useRef<ChartEngine | null>(null);
+  const [engineVersion, setEngineVersion] = useState(0);
 
   // TWS data hook
   const { sidecarPort } = useTws();
-  const { bars, loading, source, onViewportChange } = useChartData({
+  const { bars, loading, source, onViewportChange, pendingViewportShift, onViewportShiftApplied, updateMode, tailChangeOffset } = useChartData({
     symbol,
     timeframe,
     sidecarPort,
@@ -257,6 +258,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
   // Persist chart state on changes
   useEffect(() => {
     if (!tabId) return;
+    if (activeIndicators.length === 0 && !restoredIndicatorsRef.current) return;
     saveChartState(tabId, {
       symbol,
       timeframe,
@@ -294,6 +296,7 @@ export default function ChartPage({ tabId }: ChartPageProps) {
     setActiveIndicators([...engine.getActiveIndicators()]);
   }, [
     bars,
+    engineVersion,
     activeIndicators,
     restoredIndicators,
     serializeIndicators,
@@ -460,6 +463,10 @@ export default function ChartPage({ tabId }: ChartPageProps) {
       next.delete(id);
       return next;
     });
+  }, []);
+
+  const handleEngineReady = useCallback(() => {
+    setEngineVersion(v => v + 1);
   }, []);
 
   const handlePaneDividerMouseDown = useCallback((e: React.MouseEvent, paneId: string) => {
@@ -660,8 +667,13 @@ export default function ChartPage({ tabId }: ChartPageProps) {
           onStopperPxChange={setStopperPx}
           onViewportChange={onViewportChange}
           onLayoutChange={setChartLayout}
+          onEngineReady={handleEngineReady}
           yScaleMode={yScaleMode}
           onYScaleModeChange={handleYScaleModeChange}
+          pendingViewportShift={pendingViewportShift}
+          onViewportShiftApplied={onViewportShiftApplied}
+          updateMode={updateMode}
+          tailChangeOffset={tailChangeOffset}
         >
           {chartLayout && mainVolumeIndicator && (
             <div

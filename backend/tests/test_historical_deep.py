@@ -2,6 +2,10 @@
 
 Run standalone:
     cd backend && python tests/test_historical_deep.py
+
+By default this uses the same app-data database as the desktop app
+(`%APPDATA%\\com.dailyiq.app\\market.db` on Windows) unless
+`DAILYIQ_DATA_DIR` is set.
 """
 
 import asyncio
@@ -137,6 +141,7 @@ async def test_get_historical_bars_daily():
 
 def main():
     print(f"DB path: {DB_PATH}")
+    print(f"DATA dir: {DB_PATH.parent}")
     print()
 
     r1 = test_yahoo_daily_max_range()

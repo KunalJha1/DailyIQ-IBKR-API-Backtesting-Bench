@@ -4,6 +4,10 @@ for AAPL into ohlcv_1m_bid / ohlcv_1m_ask tables.
 
 Run from backend/:
     python test_bid_ask_upsert.py
+
+By default this uses the same app-data database as the desktop app
+(`%APPDATA%\\com.dailyiq.app\\market.db` on Windows) unless
+`DAILYIQ_DATA_DIR` is set.
 """
 
 import asyncio
@@ -246,6 +250,7 @@ async def test_fetch_meta_keying():
 async def main():
     logger.info(f"Testing bid/ask upsert for {SYMBOL}")
     logger.info(f"DB: {DB_PATH}")
+    logger.info(f"DATA dir: {DB_PATH.parent}")
     logger.info("")
 
     # 1. Inspect current state

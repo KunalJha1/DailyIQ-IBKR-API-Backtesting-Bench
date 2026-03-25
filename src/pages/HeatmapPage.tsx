@@ -1,134 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatMarketCap } from "../lib/market-data";
 import { useTws } from "../lib/tws";
-
-interface HeatmapTile {
-  symbol: string;
-  name: string;
-  sector: string;
-  industry: string;
-  theme: string;
-  groups: string[];
-  sp500Weight: number;
-  last: number | null;
-  changePct: number | null;
-  status: string | null;
-  updatedAt: number | null;
-  trailingPE: number | null;
-  forwardPE: number | null;
-  marketCap: number | null;
-}
-
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-interface LayoutRect extends Rect {
-  data: HeatmapTile;
-}
-
-interface SectorBound extends Rect {
-  sector: string;
-  totalMarketCap: number;
-  count: number;
-  headerHeight: number;
-}
-
-function squarify(
-  items: { value: number; data: HeatmapTile }[],
-  bounds: Rect,
-): LayoutRect[] {
-  if (items.length === 0) return [];
-  const sorted = [...items]
-    .filter((item) => item.value > 0)
-    .sort((a, b) => b.value - a.value);
-  if (sorted.length === 0) return [];
-
-  function layoutPartition(
-    subset: { value: number; data: HeatmapTile }[],
-    rect: Rect,
-  ): LayoutRect[] {
-    if (subset.length === 0 || rect.w <= 0 || rect.h <= 0) return [];
-    if (subset.length === 1) {
-      return [{ ...rect, data: subset[0].data }];
-    }
-
-    const total = subset.reduce((sum, item) => sum + item.value, 0);
-    let splitIndex = 1;
-    let leftSum = subset[0].value;
-    let bestDiff = Math.abs(total - leftSum * 2);
-
-    for (let index = 1; index < subset.length - 1; index += 1) {
-      leftSum += subset[index].value;
-      const diff = Math.abs(total - leftSum * 2);
-      if (diff <= bestDiff) {
-        bestDiff = diff;
-        splitIndex = index + 1;
-      } else {
-        break;
-      }
-    }
-
-    const first = subset.slice(0, splitIndex);
-    const second = subset.slice(splitIndex);
-    const firstSum = first.reduce((sum, item) => sum + item.value, 0);
-    const ratio = total > 0 ? firstSum / total : 0.5;
-
-    if (rect.w >= rect.h) {
-      const firstWidth = rect.w * ratio;
-      return [
-        ...layoutPartition(first, { x: rect.x, y: rect.y, w: firstWidth, h: rect.h }),
-        ...layoutPartition(second, {
-          x: rect.x + firstWidth,
-          y: rect.y,
-          w: rect.w - firstWidth,
-          h: rect.h,
-        }),
-      ];
-    }
-
-    const firstHeight = rect.h * ratio;
-    return [
-      ...layoutPartition(first, { x: rect.x, y: rect.y, w: rect.w, h: firstHeight }),
-      ...layoutPartition(second, {
-        x: rect.x,
-        y: rect.y + firstHeight,
-        w: rect.w,
-        h: rect.h - firstHeight,
-      }),
-    ];
-  }
-
-  return layoutPartition(sorted, bounds);
-}
-
-function tileColor(changePct: number | null, status: string | null): string {
-  if (status === "pending" && changePct == null) return "#3a4350";
-  if (changePct == null) return "#3a4350";
-
-  if (changePct >= 4) return "#0b7a36";
-  if (changePct >= 2) return "#138a40";
-  if (changePct >= 0.5) return "#1fa34f";
-  if (changePct > 0) return "#2a6e3f";
-  if (changePct === 0) return "#4b5563";
-  if (changePct > -0.5) return "#8a3344";
-  if (changePct > -2) return "#c43d53";
-  if (changePct > -4) return "#b52e43";
-  return "#981b31";
-}
-
-function formatPct(changePct: number | null): string {
-  if (changePct == null) return "—";
-  return `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
-}
-
-function formatPrice(last: number | null): string {
-  if (last == null) return "—";
-  return `$${last.toFixed(2)}`;
-}
+import CircularGauge from "../components/CircularGauge";
+import {
+  type HeatmapTile,
+  type Rect,
+  type LayoutRect,
+  type SectorBound,
+  squarify,
+  tileColor,
+  formatPct,
+  formatPrice,
+} from "../lib/heatmap-utils";
 
 function formatAsOf(asOf: number | null): string {
   if (!asOf) return "Waiting";
@@ -280,11 +163,6 @@ export default function HeatmapPage() {
 
   const totalTiles = tiles.length;
   const loadedTiles = tiles.filter((tile) => tile.status !== "pending").length;
-  const totalMarketCap = useMemo(
-    () => tiles.reduce((sum, t) => sum + (t.marketCap ?? 0), 0),
-    [tiles],
-  );
-
   return (
     <div className="flex h-full min-h-0 bg-[#111318] text-white">
       <div className="min-w-0 flex-1 border-r border-white/[0.06]">
@@ -490,6 +368,25 @@ export default function HeatmapPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Technical Scores */}
+              {(hovered.techScore1d != null || hovered.techScore1w != null) && (
+                <div className="border-t border-white/[0.06] pt-3">
+                  <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.14em] text-white/30">
+                    Technical Scores
+                  </p>
+                  <div className="flex items-center gap-4">
+                    <div className="flex flex-col items-center gap-1">
+                      <CircularGauge score={hovered.techScore1d} size={44} />
+                      <span className="font-mono text-[9px] text-white/35">1D</span>
+                    </div>
+                    <div className="flex flex-col items-center gap-1">
+                      <CircularGauge score={hovered.techScore1w} size={44} />
+                      <span className="font-mono text-[9px] text-white/35">1W</span>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="font-sans text-[11px] text-white/40">

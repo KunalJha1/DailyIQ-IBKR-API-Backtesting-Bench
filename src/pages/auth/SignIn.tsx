@@ -1,17 +1,28 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { supabase } from "../../lib/supabase";
 
 export default function SignIn() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Supabase sign in
-    console.log("sign in", { email, password, remember });
+    setError(null);
+    setSubmitting(true);
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    setSubmitting(false);
+    if (signInError) {
+      setError(signInError.message);
+    }
   };
 
   return (
@@ -32,6 +43,10 @@ export default function SignIn() {
       </div>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        {error && (
+          <p className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>
+        )}
+
         <div className="relative">
           <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
           <input
@@ -82,8 +97,8 @@ export default function SignIn() {
           </a>
         </div>
 
-        <button type="submit" className="auth-btn-primary">
-          Sign In
+        <button type="submit" className="auth-btn-primary" disabled={submitting}>
+          {submitting ? "Signing in..." : "Sign In"}
         </button>
       </form>
 

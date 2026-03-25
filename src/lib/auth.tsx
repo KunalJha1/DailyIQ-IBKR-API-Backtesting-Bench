@@ -26,6 +26,16 @@ interface OAuthTokens {
   refresh_token: string;
 }
 
+function readCachedSession(): Session | null {
+  try {
+    const raw = window.localStorage.getItem("dailyiq-auth");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.access_token && parsed?.user) return parsed as Session;
+  } catch { /* corrupted or missing */ }
+  return null;
+}
+
 const AuthContext = createContext<AuthContextValue>({
   session: null,
   loading: true,
@@ -35,8 +45,9 @@ const AuthContext = createContext<AuthContextValue>({
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cached = readCachedSession();
+  const [session, setSession] = useState<Session | null>(cached);
+  const [loading, setLoading] = useState(!cached);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const signOut = useCallback(async () => {

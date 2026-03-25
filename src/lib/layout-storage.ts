@@ -6,10 +6,11 @@ import {
   exists,
 } from "@tauri-apps/api/fs";
 import { appDataDir } from "@tauri-apps/api/path";
-import { open } from "@tauri-apps/api/dialog";
+import { open, save } from "@tauri-apps/api/dialog";
 import type { WorkspaceFile, TabState } from "./layout-types";
 import { tabPresets } from "./tabs";
 import { isTauriRuntime } from "./platform";
+import bundledDefault from "../defaults/default-workspace.json";
 
 const WORKSPACE_FILENAME = "workspace.diq";
 const LOCAL_STORAGE_KEY = "dailyiq:workspace";
@@ -28,7 +29,30 @@ function makeDefaultTab(
   };
 }
 
+function isBundledWorkspace(data: unknown): data is WorkspaceFile {
+  if (!data || typeof data !== "object") return false;
+  const ws = data as WorkspaceFile;
+  return typeof ws.version === "number" && Array.isArray(ws.tabs) && ws.tabs.length > 0;
+}
+
 export function getDefaultWorkspace(): WorkspaceFile {
+  if (isBundledWorkspace(bundledDefault)) {
+    const idMap = new Map<string, string>();
+    const tabs = (bundledDefault as WorkspaceFile).tabs.map((t) => {
+      const newId = crypto.randomUUID();
+      idMap.set(t.id, newId);
+      return { ...t, id: newId };
+    });
+    const activeTabId =
+      idMap.get((bundledDefault as WorkspaceFile).global.activeTabId) ?? tabs[0].id;
+    return {
+      version: bundledDefault.version,
+      lastModified: new Date().toISOString(),
+      global: { activeTabId },
+      tabs,
+    };
+  }
+
   const tabs = tabPresets.map((p) => makeDefaultTab(p.type, p.title));
   return {
     version: 1,
@@ -162,5 +186,30 @@ export async function saveWorkspace(ws: WorkspaceFile): Promise<void> {
     });
   } catch (err) {
     console.error("Failed to save workspace:", err);
+  }
+}
+
+/** Open a native Save As dialog and write the workspace to the chosen path. */
+export async function exportWorkspace(ws: WorkspaceFile): Promise<boolean> {
+  try {
+    const defaultDir = await appDataDir();
+    const filePath = await save({
+      defaultPath: `${defaultDir}workspace.diq`,
+      filters: [{ name: "DailyIQ Workspace", extensions: ["diq"] }],
+    });
+    if (typeof filePath !== "string") return false;
+
+    const updated: WorkspaceFile = {
+      ...ws,
+      lastModified: new Date().toISOString(),
+    };
+    await writeTextFile(filePath, JSON.stringify(updated, null, 2));
+
+    // Also persist internally so AppData stays in sync
+    await saveWorkspace(ws);
+    return true;
+  } catch (err) {
+    console.error("Failed to export workspace:", err);
+    return false;
   }
 }

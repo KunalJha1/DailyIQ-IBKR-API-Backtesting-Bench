@@ -8,15 +8,13 @@ import math
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Any, Iterable
-
-import pandas as pd
-from yahooquery import Ticker
+from zoneinfo import ZoneInfo
 
 from db_utils import execute_many_with_retry, sync_db_session
 from runtime_paths import resource_path
-from worker_watchlist import read_watchlist
 
 logger = logging.getLogger("options-collector")
 
@@ -24,11 +22,16 @@ DEFAULT_INTERVAL_MINUTES = 60
 DEFAULT_SOURCE = "yahoo"
 DEFAULT_RISK_FREE_RATE = float(os.environ.get("DAILYIQ_OPTIONS_RISK_FREE_RATE", "0.045"))
 TICKERS_PATH = resource_path("data", "tickers.json")
+MARKET_TZ = ZoneInfo("America/New_York")
+MARKET_OPEN = dt_time(hour=9, minute=30)
+MARKET_CLOSE = dt_time(hour=16, minute=0)
 
-try:
-    from scipy.optimize import brentq  # type: ignore
-except Exception:  # pragma: no cover - exercised by environments without scipy
-    brentq = None
+def _get_brentq():
+    try:
+        from scipy.optimize import brentq  # type: ignore
+        return brentq
+    except Exception:
+        return None
 
 
 @dataclass
@@ -50,6 +53,48 @@ class OptionComputation:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _market_now(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(MARKET_TZ)
+    if current.tzinfo is None:
+        return current.replace(tzinfo=MARKET_TZ)
+    return current.astimezone(MARKET_TZ)
+
+
+def is_regular_market_hours(now: datetime | None = None) -> bool:
+    current = _market_now(now)
+    if current.weekday() >= 5:
+        return False
+    current_time = current.time()
+    return MARKET_OPEN <= current_time < MARKET_CLOSE
+
+
+def seconds_until_next_market_open(now: datetime | None = None) -> float:
+    current = _market_now(now)
+
+    if current.weekday() < 5 and current.time() < MARKET_OPEN:
+        next_open = current.replace(
+            hour=MARKET_OPEN.hour,
+            minute=MARKET_OPEN.minute,
+            second=0,
+            microsecond=0,
+        )
+    else:
+        days_ahead = 1
+        while True:
+            candidate = current + timedelta(days=days_ahead)
+            if candidate.weekday() < 5:
+                next_open = candidate.replace(
+                    hour=MARKET_OPEN.hour,
+                    minute=MARKET_OPEN.minute,
+                    second=0,
+                    microsecond=0,
+                )
+                break
+            days_ahead += 1
+
+    return max((next_open - current).total_seconds(), 1.0)
 
 
 def _format_symbol_list(symbols: list[str], *, limit: int = 12) -> str:
@@ -145,6 +190,8 @@ def build_symbol_queue(
 
 
 def load_symbol_queue() -> list[str]:
+    from worker_watchlist import read_watchlist
+
     return build_symbol_queue(
         _load_portfolio_symbols(),
         read_watchlist(),
@@ -153,6 +200,8 @@ def load_symbol_queue() -> list[str]:
 
 
 def _parse_expiration_ms(value: Any) -> int | None:
+    import pandas as pd
+
     if value is None:
         return None
     if isinstance(value, pd.Timestamp):
@@ -255,6 +304,7 @@ def _solve_implied_volatility(
 
     lower = 1e-6
     upper = 5.0
+    brentq = _get_brentq()
     if brentq is not None:
         return float(brentq(objective, lower, upper, maxiter=200))
 
@@ -472,6 +522,8 @@ def normalize_option_chain_df(
     source: str,
     risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
 ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], int]:
+    import pandas as pd
+
     if not isinstance(chain_df.index, pd.MultiIndex):
         raise ValueError("Expected yahooquery option_chain dataframe with a MultiIndex")
 
@@ -570,6 +622,8 @@ class YahooOptionsProvider:
     source = "yahoo"
 
     def fetch_chain(self, symbol: str) -> tuple[pd.DataFrame, float | None]:
+        from yahooquery import Ticker
+
         ticker = Ticker(symbol, asynchronous=False)
         chain_df = ticker.option_chain
         if isinstance(chain_df, str):
@@ -746,21 +800,16 @@ class OptionsCollectorWorker:
             has_existing_data,
         )
 
-        if not has_existing_data:
-            logger.info("No existing options snapshot data found; running an immediate startup collection")
-            try:
-                await asyncio.to_thread(
-                    run_collection_cycle,
-                    source=self._source,
-                    symbols_override=None,
-                    max_symbols=None,
-                    risk_free_rate=self._risk_free_rate,
-                )
-            except Exception as exc:
-                logger.error("Initial options collection failed: %s", exc)
-            await asyncio.sleep(self._interval_seconds)
-
         while True:
+            if not is_regular_market_hours():
+                sleep_for = seconds_until_next_market_open()
+                logger.info(
+                    "Skipping options collection outside market hours; sleeping %.1fs until next regular session",
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                continue
+
             try:
                 logger.info(
                     "Options collector background cycle queued; next scheduled interval is %s minutes",
@@ -929,6 +978,15 @@ def main() -> None:
 
     interval_seconds = max(args.interval_minutes, 1) * 60
     while True:
+        if not is_regular_market_hours():
+            sleep_for = seconds_until_next_market_open()
+            logger.info(
+                "Skipping options collection outside market hours; sleeping %.1fs until next regular session",
+                sleep_for,
+            )
+            time.sleep(sleep_for)
+            continue
+
         started = time.time()
         run_collection_cycle(
             source=args.source,

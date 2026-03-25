@@ -5,6 +5,8 @@ import QuoteCard from "../components/QuoteCard";
 import IBKRPortfolioCard from "../components/IBKRPortfolioCard";
 import WatchlistCard from "../components/WatchlistCard";
 import MiniChart from "../chart/components/MiniChart";
+import MiniScreenerCard from "../components/MiniScreenerCard";
+import MiniHeatmapCard from "../components/MiniHeatmapCard";
 import { useTabs } from "../lib/tabs";
 import { useLayout } from "../lib/layout";
 import type { LayoutComponent } from "../lib/layout-types";
@@ -15,6 +17,8 @@ const COMPONENT_TYPES = [
   { type: "watchlist", label: "Watchlist", defaultW: 4, defaultH: 10 },
   { type: "minichart", label: "Mini Chart", defaultW: 4, defaultH: 8 },
   { type: "ibkr-portfolio", label: "Portfolio", defaultW: 8, defaultH: 12 },
+  { type: "mini-screener", label: "Mini Screener", defaultW: 6, defaultH: 10 },
+  { type: "mini-heatmap", label: "Mini Heatmap", defaultW: 6, defaultH: 10 },
 ] as const;
 
 export default function DashboardPage() {
@@ -31,7 +35,7 @@ export default function DashboardPage() {
     setComponentLinkChannel,
     setTabZoom,
     loadFromFile,
-    flushSave,
+    exportToFile,
   } = useLayout();
 
   const tabState = getTabState(activeTabId);
@@ -130,6 +134,8 @@ export default function DashboardPage() {
       watchlist: {},
       minichart: { symbol: "AAPL", timeframe: "1D", chartType: "candlestick" },
       "ibkr-portfolio": {},
+      "mini-screener": {},
+      "mini-heatmap": {},
     };
 
     // Drop at (0,0) — user can drag it wherever they want
@@ -227,6 +233,34 @@ export default function DashboardPage() {
             }
           />
         );
+      case "mini-screener":
+        return (
+          <MiniScreenerCard
+            linkChannel={comp.linkChannel}
+            onSetLinkChannel={(ch) =>
+              setComponentLinkChannel(activeTabId, comp.id, ch)
+            }
+            onClose={() => removeComponent(activeTabId, comp.id)}
+            config={comp.config}
+            onConfigChange={(cfg) =>
+              updateComponent(activeTabId, comp.id, { config: cfg })
+            }
+          />
+        );
+      case "mini-heatmap":
+        return (
+          <MiniHeatmapCard
+            linkChannel={comp.linkChannel}
+            onSetLinkChannel={(ch) =>
+              setComponentLinkChannel(activeTabId, comp.id, ch)
+            }
+            onClose={() => removeComponent(activeTabId, comp.id)}
+            config={comp.config}
+            onConfigChange={(cfg) =>
+              updateComponent(activeTabId, comp.id, { config: cfg })
+            }
+          />
+        );
       default:
         return (
           <div className="flex h-full items-center justify-center border border-white/[0.06] bg-panel text-[10px] text-white/20">
@@ -262,7 +296,7 @@ export default function DashboardPage() {
             void loadFromFile();
           }}
           onSaveWorkspace={() => {
-            void flushSave();
+            void exportToFile();
           }}
         />
 

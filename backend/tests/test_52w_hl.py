@@ -4,6 +4,10 @@ Test script: verify 52W H/L data flow for a symbol like NFLX.
 Run from the backend/ directory:
     python3 tests/test_52w_hl.py [SYMBOL]
 
+By default this uses the same app-data database as the desktop app
+(`%APPDATA%\\com.dailyiq.app\\market.db` on Windows) when it exists.
+Set `DAILYIQ_DATA_DIR` to override.
+
 Checks:
   1. What yahooquery returns for 52W H/L fields (raw source)
   2. What's in ohlcv_1d (the source for 52W queries)
@@ -185,6 +189,7 @@ if __name__ == "__main__":
     symbol = sys.argv[1].upper() if len(sys.argv) > 1 else "NFLX"
     print(f"Testing 52W H/L data flow for: {symbol}")
     print(f"DB path: {DB_PATH}")
+    print(f"DATA dir: {DB_PATH.parent}")
 
     check_yahoo(symbol)
     check_ohlcv_1d(symbol)

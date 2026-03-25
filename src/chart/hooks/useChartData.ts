@@ -14,6 +14,10 @@ interface UseChartDataResult {
   loading: boolean;
   source: 'tws' | 'yahoo' | 'cache' | 'mock';
   onViewportChange: (startIdx: number, endIdx: number) => void;
+  pendingViewportShift: number;
+  onViewportShiftApplied: () => void;
+  updateMode: 'full' | 'tail';
+  tailChangeOffset: number;
 }
 
 const DAILY_TIMEFRAMES = new Set<Timeframe>(['1D', '1W', '1M']);
@@ -28,8 +32,8 @@ const RESAMPLE_FACTOR: Record<Timeframe, number> = {
 
 // Buffer: fetch 3x the visible range to avoid constant re-fetches while panning
 const BUFFER_MULTIPLIER = 3;
-// Max raw 1m bars to keep in memory
-const MAX_CACHED_BARS = 6000;
+// Max raw 1m bars to keep in memory (enough for ~256 trading days of 1m data)
+const MAX_CACHED_BARS = 100_000;
 // Debounce pan-triggered fetches (ms)
 const PAN_FETCH_DEBOUNCE = 200;
 // Polling intervals (ms)
@@ -117,20 +121,32 @@ function mergeBarsByTime(existingBars: OHLCVBar[], incomingBars: OHLCVBar[]): OH
   return Array.from(merged.values()).sort((a, b) => a.time - b.time);
 }
 
+function getDisplayBars(rawBars: OHLCVBar[], rawBarSize: '1m' | '1d', timeframe: Timeframe): OHLCVBar[] {
+  if ((rawBarSize === '1d' && timeframe === '1D') || (rawBarSize === '1m' && timeframe === '1m')) {
+    return rawBars;
+  }
+  return resampleBars(rawBars, timeframe);
+}
+
 export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOptions): UseChartDataResult {
   const [rawBars, setRawBars] = useState<OHLCVBar[]>([]);
   const [rawBarSize, setRawBarSize] = useState<'1m' | '1d'>('1m');
   const [loading, setLoading] = useState(false);
   const [source, setSource] = useState<'tws' | 'yahoo' | 'cache' | 'mock'>('mock');
+  const [pendingViewportShift, setPendingViewportShift] = useState(0);
+  const [updateMode, setUpdateMode] = useState<'full' | 'tail'>('full');
+  const [tailChangeOffset, setTailChangeOffset] = useState(0);
   const requestIdRef = useRef(0);
   // Keep a ref to rawBars for async access without stale closures
   const rawBarsRef = useRef<OHLCVBar[]>([]);
+  const displayBarsRef = useRef<OHLCVBar[]>([]);
   // Track the server's full cached extent for the current symbol
   const serverExtentRef = useRef<{ tsMin: number; tsMax: number } | null>(null);
   // Debounce timer for pan fetches
   const panDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track if a pan fetch is in-flight to avoid stacking
   const panFetchingRef = useRef(false);
+  const viewportAnchorRef = useRef<{ startIdx: number; anchorTime: number } | null>(null);
 
   // Keep ref in sync for async access
   rawBarsRef.current = rawBars;
@@ -154,6 +170,8 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
     const requestId = ++requestIdRef.current;
     setLoading(true);
     serverExtentRef.current = null;
+    setPendingViewportShift(0);
+    viewportAnchorRef.current = null;
 
     let cancelled = false;
 
@@ -205,7 +223,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           url.searchParams.set('duration', '30 Y');
         } else {
           url.searchParams.set('bar_size', '1 min');
-          url.searchParams.set('limit', String(initialLimit));
+          url.searchParams.set('duration', '30 D');
         }
 
         const res = await fetch(url.toString());
@@ -219,6 +237,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
 
         const bars = parseBars(payload);
 
+        setUpdateMode('full');
         if (bars.length > 0) {
           setRawBars(bars);
           setRawBarSize(useDaily ? '1d' : '1m');
@@ -240,6 +259,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
     // Incremental poll: for intraday, only fetch new bars since last cached bar
     async function pollIncremental() {
       if (cancelled || requestId !== requestIdRef.current) return;
+      if (panFetchingRef.current) return;
       try {
         if (timeframe === SYNTHETIC_DAILY_TIMEFRAME) {
           const dailyUrl = new URL(`http://127.0.0.1:${sidecarPort}/historical`);
@@ -268,6 +288,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           );
 
           if (mergedBars.length > 0) {
+            setUpdateMode('full');
             setRawBars(mergedBars);
             setRawBarSize('1d');
             const minuteBars = parseBars(minutePayload);
@@ -280,18 +301,16 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         url.searchParams.set('symbol', symbol);
 
         if (useDaily) {
-          // Daily: still do full fetch on poll (data is small)
           url.searchParams.set('bar_size', '1 day');
           url.searchParams.set('duration', '30 Y');
         } else {
-          // Intraday: re-fetch the trailing bar so the open candle can refresh live.
           url.searchParams.set('bar_size', '1 min');
           const currentBars = rawBarsRef.current;
           if (currentBars.length > 0) {
             const lastTs = currentBars[currentBars.length - 1].time;
             url.searchParams.set('ts_start', String(Math.max(0, lastTs - 60_000)));
           } else {
-            url.searchParams.set('limit', String(initialLimit));
+            url.searchParams.set('duration', '30 D');
           }
         }
 
@@ -307,17 +326,22 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         const newBars = parseBars(payload);
 
         if (useDaily) {
-          // Daily: replace entire dataset
           if (newBars.length > 0) {
+            setUpdateMode('full');
             setRawBars(newBars);
             setRawBarSize('1d');
             setSource((payload.source as 'tws' | 'yahoo' | 'cache') || 'yahoo');
           }
         } else if (newBars.length > 0) {
-          // Intraday: merge by timestamp so the current open bar can be replaced.
+          const prevBars = rawBarsRef.current;
+          const firstNewTs = newBars[0].time;
+          const changeIdx = prevBars.length > 0
+            ? prevBars.findIndex(b => b.time >= firstNewTs)
+            : 0;
+          setTailChangeOffset(Math.max(0, changeIdx === -1 ? prevBars.length : changeIdx));
+          setUpdateMode('tail');
           setRawBars(prev => {
             const merged = mergeBarsByTime(prev, newBars);
-            // Trim oldest bars if cache is too large
             if (merged.length > MAX_CACHED_BARS) {
               return merged.slice(merged.length - MAX_CACHED_BARS);
             }
@@ -338,10 +362,19 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
       clearInterval(interval);
       if (panDebounceRef.current) clearTimeout(panDebounceRef.current);
     };
-  }, [symbol, sidecarPort, timeframe, useDaily, initialLimit]);
+  }, [symbol, sidecarPort, timeframe, useDaily]);
 
   // ── Pan-triggered fetch: load older bars when scrolling left ─────────
   const onViewportChange = useCallback((startIdx: number, endIdx: number) => {
+    const displayBars = displayBarsRef.current;
+    if (displayBars.length > 0) {
+      const clampedStart = Math.max(0, Math.min(displayBars.length - 1, startIdx));
+      const anchorBar = displayBars[clampedStart];
+      if (anchorBar) {
+        viewportAnchorRef.current = { startIdx: clampedStart, anchorTime: anchorBar.time };
+      }
+    }
+
     // Only do pan-fetches for intraday
     if (useDaily || !sidecarPort) return;
 
@@ -349,7 +382,13 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
     const bufferThreshold = Math.max(10, (endIdx - startIdx) * 0.25);
 
     if (startIdx < bufferThreshold && !panFetchingRef.current) {
-      // Debounce to avoid rapid-fire fetches during fast scrolling
+      // Already at the server's earliest bar — nothing older to fetch
+      const extent = serverExtentRef.current;
+      const currentBars = rawBarsRef.current;
+      if (extent && currentBars.length > 0 && currentBars[0].time <= extent.tsMin) {
+        return;
+      }
+
       if (panDebounceRef.current) clearTimeout(panDebounceRef.current);
       panDebounceRef.current = setTimeout(async () => {
         panFetchingRef.current = true;
@@ -358,10 +397,9 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           url.searchParams.set('symbol', symbol);
           url.searchParams.set('bar_size', '1 min');
 
-          // Fetch a chunk of older bars ending before our earliest cached bar
-          const currentBars = rawBarsRef.current;
-          if (currentBars.length > 0) {
-            url.searchParams.set('ts_end', String(currentBars[0].time - 1));
+          const curBars = rawBarsRef.current;
+          if (curBars.length > 0) {
+            url.searchParams.set('ts_end', String(curBars[0].time - 1));
           }
           url.searchParams.set('limit', String(initialLimit));
 
@@ -375,14 +413,21 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
 
           const olderBars = parseBars(payload);
           if (olderBars.length > 0) {
-            setRawBars(prev => {
-              const merged = [...olderBars, ...prev];
-              // Trim newest bars if cache is too large (keep older data since user is scrolling left)
-              if (merged.length > MAX_CACHED_BARS) {
-                return merged.slice(0, MAX_CACHED_BARS);
+            const anchor = viewportAnchorRef.current;
+            const currentRawBars = rawBarsRef.current;
+            const merged = [...olderBars, ...currentRawBars];
+            const nextRawBars = merged.length > MAX_CACHED_BARS
+              ? merged.slice(0, MAX_CACHED_BARS)
+              : merged;
+            if (anchor) {
+              const nextDisplayBars = getDisplayBars(nextRawBars, '1m', timeframe);
+              const nextAnchorIdx = nextDisplayBars.findIndex((bar) => bar.time === anchor.anchorTime);
+              if (nextAnchorIdx > anchor.startIdx) {
+                setPendingViewportShift(shift => shift + (nextAnchorIdx - anchor.startIdx));
               }
-              return merged;
-            });
+            }
+            setUpdateMode('full');
+            setRawBars(nextRawBars);
           }
         } catch {
           // Swallow — next pan will retry
@@ -391,14 +436,11 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         }
       }, PAN_FETCH_DEBOUNCE);
     }
-  }, [useDaily, sidecarPort, symbol, initialLimit]);
+  }, [useDaily, sidecarPort, symbol, initialLimit, timeframe]);
 
   const bars = useMemo(() => {
     if (rawBars.length > 0) {
-      if ((rawBarSize === '1d' && timeframe === '1D') || (rawBarSize === '1m' && timeframe === '1m')) {
-        return rawBars;
-      }
-      return resampleBars(rawBars, timeframe);
+      return getDisplayBars(rawBars, rawBarSize, timeframe);
     }
     if (!sidecarPort) {
       return generateMockData(symbol, timeframe, 2000);
@@ -406,7 +448,13 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
     return [];
   }, [rawBars, rawBarSize, timeframe, symbol, sidecarPort]);
 
-  return { bars, loading, source, onViewportChange };
+  displayBarsRef.current = bars;
+
+  const onViewportShiftApplied = useCallback(() => {
+    setPendingViewportShift(0);
+  }, []);
+
+  return { bars, loading, source, onViewportChange, pendingViewportShift, onViewportShiftApplied, updateMode, tailChangeOffset };
 }
 
 function bucketFor(tsMs: number, timeframe: Timeframe): number {

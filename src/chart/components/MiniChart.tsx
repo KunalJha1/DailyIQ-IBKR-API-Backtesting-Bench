@@ -340,6 +340,7 @@ export default function MiniChart({
 
   useEffect(() => {
     engineRef.current?.setBrandingSymbol(symbol);
+    engineRef.current?.resetViewport();
   }, [symbol]);
 
   // Live mode + stopper
@@ -874,23 +875,24 @@ export default function MiniChart({
                 setShowChartTypeMenu(false);
                 setIndicatorSearch('');
               }}
-              className="flex items-center gap-0.5 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
+              className="flex items-center gap-1 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
-                fontSize: 9,
-                padding: '2px 4px',
+                fontSize: 10,
+                padding: '3px 7px',
                 borderRadius: 2,
                 border: 'none',
                 cursor: 'pointer',
                 backgroundColor: showIndicatorMenu ? 'rgba(255,255,255,0.06)' : 'transparent',
-                color: activeStandardIndicatorCount > 0 ? '#1A56DB' : '#8B949E',
+                color: activeStandardIndicatorCount > 0 ? '#60A5FA' : '#8B949E',
                 lineHeight: 1,
               }}
               title="Indicators"
             >
               <TrendingUp size={10} />
+              <span>Indicators</span>
               {activeStandardIndicatorCount > 0 && (
-                <span style={{ fontSize: 8, color: '#1A56DB' }}>{activeStandardIndicatorCount}</span>
+                <span style={{ fontSize: 8, color: '#60A5FA' }}>{activeStandardIndicatorCount}</span>
               )}
             </button>
 
@@ -1021,11 +1023,11 @@ export default function MiniChart({
                 setShowChartTypeMenu(false);
                 setIndicatorSearch('');
               }}
-              className="flex items-center gap-0.5 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
+              className="flex items-center gap-1 rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/60"
               style={{
                 fontFamily: '"JetBrains Mono", monospace',
-                fontSize: 9,
-                padding: '2px 4px',
+                fontSize: 10,
+                padding: '3px 7px',
                 borderRadius: 2,
                 border: 'none',
                 cursor: 'pointer',
@@ -1036,6 +1038,7 @@ export default function MiniChart({
               title="Strategies"
             >
               <BrainCircuit size={10} />
+              <span>Strategies</span>
               {activeStrategyCount > 0 && (
                 <span style={{ fontSize: 8, color: '#1A56DB' }}>{activeStrategyCount}</span>
               )}

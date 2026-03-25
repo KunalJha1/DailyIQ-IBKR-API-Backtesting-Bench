@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { X, RefreshCw, Download, CheckCircle, AlertTriangle } from "lucide-react";
 import { useTws } from "../lib/tws";
+import { checkUpdate, installUpdate, type UpdateManifest } from "@tauri-apps/api/updater";
+import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/api/process";
 
 const CONNECTION_LABELS: Record<string, string> = {
   "tws-live": "TWS Live",
@@ -12,6 +15,7 @@ const CONNECTION_LABELS: Record<string, string> = {
 interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
+  updateAvailable?: boolean;
 }
 
 const PLAYBOOK_PLACEHOLDER = `Example:
@@ -22,7 +26,7 @@ const PLAYBOOK_PLACEHOLDER = `Example:
 - Flag oversized positions above 12%
 - Prefer swing-style decisions over scalp-style noise`;
 
-export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
+export default function SettingsPanel({ open, onClose, updateAvailable }: SettingsPanelProps) {
   const {
     status,
     port,
@@ -37,6 +41,53 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   } =
     useTws();
   const panelRef = useRef<HTMLDivElement>(null);
+
+  const [appVersion, setAppVersion] = useState("");
+  const [updateStatus, setUpdateStatus] = useState<
+    "idle" | "checking" | "available" | "downloading" | "up-to-date" | "error"
+  >("idle");
+  const [updateManifest, setUpdateManifest] = useState<UpdateManifest | null>(null);
+  const [updateError, setUpdateError] = useState("");
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion("unknown"));
+  }, []);
+
+  const handleCheckUpdate = useCallback(async () => {
+    setUpdateStatus("checking");
+    setUpdateError("");
+    try {
+      const { shouldUpdate, manifest } = await checkUpdate();
+      if (shouldUpdate && manifest) {
+        setUpdateManifest(manifest);
+        setUpdateStatus("available");
+      } else {
+        setUpdateStatus("up-to-date");
+      }
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : String(err));
+      setUpdateStatus("error");
+    }
+  }, []);
+
+  const handleInstallUpdate = useCallback(async () => {
+    setUpdateStatus("downloading");
+    setUpdateError("");
+    try {
+      await installUpdate();
+      await relaunch();
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : String(err));
+      setUpdateStatus("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && updateAvailable && updateStatus === "idle") {
+      handleCheckUpdate();
+    }
+  }, [open, updateAvailable, updateStatus, handleCheckUpdate]);
+
   const [finnhubDraft, setFinnhubDraft] = useState("");
   const [playbookMemoryDraft, setPlaybookMemoryDraft] = useState("");
   const [playbookMemoryEnabledDraft, setPlaybookMemoryEnabledDraft] = useState(false);
@@ -145,7 +196,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div className="scrollbar-panel flex-1 overflow-y-auto px-4 py-4">
           {/* Connection Section */}
           <section className="mb-6">
             <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
@@ -384,6 +435,79 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   Save
                 </button>
               </div>
+            </div>
+          </section>
+
+          {/* App Updates */}
+          <section className="mt-6 border-t border-white/[0.06] pt-6">
+            <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
+              App Updates
+            </h3>
+
+            <div className="mb-3 flex items-center gap-2">
+              <span className="font-mono text-[11px] text-white/50">
+                Current version:{" "}
+                <span className="text-white/70">v{appVersion}</span>
+              </span>
+            </div>
+
+            {updateStatus === "available" && updateManifest && (
+              <div className="mb-3 flex items-start gap-2 rounded-md border border-blue/20 bg-blue/[0.06] px-3 py-2">
+                <Download className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue" strokeWidth={1.5} />
+                <div>
+                  <p className="text-[11px] text-white/70">
+                    Version <span className="font-mono font-medium text-blue">v{updateManifest.version}</span> available
+                  </p>
+                  {updateManifest.body && (
+                    <p className="mt-1 text-[10px] leading-4 text-white/35">
+                      {updateManifest.body}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {updateStatus === "up-to-date" && (
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-green/20 bg-green/[0.06] px-3 py-2">
+                <CheckCircle className="h-3.5 w-3.5 text-green" strokeWidth={1.5} />
+                <span className="text-[11px] text-green/80">You're on the latest version</span>
+              </div>
+            )}
+
+            {updateStatus === "error" && (
+              <div className="mb-3 flex items-start gap-2 rounded-md border border-red/20 bg-red/[0.06] px-3 py-2">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red/70" strokeWidth={1.5} />
+                <p className="text-[10px] leading-4 text-red/60">{updateError || "Failed to check for updates"}</p>
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              {updateStatus === "available" ? (
+                <button
+                  onClick={handleInstallUpdate}
+                  disabled={updateStatus !== "available"}
+                  className="flex items-center gap-1.5 rounded-md border border-blue/30 bg-blue/10 px-3 py-1 text-[11px] text-blue transition-colors duration-120 hover:bg-blue/20"
+                >
+                  <Download className="h-3 w-3" strokeWidth={1.5} />
+                  Install & Restart
+                </button>
+              ) : (
+                <button
+                  onClick={handleCheckUpdate}
+                  disabled={updateStatus === "checking" || updateStatus === "downloading"}
+                  className="flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-base px-3 py-1 text-[11px] text-white/50 transition-colors duration-120 hover:bg-white/[0.04] hover:text-white/70 disabled:opacity-40"
+                >
+                  <RefreshCw
+                    className={`h-3 w-3 ${updateStatus === "checking" ? "animate-spin" : ""}`}
+                    strokeWidth={1.5}
+                  />
+                  {updateStatus === "checking"
+                    ? "Checking..."
+                    : updateStatus === "downloading"
+                      ? "Installing..."
+                      : "Check for Updates"}
+                </button>
+              )}
             </div>
           </section>
         </div>

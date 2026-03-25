@@ -16,7 +16,6 @@ from urllib.request import urlopen
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from ib_insync import IB
 
 from db_utils import run_db, sync_db_session
 from historical import (
@@ -29,15 +28,7 @@ from historical import (
     seed_duration_for_bar_size,
 )
 from ibkr_utils import IbkrClientIdManager, is_client_id_in_use_error
-from options_collector import (
-    DEFAULT_INTERVAL_MINUTES as OPTIONS_DEFAULT_INTERVAL_MINUTES,
-    DEFAULT_RISK_FREE_RATE as OPTIONS_DEFAULT_RISK_FREE_RATE,
-    DEFAULT_SOURCE as OPTIONS_DEFAULT_SOURCE,
-    OptionsCollectorWorker,
-)
 from runtime_paths import data_dir, resource_path
-from score_worker import TechnicalsScorer, read_scores
-from technicals import compute_indicators_for_symbols
 
 logging.basicConfig(
     level=logging.INFO,
@@ -153,6 +144,9 @@ def _validate_finnhub_key(api_key: str) -> tuple[bool, str]:
 def read_live_portfolio_snapshot() -> dict:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    from ib_insync import IB
+
     ib = IB()
     manager = IbkrClientIdManager(start=DEFAULT_TWS_CLIENT_ID)
     last_error: str | None = None
@@ -596,6 +590,30 @@ def _enrich_with_valuations(payloads: list[dict], valuation_map: dict[str, dict]
         p["marketCap"] = v.get("marketCap")
 
 
+def _enrich_with_tech_scores(conn, payloads: list[dict]) -> None:
+    """Merge cached 1d/1w technical scores into snapshot payloads in-place."""
+    symbols = [p["symbol"] for p in payloads]
+    if not symbols:
+        return
+    placeholders = ", ".join("?" * len(symbols))
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT symbol, score_1d, score_1w
+            FROM technical_scores
+            WHERE symbol IN ({placeholders})
+            """,
+            symbols,
+        ).fetchall()
+        score_map = {r[0]: (r[1], r[2]) for r in rows}
+    except Exception:
+        score_map = {}
+    for p in payloads:
+        s1d, s1w = score_map.get(p["symbol"], (None, None))
+        p["techScore1d"] = s1d
+        p["techScore1w"] = s1w
+
+
 def _format_option_expiration_label(expiration_ms: int) -> str:
     dt = datetime.fromtimestamp(expiration_ms / 1000, tz=timezone.utc)
     return dt.strftime("%b %d")
@@ -838,6 +856,14 @@ def read_options_chain(symbol: str, expiration: int | None = None) -> dict:
 
 
 def create_app() -> FastAPI:
+    from options_collector import (
+        DEFAULT_INTERVAL_MINUTES as OPTIONS_DEFAULT_INTERVAL_MINUTES,
+        DEFAULT_RISK_FREE_RATE as OPTIONS_DEFAULT_RISK_FREE_RATE,
+        DEFAULT_SOURCE as OPTIONS_DEFAULT_SOURCE,
+        OptionsCollectorWorker,
+    )
+    from score_worker import TechnicalsScorer
+
     scorer = TechnicalsScorer()
     options_worker = OptionsCollectorWorker(
         source=OPTIONS_DEFAULT_SOURCE,
@@ -849,6 +875,11 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         scorer.set_symbols(await run_db(read_watchlist_symbols))
+        sp500_symbols = [
+            sym for sym, meta in ticker_metadata.items()
+            if meta.get("enabled") and float(meta.get("sp500Weight") or 0) > 0
+        ]
+        scorer.set_universe(sp500_symbols)
         scorer.start()
         options_worker.start()
         try:
@@ -1485,6 +1516,7 @@ def create_app() -> FastAPI:
                     ))
                 val_map = _fetch_valuation_map(conn, [t["symbol"] for t in tiles])
                 _enrich_with_valuations(tiles, val_map)
+                _enrich_with_tech_scores(conn, tiles)
                 tiles.sort(key=lambda item: float(item.get("sp500Weight") or 0), reverse=True)
                 return tiles
 
@@ -1536,6 +1568,7 @@ def create_app() -> FastAPI:
         if not symbols:
             return []
         sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        from score_worker import read_scores
         return await run_db(read_scores, sym_list)
 
     @app.get("/technicals/indicators")
@@ -1553,6 +1586,7 @@ def create_app() -> FastAPI:
             indicator_specs = []
         if not indicator_specs:
             return {sym: {} for sym in sym_list}
+        from technicals import compute_indicators_for_symbols
         return await run_db(compute_indicators_for_symbols, sym_list, indicator_specs)
 
     @app.get("/historical")
@@ -1700,6 +1734,8 @@ def create_app() -> FastAPI:
             "source": source,
             "count": len(bars),
             "whatToShow": what_to_show.upper(),
+            "ts_min": cached.get("ts_min") if isinstance(cached, dict) else None,
+            "ts_max": cached.get("ts_max") if isinstance(cached, dict) else None,
         }
 
     return app
