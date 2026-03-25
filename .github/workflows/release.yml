@@ -114,8 +114,8 @@ jobs:
             libwebkit2gtk-4.0-dev libjavascriptcoregtk-4.0-dev \
             libappindicator3-dev librsvg2-dev patchelf \
             libsoup2.4-dev pkg-config libssl-dev \
-            libatk1.0-dev libgdk-pixbuf2.0-dev libgdk-3-dev \
-            libgio-2.0-dev libglib2.0-dev libgtk-3-dev libpango1.0-dev
+            libatk1.0-dev libgdk-pixbuf2.0-dev \
+            libglib2.0-dev libgtk-3-dev libpango1.0-dev
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0.5.20
