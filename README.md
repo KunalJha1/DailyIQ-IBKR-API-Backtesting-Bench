@@ -54,18 +54,50 @@ It is designed to give traders a fast local workspace for:
 
 ```mermaid
 graph TD
-    A[Tauri Desktop Shell] --> B[React + TypeScript UI]
-    B --> C[FastAPI Sidecar]
-    C --> D[(SQLite Market Cache)]
-    C --> E[IBKR TWS / Gateway]
-    C --> F[Yahoo Finance]
-    C --> G[Finnhub]
-    C --> H[Supabase Auth]
-    I[Background Workers] --> D
-    I --> E
-    I --> F
-    I --> G
+    A[Tauri Desktop Host<br/>windowing + OAuth callback + backend supervisor]
+    B[React 18 + TypeScript UI<br/>dashboard, charting, heatmap, options, portfolio]
+    C[Local UI State<br/>workspace.diq + watchlist.json + localStorage]
+    D[FastAPI Sidecar<br/>localhost HTTP API]
+    E[TechnicalsScorer<br/>in-process background task]
+    F[OptionsCollectorWorker<br/>in-process background task]
+    G[Watchlist Worker<br/>live quotes + snapshots + realtime bars]
+    H[Valuation Worker<br/>daily enrichment scheduler]
+    I[(SQLite App Data Store<br/>market.db WAL)]
+    J[IBKR TWS / Gateway]
+    K[Yahoo Finance]
+    L[Finnhub]
+    M[DailyIQ API]
+    N[Supabase Auth]
+
+    A -->|spawns, probes, restarts| D
+    A -->|spawns, watches| G
+    A -->|spawns, watches| H
+    A -->|Tauri commands| B
+    A -->|OAuth token relay| N
+
+    B -->|localhost fetch| D
+    B -->|persist workspace/settings/watchlist cache| C
+    B -->|session storage| N
+
+    D --> E
+    D --> F
+    D --> I
+    G --> I
+    H --> I
+    B -. reads/writes .-> I
+
+    D -->|portfolio reads / historical API| J
+    G -->|streaming quotes + realtime bars| J
+    D -->|historical/options fallback paths| K
+    G -->|quote + valuation fallback| K
+    G -->|optional quote fallback| L
+    D -->|historical fallback| M
+    G -->|quote + fundamentals fallback| M
 ```
+
+- The Rust/Tauri host is the process supervisor. It auto-starts the sidecar, watchlist worker, and valuation worker, exposes Tauri commands to the frontend, and watchdog-restarts the stack when health checks fail.
+- The React frontend does not talk to Python through IPC for market data. It uses direct `http://127.0.0.1:<port>` requests to the FastAPI sidecar, and separately uses Tauri APIs for window management, filesystem access, and desktop OAuth flow.
+- SQLite is the shared system of record for watchlists, snapshots, historical OHLCV caches, technical scores, options chains, manual portfolio data, and local response caches. Workspace/session settings are also mirrored in app-data files and browser storage for resilience.
 
 ---
 
