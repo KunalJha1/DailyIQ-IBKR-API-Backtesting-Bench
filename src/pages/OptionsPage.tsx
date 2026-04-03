@@ -203,9 +203,9 @@ function expirationMonthMinWidthPx(expirations: { label: string }[]): number {
 const CENTER_W = 260;
 
 function SideMetrics({
-  side, isCall, itm: _itm, cols, strike, underlyingPrice, maxVolume,
+  side, isCall, cols, strike, underlyingPrice, maxVolume,
 }: {
-  side: OptionSide | null; isCall: boolean; itm: boolean;
+  side: OptionSide | null; isCall: boolean;
   cols: ColDef[]; strike: number; underlyingPrice: number | null; maxVolume: number;
 }) {
   const itmBg = "";
@@ -452,10 +452,6 @@ function OptionsPage() {
 
   const callCols = useMemo(() => getOrderedCols(CALL_COL_IDS, visibleCols), [visibleCols]);
   const putCols  = useMemo(() => getOrderedCols(PUT_COL_IDS, visibleCols), [visibleCols]);
-  const _fullTableWidth = useMemo(
-    () => totalWidth(callCols) + CENTER_W + totalWidth(putCols),
-    [callCols, putCols],
-  );
   const underlyingPrice = summary?.underlyingPrice ?? null;
 
   const maxVolume = useMemo(() => {
@@ -768,8 +764,7 @@ function OptionsPage() {
                     const atm = isAtmRow(row.strike);
                     const callItm = row.call?.inTheMoney === true;
                     const putItm  = row.put?.inTheMoney === true;
-                    const _callVolPct = row.call?.volume && maxVolume > 0 ? Math.min((row.call.volume / maxVolume) * 100, 100) : 0;
-                    const _putVolPct  = row.put?.volume  && maxVolume > 0 ? Math.min((row.put.volume  / maxVolume) * 100, 100) : 0;
+
                     const midIv = row.call?.impliedVolatility ?? row.put?.impliedVolatility;
                     return (
                       <div key={row.strike}>
@@ -804,7 +799,7 @@ function OptionsPage() {
                           })()}
                           <div className={`flex flex-1 justify-end ${callItm ? "bg-[#00C853]/[0.07]" : ""}`} style={{ minWidth: totalWidth(callCols) }}>
                             <SideMetrics
-                              side={row.call} isCall={true} itm={callItm}
+                              side={row.call} isCall={true}
                               cols={callCols} strike={row.strike}
                               underlyingPrice={underlyingPrice} maxVolume={maxVolume}
                             />
@@ -827,7 +822,7 @@ function OptionsPage() {
                           </div>
                           <div className={`flex flex-1 justify-start ${putItm ? "bg-[#FF3D71]/[0.07]" : ""}`} style={{ minWidth: totalWidth(putCols) }}>
                             <SideMetrics
-                              side={row.put} isCall={false} itm={putItm}
+                              side={row.put} isCall={false}
                               cols={putCols} strike={row.strike}
                               underlyingPrice={underlyingPrice} maxVolume={maxVolume}
                             />
