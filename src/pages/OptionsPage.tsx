@@ -223,7 +223,7 @@ function sideKey(s: OptionSide | null): string {
 const SideMetrics = memo(function SideMetrics({
   side, isCall, itm, cols, strike, underlyingPrice, maxVolume,
 }: {
-  side: OptionSide | null; isCall: boolean; itm: boolean;
+  side: OptionSide | null; isCall: boolean;
   cols: ColDef[]; strike: number; underlyingPrice: number | null; maxVolume: number;
 }) {
   const itmBg = "";
@@ -1031,8 +1031,7 @@ function OptionsPage() {
                     const atm = isAtmRow(row.strike);
                     const callItm = row.call?.inTheMoney === true;
                     const putItm  = row.put?.inTheMoney === true;
-                    const callVolPct = row.call?.volume && maxVolume > 0 ? Math.min((row.call.volume / maxVolume) * 100, 100) : 0;
-                    const putVolPct  = row.put?.volume  && maxVolume > 0 ? Math.min((row.put.volume  / maxVolume) * 100, 100) : 0;
+
                     const midIv = row.call?.impliedVolatility ?? row.put?.impliedVolatility;
 
                     // Analytics highlights
@@ -1093,7 +1092,7 @@ function OptionsPage() {
                             style={{ minWidth: totalWidth(callCols), borderLeft: isCoveredCall ? "2px solid rgba(245,158,11,0.5)" : undefined }}
                           >
                             <SideMetrics
-                              side={row.call} isCall={true} itm={callItm}
+                              side={row.call} isCall={true}
                               cols={callCols} strike={row.strike}
                               underlyingPrice={underlyingPrice} maxVolume={maxVolume}
                             />
@@ -1138,7 +1137,7 @@ function OptionsPage() {
                               );
                             })()}
                             <SideMetrics
-                              side={row.put} isCall={false} itm={putItm}
+                              side={row.put} isCall={false}
                               cols={putCols} strike={row.strike}
                               underlyingPrice={underlyingPrice} maxVolume={maxVolume}
                             />

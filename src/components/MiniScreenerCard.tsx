@@ -197,7 +197,6 @@ function MiniScreenerCard({
   const [sortKey, setSortKey] = useState<SortKey>("verdict");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colPickerOpen, setColPickerOpen] = useState(false);
-  const [search, setSearch] = useState("");
   const [symbolModalOpen, setSymbolModalOpen] = useState(false);
   const [filterType, setFilterType] = useState<MiniFilterType>(() => {
     const stored = localStorage.getItem(MINI_SCREENER_FILTER_KEY);
@@ -276,7 +275,7 @@ function MiniScreenerCard({
     if (filterType === "custom") return customSymbols;
     return tiles.map((t) => t.symbol);
   }, [filterType, watchlistSymbols, customSymbols, tiles]);
-  const technicals = useTechScores(scoreSymbols, TA_SCORE_TIMEFRAMES);
+  const technicals = useTechScores(scoreSymbols, TA_SCORE_TIMEFRAMES as unknown as string[]);
 
   useEffect(() => {
     const sortStillVisible =
@@ -478,12 +477,8 @@ function MiniScreenerCard({
       }
     });
 
-    if (search.trim()) {
-      const q = search.trim().toUpperCase();
-      return filtered.filter((r) => r.symbol.includes(q) || r.name?.toUpperCase().includes(q));
-    }
     return filtered;
-  }, [tiles, technicals, visibleTimeframes, sortDir, sortKey, search, filterType, watchlistSymbols, customSymbols]);
+  }, [tiles, technicals, visibleTimeframes, sortDir, sortKey, filterType, watchlistSymbols, customSymbols]);
 
   const gridTemplateColumns = useMemo(
     () =>
