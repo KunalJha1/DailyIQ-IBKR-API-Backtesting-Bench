@@ -7,7 +7,7 @@ import {
   useMemo,
   memo,
 } from "react";
-import { DollarSign, List, BarChart2, Briefcase, SlidersHorizontal, LayoutGrid, Activity } from "lucide-react";
+import { DollarSign, List, BarChart2, Briefcase, SlidersHorizontal, LayoutGrid, Activity, TrendingUp } from "lucide-react";
 import DashboardToolbar from "../components/DashboardToolbar";
 import GridLayout from "../components/GridLayout";
 import QuoteCard from "../components/QuoteCard";
@@ -17,6 +17,7 @@ import MiniChart from "../chart/components/MiniChart";
 import MiniScreenerCard from "../components/MiniScreenerCard";
 import MiniHeatmapCard from "../components/MiniHeatmapCard";
 import LiquiditySweepDetectorCard from "../components/LiquiditySweepDetectorCard";
+import OptionsSnapshotCard from "../components/OptionsSnapshotCard";
 import { useTabs } from "../lib/tabs";
 import { useLayout } from "../lib/layout";
 import type { LayoutComponent } from "../lib/layout-types";
@@ -35,7 +36,8 @@ const COMPONENT_TYPES = [
   { type: "ibkr-portfolio", label: "Portfolio", defaultW: 8, defaultH: 12, icon: Briefcase },
   { type: "mini-screener", label: "Mini Screener", defaultW: 6, defaultH: 10, icon: SlidersHorizontal },
   { type: "mini-heatmap", label: "Mini Heatmap", defaultW: 6, defaultH: 10, icon: LayoutGrid },
-  { type: "liquidity-sweep-detector", label: "Liquidity Sweep Detector", defaultW: 5, defaultH: 9, icon: Activity },
+  { type: "liquidity-sweep-detector", label: "Liquidity Sweep Detector", defaultW: 5, defaultH: 9,  icon: Activity   },
+  { type: "options-snapshot",          label: "Options Snapshot",          defaultW: 4, defaultH: 11, icon: TrendingUp  },
 ] as const;
 
 /** Debounce workspace `updateComponent` for MiniChart; localStorage stays immediate. */
@@ -332,6 +334,7 @@ function DashboardPageComponent(_props: { tabId?: string }) {
         "mini-screener": {},
         "mini-heatmap": {},
         "liquidity-sweep-detector": { symbols: [], timeframe: "15m", lookbackBars: 3 },
+        "options-snapshot": {},
       };
 
       addComponent(activeTabId, type, {
@@ -435,6 +438,16 @@ function DashboardPageComponent(_props: { tabId?: string }) {
         case "liquidity-sweep-detector":
           return (
             <LiquiditySweepDetectorCard
+              linkChannel={comp.linkChannel}
+              onSetLinkChannel={getSetLinkChannel(comp.id)}
+              onClose={getOnClose(comp.id)}
+              config={comp.config}
+              onConfigChange={getOnConfigChange(comp.id)}
+            />
+          );
+        case "options-snapshot":
+          return (
+            <OptionsSnapshotCard
               linkChannel={comp.linkChannel}
               onSetLinkChannel={getSetLinkChannel(comp.id)}
               onClose={getOnClose(comp.id)}

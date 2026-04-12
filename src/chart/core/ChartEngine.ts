@@ -227,8 +227,12 @@ export class ChartEngine {
     this.viewport.setRightOffsetBars(this.computeRightOffsetBars());
     this.viewport.setTotalBars(bars.length);
     this.recomputeIndicators(false);
-    if (wasNearEnd && bars.length > prevLength) {
-      this.viewport.scrollToEndImmediate();
+    if (bars.length > prevLength) {
+      const shouldFollow = wasNearEnd ||
+        (this.liveMode && this.viewport.isAtOrAnimatingToEnd());
+      if (shouldFollow) {
+        this.viewport.scrollToEnd();
+      }
     }
     this.markDirty();
   }
@@ -253,8 +257,12 @@ export class ChartEngine {
 
     this.recomputeIndicators(true, changeOffset);
 
-    if (wasNearEnd && bars.length > prevLength) {
-      this.viewport.scrollToEndImmediate();
+    if (bars.length > prevLength) {
+      const shouldFollow = wasNearEnd ||
+        (this.liveMode && this.viewport.isAtOrAnimatingToEnd());
+      if (shouldFollow) {
+        this.viewport.scrollToEnd();
+      }
     }
 
     this.dirty = true;

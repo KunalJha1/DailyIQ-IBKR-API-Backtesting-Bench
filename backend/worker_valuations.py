@@ -165,6 +165,32 @@ async def worker_loop() -> None:
         await asyncio.sleep(max(1.0, sleep_s))
 
 
+def _start_parent_watchdog() -> None:
+    """Self-terminate if the Tauri host process disappears."""
+    import os
+    parent_pid = int(os.environ.get("DAILYIQ_PARENT_PID", 0))
+    if not parent_pid:
+        return
+    import threading
+    try:
+        import psutil as _psutil
+    except ImportError:
+        logger.warning("psutil not installed — parent-death watchdog disabled")
+        return
+
+    def _watch() -> None:
+        while True:
+            try:
+                if not _psutil.pid_exists(parent_pid):
+                    logger.info("Parent process %d gone — valuation worker shutting down", parent_pid)
+                    os._exit(0)
+            except Exception:
+                pass
+            threading.Event().wait(3)
+
+    threading.Thread(target=_watch, daemon=True, name="parent-watchdog").start()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Standalone valuation worker")
     parser.add_argument(
@@ -173,6 +199,7 @@ def main() -> None:
         help="Run the long-lived scheduler loop instead of a one-shot valuation cycle.",
     )
     args = parser.parse_args()
+    _start_parent_watchdog()
     if args.loop:
         asyncio.run(worker_loop())
         return

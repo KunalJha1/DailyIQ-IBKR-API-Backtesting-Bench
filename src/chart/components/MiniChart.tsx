@@ -1705,10 +1705,12 @@ export default function MiniChart({
         </div>
       )}
 
-      {/* Toolbar: symbol on the left, controls on the right — data-no-drag so dashboard GridLayout does not start a widget drag from gaps / menu surfaces (was breaking indicator clicks e.g. MACD). */}
+      {/* Toolbar: symbol on the left, controls on the right.
+          The outer div is intentionally NOT data-no-drag — the symbol/price area on the left
+          is the drag handle for GridLayout moves. The right controls div is data-no-drag to
+          prevent accidental drags from button/menu surfaces. */}
       <div
         className="flex h-9 shrink-0 select-none items-center justify-between border-b border-white/[0.10] bg-base px-2"
-        data-no-drag
       >
         {/* Left: search + symbol + price */}
         <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
@@ -1762,7 +1764,7 @@ export default function MiniChart({
         </div>
 
         {/* Right: timeframes + chart tools + window controls + link */}
-        <div className="flex items-center gap-0.5 shrink-0">
+        <div className="flex items-center gap-0.5 shrink-0" data-no-drag>
           {!toolbarCollapsed && (<>
           {/* Timeframe buttons */}
           {MINI_TIMEFRAMES.map((tf) => (

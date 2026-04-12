@@ -288,6 +288,17 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
             expires_at INTEGER NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS heatmap_groups (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            type        TEXT NOT NULL,
+            etf_symbol  TEXT,
+            symbols     TEXT,
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        )
+    """)
     conn.commit()
 
 

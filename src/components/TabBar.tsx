@@ -5,8 +5,31 @@ import {
   useEffect,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { X, Plus } from "lucide-react";
+import {
+  X,
+  Plus,
+  LayoutDashboard,
+  Search,
+  BarChart2,
+  Layers,
+  History,
+  Cpu,
+  Grid3X3,
+  TrendingUp,
+  type LucideIcon,
+} from "lucide-react";
 import { useTabs, tabPresets, type TabType } from "../lib/tabs";
+
+const TAB_TYPE_ICONS: Record<TabType, LucideIcon> = {
+  dashboard: LayoutDashboard,
+  screener: Search,
+  chart: BarChart2,
+  options: Layers,
+  backtest: History,
+  simulations: Cpu,
+  heatmap: Grid3X3,
+  bias: TrendingUp,
+};
 import TabContextMenu from "./TabContextMenu";
 import { invoke } from "@tauri-apps/api/tauri";
 import { isTauriRuntime } from "../lib/platform";
@@ -205,6 +228,7 @@ export default function TabBar() {
         y: screenY - 16,
         width: 1200,
         height: 800,
+        maximized: true,
       });
       console.info("[detach] detached tab window created", detachedInfo);
       spawned = true;
@@ -524,15 +548,19 @@ export default function TabBar() {
           className="fixed z-[100] min-w-[160px] rounded-md border border-white/[0.08] bg-[#1C2128] py-1 shadow-xl shadow-black/40"
           style={{ left: addPos.x, top: addPos.y }}
         >
-          {tabPresets.map((preset) => (
-            <button
-              key={preset.type}
-              onClick={() => handleAddTab(preset.type)}
-              className="block w-full px-3 py-1.5 text-left text-[11px] text-white/60 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/80"
-            >
-              {preset.title}
-            </button>
-          ))}
+          {tabPresets.map((preset) => {
+            const Icon = TAB_TYPE_ICONS[preset.type];
+            return (
+              <button
+                key={preset.type}
+                onClick={() => handleAddTab(preset.type)}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-white/60 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/80"
+              >
+                <Icon className="h-3 w-3 shrink-0 text-white/30" strokeWidth={1.5} />
+                {preset.title}
+              </button>
+            );
+          })}
           <div className="mx-2 my-1 h-px bg-white/[0.06]" />
           <button
             onClick={() => { void handleOpenTestWindow(); }}
@@ -547,10 +575,20 @@ export default function TabBar() {
         <TabContextMenu
           x={menu.x}
           y={menu.y}
+          canDetach={canDetachTab(menu.tabId)}
           onRename={() => startRename(menu.tabId)}
           onDuplicate={() => {
             duplicateTab(menu.tabId);
             setMenu(null);
+          }}
+          onDetach={() => {
+            const tabIndex = tabs.findIndex((t) => t.id === menu.tabId);
+            const mx = menu.x;
+            const my = menu.y;
+            setMenu(null);
+            if (tabIndex !== -1) {
+              void triggerTearOff(tabIndex, window.screenX + mx, window.screenY + my);
+            }
           }}
           onClose={() => setMenu(null)}
         />

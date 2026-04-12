@@ -5,6 +5,7 @@ import {
   useCallback,
   useMemo,
   memo,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { useSidecarPort } from "../lib/tws";
 import { useWatchlist } from "../lib/watchlist";
@@ -104,7 +105,71 @@ type FilterType =
 
 const SCREENER_CUSTOM_STORAGE_KEY = "dailyiq.screener.customSymbols";
 const SCREENER_VISIBLE_TFS_STORAGE_KEY = "dailyiq.screener.visibleTimeframes";
+const SCREENER_COL_WIDTHS_KEY = "dailyiq.screener.columnWidths";
 const CUSTOM_SYMBOL_INPUT_LIMIT = 100;
+
+/** Resizable column widths (Market Screener table). TA timeframe columns share `ta`. */
+interface ScreenerColWidths {
+  symbol: number;
+  mcap: number;
+  pe: number;
+  fpe: number;
+  change: number;
+  w52: number;
+  ta: number;
+  sentiment: number;
+  verdict: number;
+}
+
+const MIN_SCREENER_COL_WIDTHS: ScreenerColWidths = {
+  symbol: 168,
+  mcap: 76,
+  pe: 52,
+  fpe: 64,
+  change: 100,
+  w52: 128,
+  ta: 50,
+  sentiment: 48,
+  verdict: 104,
+};
+
+const DEFAULT_SCREENER_COL_WIDTHS: ScreenerColWidths = {
+  symbol: 228,
+  mcap: 96,
+  pe: 68,
+  fpe: 80,
+  change: 120,
+  w52: 156,
+  ta: 56,
+  sentiment: 60,
+  verdict: 128,
+};
+
+function loadStoredColWidths(): ScreenerColWidths {
+  const out = { ...DEFAULT_SCREENER_COL_WIDTHS };
+  try {
+    const raw = localStorage.getItem(SCREENER_COL_WIDTHS_KEY);
+    if (!raw) return out;
+    const p = JSON.parse(raw) as Record<string, unknown>;
+    (Object.keys(out) as (keyof ScreenerColWidths)[]).forEach((k) => {
+      const v = p[k];
+      if (typeof v === "number" && Number.isFinite(v)) {
+        out[k] = Math.max(MIN_SCREENER_COL_WIDTHS[k], Math.round(v));
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+function persistColWidths(w: ScreenerColWidths) {
+  try {
+    localStorage.setItem(SCREENER_COL_WIDTHS_KEY, JSON.stringify(w));
+  } catch {
+    /* ignore */
+  }
+}
 
 function loadStoredCustomSymbols(): string[] {
   try {
@@ -170,6 +235,16 @@ const MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"];
 const VISIBLE_BATCH = 30;
 const DATA_POLL_MS = 5000;
 
+/** Ticker metadata uses sector "ETF" for exchange-traded funds (see backend `load_enabled_symbols_with_etfs`). */
+function dailyiqInstrumentHref(sector: string, symbol: string): string {
+  const tick = symbol.trim().toUpperCase();
+  const path = encodeURIComponent(tick);
+  const isEtf = sector.trim().toUpperCase() === "ETF";
+  return isEtf
+    ? `https://dailyiq.me/etf/${path}`
+    : `https://dailyiq.me/stock/${path}`;
+}
+
 // ── Verdict logic (average of visible tech scores) ───────────────────
 
 function getVerdict(score: number | null): {
@@ -198,6 +273,27 @@ function SortArrow({ active, dir }: { active: boolean; dir: SortDir }) {
     <span className="ml-1 text-[10px] text-blue">
       {dir === "asc" ? "↑" : "↓"}
     </span>
+  );
+}
+
+/** Drag the gutter to resize; `translate-x-1/2` keeps the hit target on the column boundary. */
+function ColResizeHandle({
+  onMouseDownResize,
+}: {
+  onMouseDownResize: (e: ReactMouseEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      title="Drag to resize column"
+      className="absolute right-0 top-0 z-20 h-full w-2 translate-x-1/2 cursor-col-resize hover:bg-blue/20"
+      onMouseDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onMouseDownResize(e);
+      }}
+    />
   );
 }
 
@@ -256,30 +352,36 @@ const ScreenerTableRow = memo(function ScreenerTableRow({
   visibleTfs,
   getTechScoreForTf,
   verdictScore,
+  colWidths,
 }: {
   row: ScreenerRow;
   visibleTfs: TaScoreTimeframe[];
   getTechScoreForTf: (row: ScreenerRow, tf: TaScoreTimeframe) => number | null;
   verdictScore: number | null;
+  colWidths: ScreenerColWidths;
 }) {
   const isUp = (row.changePct ?? 0) >= 0;
   const verdict = getVerdict(verdictScore);
+  const tw = (w: number) => ({ width: w, minWidth: w, maxWidth: w });
 
   return (
-    <tr className="border-b border-white/[0.06] bg-panel/70 transition-colors duration-[80ms] odd:bg-panel even:bg-base/80 hover:bg-white/[0.04]">
+    <tr
+      className="group cursor-pointer border-b border-white/[0.06] bg-panel/70 transition-colors duration-[80ms] odd:bg-panel even:bg-base/80 hover:bg-white/[0.04]"
+      onClick={() => window.open(dailyiqInstrumentHref(row.sector, row.symbol), "_blank", "noopener,noreferrer")}
+    >
       {/* Symbol */}
-      <td className="w-[200px] min-w-[200px] px-3 py-2">
-        <div className="flex items-center gap-2.5">
+      <td className="min-w-0 px-3 py-2 align-top" style={tw(colWidths.symbol)}>
+        <div className="flex min-w-0 items-start gap-2.5">
           <SymbolLogo symbol={row.symbol} />
-          <div className="min-w-0 flex-1">
-            <p className="font-mono text-[15px] font-semibold leading-none text-white/90">
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <p className="truncate font-mono text-[15px] font-semibold leading-none text-white/90 transition-colors duration-[120ms] group-hover:text-blue">
               {row.symbol}
             </p>
-            <p className="mt-0.5 text-[13px] leading-none text-white">
+            <p className="mt-0.5 truncate text-[13px] leading-snug text-white/85" title={row.name}>
               {row.name}
             </p>
             {row.sector && (
-              <p className="mt-0.5 text-[12px] leading-none text-white/60">
+              <p className="mt-0.5 truncate text-[12px] leading-snug text-white/55" title={row.sector}>
                 {row.sector}
               </p>
             )}
@@ -288,27 +390,36 @@ const ScreenerTableRow = memo(function ScreenerTableRow({
       </td>
 
       {/* Market Cap */}
-      <td className="px-2 py-2 text-center font-mono text-[13px] text-white">
-        {formatMarketCap(row.marketCap)}
+      <td
+        className="min-w-0 overflow-hidden px-2 py-2 text-center font-mono text-[13px] text-white"
+        style={tw(colWidths.mcap)}
+      >
+        <span className="block truncate">{formatMarketCap(row.marketCap)}</span>
       </td>
 
       {/* Trailing P/E */}
-      <td className="px-2 py-2 text-center font-mono text-[13px] text-white">
+      <td
+        className="min-w-0 overflow-hidden px-2 py-2 text-center font-mono text-[13px] text-white"
+        style={tw(colWidths.pe)}
+      >
         {row.trailingPE != null ? row.trailingPE.toFixed(1) : "—"}
       </td>
 
       {/* Forward P/E */}
-      <td className="px-2 py-2 text-center font-mono text-[13px] text-white">
+      <td
+        className="min-w-0 overflow-hidden px-2 py-2 text-center font-mono text-[13px] text-white"
+        style={tw(colWidths.fpe)}
+      >
         {row.forwardPE != null ? row.forwardPE.toFixed(1) : "—"}
       </td>
 
       {/* Price / Change */}
-      <td className="px-2 py-2 text-right">
-        <p className="font-mono text-[15px] font-medium text-white/90">
+      <td className="min-w-0 overflow-hidden px-2 py-2 text-right align-top" style={tw(colWidths.change)}>
+        <p className="truncate font-mono text-[15px] font-medium text-white/90">
           {row.last != null ? `$${row.last.toFixed(2)}` : "—"}
         </p>
         <p
-          className={`mt-0.5 font-mono text-[13px] ${
+          className={`mt-0.5 truncate font-mono text-[13px] ${
             isUp ? "text-green" : "text-red"
           }`}
         >
@@ -319,9 +430,9 @@ const ScreenerTableRow = memo(function ScreenerTableRow({
       </td>
 
       {/* 52W H/L */}
-      <td className="px-2 py-2 text-center">
+      <td className="min-w-0 overflow-hidden px-2 py-2 text-center align-top" style={tw(colWidths.w52)}>
         {row.week52High != null || row.week52Low != null ? (
-          <div className="font-mono text-[12px] leading-relaxed text-white">
+          <div className="whitespace-nowrap font-mono text-[12px] leading-relaxed text-white">
             <span className="text-white/50">H</span>{" "}
             {row.week52High != null ? `$${row.week52High.toFixed(2)}` : "—"}
             <span className="mx-1 text-white/25">|</span>
@@ -335,20 +446,21 @@ const ScreenerTableRow = memo(function ScreenerTableRow({
 
       {/* Technical Score columns — one per visible timeframe */}
       {visibleTfs.map((tf) => (
-        <td key={tf} className="px-1 py-2" align="center">
+        <td key={tf} className="min-w-0 overflow-hidden px-1 py-2 align-middle" align="center" style={tw(colWidths.ta)}>
           <CircularGauge score={getTechScoreForTf(row, tf)} size={36} />
         </td>
       ))}
 
       {/* Sentiment */}
-      <td className="px-1 py-2" align="center">
+      <td className="min-w-0 overflow-hidden px-1 py-2 align-middle" align="center" style={tw(colWidths.sentiment)}>
         <CircularGauge score={row.sentimentScore} size={36} />
       </td>
 
       {/* Verdict */}
-      <td className="px-2 py-2" align="center">
+      <td className="min-w-0 overflow-hidden px-2 py-2 align-middle" align="center" style={{ minWidth: colWidths.verdict }}>
         <span
-          className={`inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 font-mono text-[12px] font-semibold tracking-wide ${verdict.cls}`}
+          className={`inline-block max-w-full truncate rounded-full px-2.5 py-0.5 text-center font-mono text-[12px] font-semibold tracking-wide ${verdict.cls}`}
+          title={verdict.label}
         >
           {verdict.label}
         </span>
@@ -381,6 +493,45 @@ function ScreenerPage() {
   // Virtual scroll
   const [visibleCount, setVisibleCount] = useState(VISIBLE_BATCH);
   const sentinelRef = useRef<HTMLDivElement>(null);
+
+  const [colWidths, setColWidths] = useState<ScreenerColWidths>(() => loadStoredColWidths());
+
+  const screenerTableMinWidth = useMemo(
+    () =>
+      colWidths.symbol +
+      colWidths.mcap +
+      colWidths.pe +
+      colWidths.fpe +
+      colWidths.change +
+      colWidths.w52 +
+      colWidths.ta * visibleTfs.length +
+      colWidths.sentiment +
+      colWidths.verdict,
+    [colWidths, visibleTfs],
+  );
+
+  const handleColResizeMouseDown = (key: keyof ScreenerColWidths, e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = colWidths[key];
+    const minW = MIN_SCREENER_COL_WIDTHS[key];
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX;
+      const next = Math.max(minW, Math.round(startW + dx));
+      setColWidths((prev) => ({ ...prev, [key]: next }));
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      setColWidths((prev) => {
+        persistColWidths(prev);
+        return prev;
+      });
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
 
   // ── Data fetching ────────────────────────────────────────────────
 
@@ -826,94 +977,121 @@ function ScreenerPage() {
           )}
         </div>
 
-        {/* Table */}
+        {/* Table — fixed layout + min widths prevent cell overlap; drag column edges to resize (persisted). */}
         <div className="min-h-0 flex-1 overflow-auto scrollbar-dark">
-          <table className="w-full border-collapse">
+          <table
+            className="border-collapse"
+            style={{
+              tableLayout: "fixed",
+              width: "100%",
+              minWidth: `${screenerTableMinWidth}px`,
+            }}
+          >
             <thead className="sticky top-0 z-10 bg-[#131925]">
               <tr className="border-b border-white/[0.06]">
               <th
-                className="w-[200px] min-w-[200px] cursor-pointer px-3 py-2 text-left"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-3 py-2 text-left"
+                style={{ width: colWidths.symbol, minWidth: colWidths.symbol, maxWidth: colWidths.symbol }}
                 onClick={() => handleSort("symbol")}
               >
-                <span className="flex items-center font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="flex min-w-0 items-center truncate pr-1 font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   Symbol
                   <SortArrow active={sortKey === "symbol"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("symbol", e)} />
               </th>
               <th
-                className="cursor-pointer px-2 py-2 text-center"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-2 py-2 text-center"
+                style={{ width: colWidths.mcap, minWidth: colWidths.mcap, maxWidth: colWidths.mcap }}
                 onClick={() => handleSort("mcap")}
               >
-                <span className="inline-flex items-center font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="inline-flex min-w-0 max-w-full items-center truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   Mkt Cap
                   <SortArrow active={sortKey === "mcap"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("mcap", e)} />
               </th>
               <th
-                className="cursor-pointer px-2 py-2 text-center"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-2 py-2 text-center"
+                style={{ width: colWidths.pe, minWidth: colWidths.pe, maxWidth: colWidths.pe }}
                 onClick={() => handleSort("pe")}
               >
-                <span className="inline-flex items-center font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="inline-flex min-w-0 max-w-full items-center truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   P/E
                   <SortArrow active={sortKey === "pe"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("pe", e)} />
               </th>
               <th
-                className="cursor-pointer px-2 py-2 text-center"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-2 py-2 text-center"
+                style={{ width: colWidths.fpe, minWidth: colWidths.fpe, maxWidth: colWidths.fpe }}
                 onClick={() => handleSort("fpe")}
               >
-                <span className="inline-flex items-center font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="inline-flex min-w-0 max-w-full items-center truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   Fwd P/E
                   <SortArrow active={sortKey === "fpe"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("fpe", e)} />
               </th>
               <th
-                className="cursor-pointer px-2 py-2 text-right"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-2 py-2 text-right"
+                style={{ width: colWidths.change, minWidth: colWidths.change, maxWidth: colWidths.change }}
                 onClick={() => handleSort("change")}
               >
-                <span className="inline-flex items-center font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="inline-flex min-w-0 max-w-full items-center justify-end truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   Price / Chg
                   <SortArrow active={sortKey === "change"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("change", e)} />
               </th>
-              <th className="px-2 py-2 text-center">
-                <span className="font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+              <th
+                className="relative min-w-0 overflow-hidden px-2 py-2 text-center"
+                style={{ width: colWidths.w52, minWidth: colWidths.w52, maxWidth: colWidths.w52 }}
+              >
+                <span className="block truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   52W H / L
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("w52", e)} />
               </th>
 
               {/* One column header per visible tech timeframe */}
               {visibleTfs.map((tf) => (
                 <th
                   key={tf}
-                  className="cursor-pointer px-1 py-2 text-center"
+                  className="relative min-w-0 cursor-pointer overflow-hidden px-1 py-2 text-center"
+                  style={{ width: colWidths.ta, minWidth: colWidths.ta, maxWidth: colWidths.ta }}
                   onClick={() => handleSort(`tech_${tf}`)}
                 >
-                  <span className="inline-flex items-center gap-1 font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                  <span className="inline-flex min-w-0 max-w-full items-center justify-center gap-1 truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                     {TA_SCORE_TF_LABELS[tf]}
                     <SortArrow active={sortKey === `tech_${tf}`} dir={sortDir} />
                   </span>
+                  <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("ta", e)} />
                 </th>
               ))}
 
               <th
-                className="cursor-pointer px-1 py-2 text-center"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-1 py-2 text-center"
+                style={{ width: colWidths.sentiment, minWidth: colWidths.sentiment, maxWidth: colWidths.sentiment }}
                 onClick={() => handleSort("sentiment")}
               >
-                <span className="inline-flex items-center gap-1 font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="inline-flex min-w-0 max-w-full items-center justify-center gap-1 truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   Sentiment
                   <SortArrow active={sortKey === "sentiment"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("sentiment", e)} />
               </th>
 
               <th
-                className="cursor-pointer px-2 py-2 text-center"
+                className="relative min-w-0 cursor-pointer overflow-hidden px-2 py-2 text-center"
+                style={{ minWidth: colWidths.verdict }}
                 onClick={() => handleSort("verdict")}
               >
-                <span className="inline-flex items-center font-mono text-[12px] uppercase tracking-[0.14em] text-white">
+                <span className="inline-flex min-w-0 max-w-full items-center justify-center truncate font-mono text-[12px] uppercase tracking-[0.14em] text-white">
                   Verdict
                   <SortArrow active={sortKey === "verdict"} dir={sortDir} />
                 </span>
+                <ColResizeHandle onMouseDownResize={(e) => handleColResizeMouseDown("verdict", e)} />
               </th>
             </tr>
           </thead>
@@ -929,6 +1107,7 @@ function ScreenerPage() {
                     visibleTfs={visibleTfs}
                     getTechScoreForTf={getTechScoreForTf}
                     verdictScore={getVerdictScore(row)}
+                    colWidths={colWidths}
                   />
                 ))}
           </tbody>

@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { appWindow } from "@tauri-apps/api/window";
 import { checkUpdate, installUpdate } from "@tauri-apps/api/updater";
 import { relaunch } from "@tauri-apps/api/process";
+import { invoke } from "@tauri-apps/api/tauri";
 import { useAuth } from "../lib/auth";
 import { useTabs, type TabType } from "../lib/tabs";
 import { useTws } from "../lib/tws";
@@ -101,6 +102,9 @@ export default function Dashboard() {
   async function handleApplyUpdate() {
     setUpdateInstalling(true);
     try {
+      // Kill sidecars first to release Windows file locks before NSIS runs
+      await invoke("kill_sidecar").catch(() => {});
+      await new Promise(r => setTimeout(r, 800));
       await installUpdate();
       await relaunch();
     } catch {

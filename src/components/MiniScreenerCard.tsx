@@ -69,20 +69,20 @@ interface BuiltInColumnDef {
 }
 
 const BUILT_IN_COLUMNS: BuiltInColumnDef[] = [
-  { id: "symbol", label: "Symbol", width: 160, minWidth: 120, sortKey: "symbol", defaultVisible: true },
-  { id: "priceChange", label: "Price / Chg", width: 108, minWidth: 88, sortKey: "change", defaultVisible: true },
-  { id: "mcap", label: "Mkt Cap", width: 96, minWidth: 72, sortKey: "mcap", defaultVisible: true },
-  { id: "sentiment", label: "Sentiment", width: 88, minWidth: 68, sortKey: "sentiment", defaultVisible: true },
-  { id: "pe", label: "P/E", width: 76, minWidth: 60, sortKey: "pe", defaultVisible: false },
-  { id: "fpe", label: "Fwd P/E", width: 82, minWidth: 64, sortKey: "fpe", defaultVisible: false },
-  { id: "week52", label: "52W H / L", width: 108, minWidth: 84, defaultVisible: false },
-  { id: "verdict", label: "Verdict", width: 104, minWidth: 90, sortKey: "verdict", defaultVisible: true },
+  { id: "symbol", label: "Symbol", width: 176, minWidth: 128, sortKey: "symbol", defaultVisible: true },
+  { id: "priceChange", label: "Price / Chg", width: 116, minWidth: 92, sortKey: "change", defaultVisible: true },
+  { id: "mcap", label: "Mkt Cap", width: 100, minWidth: 76, sortKey: "mcap", defaultVisible: true },
+  { id: "sentiment", label: "Sentiment", width: 92, minWidth: 72, sortKey: "sentiment", defaultVisible: true },
+  { id: "pe", label: "P/E", width: 80, minWidth: 64, sortKey: "pe", defaultVisible: false },
+  { id: "fpe", label: "Fwd P/E", width: 86, minWidth: 68, sortKey: "fpe", defaultVisible: false },
+  { id: "week52", label: "52W H / L", width: 124, minWidth: 96, defaultVisible: false },
+  { id: "verdict", label: "Verdict", width: 124, minWidth: 108, sortKey: "verdict", defaultVisible: true },
 ];
 
 const BUILT_IN_COLUMN_MAP = new Map(BUILT_IN_COLUMNS.map((col) => [col.id, col] as const));
 const DEFAULT_VISIBLE_COLUMNS: ColumnId[] = ["symbol", "priceChange", "mcap", "sentiment", "ta:1d", "verdict"];
-const DEFAULT_TA_COL_WIDTH = 68;
-const MIN_TA_COL_WIDTH = 52;
+const DEFAULT_TA_COL_WIDTH = 58;
+const MIN_TA_COL_WIDTH = 50;
 
 function isColumnId(value: unknown): value is ColumnId {
   if (typeof value !== "string") return false;
@@ -690,7 +690,7 @@ function MiniScreenerCard({
         <div style={{ width: tableMinWidth, minWidth: "100%" }} className="min-h-full">
           <div
             className="grid shrink-0 items-center border-b border-white/[0.06] bg-[#0D1117]"
-            style={{ gridTemplateColumns }}
+            style={{ gridTemplateColumns, minWidth: tableMinWidth }}
           >
             {visibleColumns.map((col, ci) => {
               const isLast = ci === visibleColumns.length - 1;
@@ -707,7 +707,7 @@ function MiniScreenerCard({
                     }}
                     onMouseDown={(e) => startColumnDrag(col, e)}
                     onClick={() => handleSort(`tech_${tf}`)}
-                    className={`relative flex min-w-0 cursor-grab select-none items-center justify-center gap-1 truncate px-1 py-2 text-center font-mono text-[10px] font-medium uppercase tracking-wider transition-colors duration-75 hover:text-white ${
+                    className={`relative flex min-w-0 cursor-grab select-none items-center justify-center gap-0.5 truncate px-1 py-2 text-center font-mono text-[10px] font-medium uppercase tracking-wider transition-colors duration-75 hover:text-white ${
                       active ? "text-white" : "text-white/70"
                     } ${borderClass} ${colDragState?.colId === col ? "opacity-40" : ""}`}
                   >
@@ -720,7 +720,7 @@ function MiniScreenerCard({
                     <span>{TA_SCORE_TF_LABELS[tf]}</span>
                     {active && <span className="text-[9px] text-white/50">{sortDir === "asc" ? "▲" : "▼"}</span>}
                     <div
-                      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
+                      className="absolute right-0 top-0 z-30 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-blue/25"
                       onMouseDown={(e) => handleColumnResize(col, e)}
                       onClick={(e) => {
                         e.preventDefault();
@@ -742,7 +742,7 @@ function MiniScreenerCard({
                   }}
                   onMouseDown={(e) => startColumnDrag(col, e)}
                   onClick={() => handleSort(column?.sortKey)}
-                  className={`relative flex min-w-0 select-none items-center gap-1 truncate px-1.5 py-2 font-mono text-[10px] font-medium uppercase tracking-wider transition-colors duration-75 ${
+                  className={`relative flex min-w-0 select-none items-center gap-0.5 truncate px-1.5 py-2 font-mono text-[10px] font-medium uppercase tracking-wider transition-colors duration-75 ${
                     alignClass
                   } ${active ? "text-white" : "text-white/70"} ${borderClass} ${colDragState?.colId === col ? "opacity-40" : ""} ${
                     column?.sortKey ? "cursor-grab hover:text-white" : "cursor-grab hover:text-white/85"
@@ -758,7 +758,7 @@ function MiniScreenerCard({
                   <span className="truncate">{column?.label}</span>
                   {active && <span className="text-[9px] text-white/50">{sortDir === "asc" ? "▲" : "▼"}</span>}
                   <div
-                    className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue/[0.15]"
+                    className="absolute right-0 top-0 z-30 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-blue/25"
                     onMouseDown={(e) => handleColumnResize(col, e)}
                     onClick={(e) => {
                       e.preventDefault();
@@ -783,7 +783,7 @@ function MiniScreenerCard({
                 <div
                   key={row.symbol}
                   className="grid cursor-pointer items-center border-b border-white/[0.03] transition-colors duration-75 hover:bg-white/[0.06]"
-                  style={{ minHeight: ROW_HEIGHT, gridTemplateColumns }}
+                  style={{ minHeight: ROW_HEIGHT, gridTemplateColumns, minWidth: tableMinWidth }}
                   onClick={() => {
                     if (linkChannel) linkBus.publish(linkChannel, row.symbol);
                     onSymbolSelect?.(row.symbol);
@@ -796,11 +796,11 @@ function MiniScreenerCard({
                           <div className="shrink-0">
                             <SymbolLogo symbol={row.symbol} />
                           </div>
-                          <div className="min-w-0">
-                            <p className="font-mono text-[13px] font-semibold leading-tight text-white/90">
+                          <div className="min-w-0 flex-1 overflow-hidden">
+                            <p className="truncate font-mono text-[13px] font-semibold leading-tight text-white/90">
                               {row.symbol}
                             </p>
-                            <p className="mt-0.5 text-[11px] leading-snug text-white/60 break-words">
+                            <p className="mt-0.5 truncate text-[11px] leading-snug text-white/60" title={row.name}>
                               {row.name}
                             </p>
                           </div>
@@ -810,7 +810,7 @@ function MiniScreenerCard({
 
                     if (col === "priceChange") {
                       return (
-                        <div key={col} className="px-1.5 text-right">
+                        <div key={col} className="min-w-0 overflow-hidden px-1.5 text-right">
                           <p className="font-mono text-[12px] font-medium leading-tight text-white/85">
                             {row.last != null ? `$${row.last.toFixed(2)}` : "\u2014"}
                           </p>
@@ -823,15 +823,15 @@ function MiniScreenerCard({
 
                     if (col === "mcap") {
                       return (
-                        <div key={col} className="px-1.5 text-right font-mono text-[11px] text-white/80">
-                          {formatMarketCap(row.marketCap)}
+                        <div key={col} className="min-w-0 overflow-hidden px-1.5 text-right font-mono text-[11px] text-white/80">
+                          <span className="block truncate">{formatMarketCap(row.marketCap)}</span>
                         </div>
                       );
                     }
 
                     if (col === "sentiment") {
                       return (
-                        <div key={col} className="flex justify-center">
+                        <div key={col} className="flex min-w-0 justify-center overflow-hidden">
                           <CircularGauge score={row.sentimentScore ?? null} size={28} />
                         </div>
                       );
@@ -839,7 +839,7 @@ function MiniScreenerCard({
 
                     if (col === "pe") {
                       return (
-                        <div key={col} className="px-1.5 text-right font-mono text-[11px] text-white/80">
+                        <div key={col} className="min-w-0 overflow-hidden px-1.5 text-right font-mono text-[11px] text-white/80">
                           {row.trailingPE != null ? row.trailingPE.toFixed(1) : "\u2014"}
                         </div>
                       );
@@ -847,7 +847,7 @@ function MiniScreenerCard({
 
                     if (col === "fpe") {
                       return (
-                        <div key={col} className="px-1.5 text-right font-mono text-[11px] text-white/80">
+                        <div key={col} className="min-w-0 overflow-hidden px-1.5 text-right font-mono text-[11px] text-white/80">
                           {row.forwardPE != null ? row.forwardPE.toFixed(1) : "\u2014"}
                         </div>
                       );
@@ -855,18 +855,19 @@ function MiniScreenerCard({
 
                     if (col === "week52") {
                       return (
-                        <div key={col} className="px-1.5 text-right font-mono text-[11px] leading-tight text-white/80">
-                          <div>{row.week52High != null ? row.week52High.toFixed(0) : "\u2014"}</div>
-                          <div className="mt-0.5 text-white/55">{row.week52Low != null ? row.week52Low.toFixed(0) : "\u2014"}</div>
+                        <div key={col} className="min-w-0 overflow-hidden px-1.5 text-right font-mono text-[11px] leading-tight text-white/80">
+                          <div className="truncate">{row.week52High != null ? row.week52High.toFixed(0) : "\u2014"}</div>
+                          <div className="mt-0.5 truncate text-white/55">{row.week52Low != null ? row.week52Low.toFixed(0) : "\u2014"}</div>
                         </div>
                       );
                     }
 
                     if (col === "verdict") {
                       return (
-                        <div key={col} className="flex justify-center px-1">
+                        <div key={col} className="flex min-w-0 justify-center overflow-hidden px-1">
                           <span
-                            className={`inline-block max-w-full truncate rounded-full px-2.5 py-0.5 text-center font-mono text-[10px] font-semibold leading-tight ${verdict.cls}`}
+                            className={`inline-block max-w-full truncate rounded-full px-2 py-0.5 text-center font-mono text-[10px] font-semibold leading-tight ${verdict.cls}`}
+                            title={verdict.label}
                           >
                             {verdict.label}
                           </span>
@@ -878,7 +879,7 @@ function MiniScreenerCard({
                       const tf = col.slice(3) as TaScoreTimeframe;
                       const score = row.techScores[tf];
                       return (
-                        <div key={col} className="flex justify-center">
+                        <div key={col} className="flex min-w-0 justify-center overflow-hidden">
                           <CircularGauge score={score} size={30} />
                         </div>
                       );

@@ -168,6 +168,14 @@ export class Viewport {
     return this.startIndex + this.barsVisible > this.totalBars - 1;
   }
 
+  /** True if the viewport is currently at the live end OR a scroll animation is already targeting it. */
+  isAtOrAnimatingToEnd(): boolean {
+    const endStart = this.getDefaultEndStart();
+    const currentNear = this.startIndex >= endStart - 1;
+    const animNear = this.animTargetStart !== null && this.animTargetStart >= endStart - 1;
+    return currentNear || animNear;
+  }
+
   scrollToEnd() {
     this.animTargetStart = this.getDefaultEndStart();
     this.animScrollElapsed = 0;

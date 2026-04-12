@@ -611,7 +611,7 @@ function WatchlistCard({
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
-        const newW = Math.max(40, startWidth + dx);
+        const newW = Math.max(52, startWidth + dx);
         setCustomColumns((prev) =>
           prev.map((c) => (c.id === colId ? { ...c, width: newW } : c)),
         );

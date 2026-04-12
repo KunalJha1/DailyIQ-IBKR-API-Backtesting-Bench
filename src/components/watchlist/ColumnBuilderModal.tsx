@@ -111,7 +111,7 @@ export default function ColumnBuilderModal({
 
   const [kind, setKind] = useState<ColumnKind>(startKind);
   const [label, setLabel] = useState(editColumn?.label ?? defaultLabel(initialKind));
-  const [width, setWidth] = useState(editColumn?.width ?? 54);
+  const [width, setWidth] = useState(editColumn?.width ?? 76);
   const [decimals, setDecimals] = useState(editColumn?.decimals ?? 0);
   const [colorize, setColorize] = useState(editColumn?.colorize ?? true);
 

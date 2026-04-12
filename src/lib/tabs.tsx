@@ -8,7 +8,9 @@ import {
   useMemo,
   type ReactNode,
 } from "react";
+import { invoke } from "@tauri-apps/api/tauri";
 import { useLayout } from "./layout";
+import { isTauriRuntime } from "./platform";
 import {
   readAllDetachedTabInfo,
   readAllReattachRequests,
@@ -163,6 +165,29 @@ export function TabProvider({ children }: { children: ReactNode }) {
       initialDetached.set(info.windowLabel, info);
     }
     detachedTabsRef.current = initialDetached;
+
+    // Re-open detached windows that were open in the previous session
+    if (!isTauriRuntime() || initialDetached.size === 0) return;
+    for (const [, info] of initialDetached) {
+      void invoke("spawn_tab_window", {
+        label: info.windowLabel,
+        title: info.title,
+        tabId: info.tabId,
+        tabType: info.tabType,
+        originalIndex: info.originalIndex,
+        chartStateJson: info.chartStateJson ?? null,
+        x: info.windowX ?? 100,
+        y: info.windowY ?? 100,
+        width: info.windowWidth ?? 1200,
+        height: info.windowHeight ?? 800,
+        maximized: info.windowMaximized ?? true,
+      }).catch((err: unknown) => {
+        console.error("[detach] failed to re-spawn detached window", info.windowLabel, err);
+        // Remove stale entry if spawn failed (e.g. window label conflict)
+        removeDetachedTabInfo(info.windowLabel);
+        detachedTabsRef.current.delete(info.windowLabel);
+      });
+    }
   }, []);
 
   const insertTabAtIndex = useCallback((prev: Tab[], tab: Tab, index: number) => {

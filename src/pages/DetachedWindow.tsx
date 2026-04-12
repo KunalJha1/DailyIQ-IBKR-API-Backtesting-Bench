@@ -6,6 +6,7 @@ import {
   getDetachedLabel,
   readDetachedTabInfo,
   removeDetachedTabInfo,
+  updateDetachedWindowBounds,
   writeDetachedTabInfo,
   writeReattachRequest,
   isMainWindowClosing,
@@ -87,10 +88,23 @@ export default function DetachedWindow() {
       const fromUrl = readDetachedInfoFromUrl(label);
       if (fromUrl) {
         if (cancelled) return;
-        writeDetachedTabInfo(fromUrl);
-        appWindow.setTitle(fromUrl.title).catch(() => {});
-        console.info("[detached] bootstrapped from URL", fromUrl);
-        setInfo(fromUrl);
+        // Merge with existing localStorage entry to preserve saved bounds and chart state
+        const existing = readDetachedTabInfo(label);
+        const merged: DetachedTabInfo = existing
+          ? {
+              ...fromUrl,
+              chartStateJson: existing.chartStateJson ?? fromUrl.chartStateJson,
+              windowX: existing.windowX,
+              windowY: existing.windowY,
+              windowWidth: existing.windowWidth,
+              windowHeight: existing.windowHeight,
+              windowMaximized: existing.windowMaximized,
+            }
+          : fromUrl;
+        writeDetachedTabInfo(merged);
+        appWindow.setTitle(merged.title).catch(() => {});
+        console.info("[detached] bootstrapped from URL", merged);
+        setInfo(merged);
         setLoadError(null);
         return;
       }
@@ -140,15 +154,63 @@ export default function DetachedWindow() {
     };
   }, [label]);
 
+  // Continuously save window position and size so layout can be restored next session
+  useEffect(() => {
+    if (!info || !isTauriRuntime()) return;
+
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+    let unlistenMove: (() => void) | null = null;
+    let unlistenResize: (() => void) | null = null;
+
+    const saveBounds = async () => {
+      try {
+        const [pos, size, maximized, scale] = await Promise.all([
+          appWindow.outerPosition(),
+          appWindow.innerSize(),
+          appWindow.isMaximized(),
+          appWindow.scaleFactor(),
+        ]);
+        updateDetachedWindowBounds(label, {
+          x: pos.x / scale,
+          y: pos.y / scale,
+          width: size.width / scale,
+          height: size.height / scale,
+          maximized,
+        });
+      } catch {
+        // ignore — window may be mid-transition
+      }
+    };
+
+    const scheduleSave = () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => { void saveBounds(); }, 350);
+    };
+
+    void appWindow.onMoved(() => scheduleSave()).then((fn) => { unlistenMove = fn; });
+    void appWindow.onResized(() => scheduleSave()).then((fn) => { unlistenResize = fn; });
+    // Capture initial bounds (e.g. after re-spawn on startup)
+    void saveBounds();
+
+    return () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      unlistenMove?.();
+      unlistenResize?.();
+    };
+  }, [info, label]);
+
   const closeDetachedWindow = async () => {
     if (closingRef.current) return;
     closingRef.current = true;
     try {
       const currentInfo = readDetachedTabInfo(label) ?? info;
-      if (currentInfo && !isMainWindowClosing()) {
+      const mainClosing = isMainWindowClosing();
+      if (currentInfo && !mainClosing) {
+        // User explicitly closed this window — reattach the tab to the main window.
         writeReattachRequest(currentInfo);
+        removeDetachedTabInfo(label);
       }
-      removeDetachedTabInfo(label);
+      // If main is closing, keep the localStorage entry so it can be restored next session.
       allowNativeCloseRef.current = true;
       await appWindow.close();
     } catch {

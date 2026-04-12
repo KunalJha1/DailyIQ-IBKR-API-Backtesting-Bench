@@ -30,6 +30,15 @@ export interface OptionsAnalytics {
   support: number | null;
   equivalentPut: number | null;
   details: Map<number, AnalyticsDetail[]>;
+  /**
+   * 1-sigma implied move to the selected expiration.
+   * Primary: ATM straddle (call mid + put mid) / spot.
+   * Fallback: ATM IV × √(DTE / 365) when straddle data is unavailable.
+   * e.g. 0.042 = ±4.2%
+   */
+  impliedMoveToExpiry: number | null;
+  /** DTE used in the implied move calculation (for display). */
+  impliedMoveDte: number | null;
 }
 
 const NULL_RESULT: OptionsAnalytics = {
@@ -38,6 +47,8 @@ const NULL_RESULT: OptionsAnalytics = {
   support: null,
   equivalentPut: null,
   details: new Map(),
+  impliedMoveToExpiry: null,
+  impliedMoveDte: null,
 };
 
 // ── Covered call scoring helpers ───────────────────────────────────────────────
@@ -337,12 +348,50 @@ export function useOptionsAnalytics(
       });
     }
 
+    // ── 5. Implied move to selected expiration ────────────────────────────────
+    let impliedMoveToExpiry: number | null = null;
+    let impliedMoveDte: number | null = null;
+
+    if (spotPrice != null && spotPrice > 0 && rows.length > 0) {
+      // ATM row: closest strike to spot
+      const atmRow = rows.reduce((best, r) =>
+        Math.abs(r.strike - spotPrice) < Math.abs(best.strike - spotPrice) ? r : best,
+      rows[0]);
+
+      const dte = atmRow.call?.daysToExpiration ?? atmRow.put?.daysToExpiration ?? null;
+      impliedMoveDte = dte;
+
+      // Primary: straddle-based — (ATM call mid + ATM put mid) / spot
+      const callBid = atmRow.call?.bid ?? null;
+      const callAsk = atmRow.call?.ask ?? null;
+      const putBid  = atmRow.put?.bid  ?? null;
+      const putAsk  = atmRow.put?.ask  ?? null;
+      const callMid = callBid != null && callAsk != null
+        ? (callBid + callAsk) / 2
+        : (callBid ?? callAsk ?? null);
+      const putMid  = putBid  != null && putAsk  != null
+        ? (putBid  + putAsk)  / 2
+        : (putBid  ?? putAsk  ?? null);
+
+      if (callMid != null && putMid != null && callMid + putMid > 0) {
+        impliedMoveToExpiry = (callMid + putMid) / spotPrice;
+      } else if (dte != null && dte > 0) {
+        // Fallback: IV-based — ATM IV × √(DTE / 365)
+        const atmIV = atmRow.call?.impliedVolatility ?? atmRow.put?.impliedVolatility ?? null;
+        if (atmIV != null && atmIV > 0) {
+          impliedMoveToExpiry = atmIV * Math.sqrt(dte / 365);
+        }
+      }
+    }
+
     return {
       bestCoveredCall,
       resistance,
       support,
       equivalentPut,
       details,
+      impliedMoveToExpiry,
+      impliedMoveDte,
     };
   }, [chain, costBasis, spotPrice]);
 }

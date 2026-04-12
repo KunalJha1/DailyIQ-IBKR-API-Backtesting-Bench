@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, memo } from "react";
+import { Pencil, Plus, Trash2, ChevronDown } from "lucide-react";
 import CircularGauge from "../components/CircularGauge";
 import CustomSelect from "../components/CustomSelect";
+import HeatmapGroupEditor from "../components/HeatmapGroupEditor";
 import {
   HEATMAP_METRIC_OPTIONS,
   HEATMAP_TECH_TIMEFRAMES,
@@ -17,9 +19,21 @@ import {
   squarify,
 } from "../lib/heatmap-utils";
 import { formatMarketCap } from "../lib/market-data";
-import { useSp500HeatmapStore } from "../lib/use-sp500-heatmap";
+import { useHeatmapData } from "../lib/use-sp500-heatmap";
+import {
+  fetchHeatmapGroups,
+  createHeatmapGroup,
+  updateHeatmapGroup,
+  deleteHeatmapGroup,
+  resolveHeatmapUrl,
+  type HeatmapGroup,
+  type HeatmapGroupPayload,
+} from "../lib/heatmap-groups";
+import { useSidecarPort } from "../lib/tws";
+import { useWatchlist } from "../lib/watchlist";
 
 const HEATMAP_METRIC_STORAGE_KEY = "dailyiq-heatmap-metric";
+const HEATMAP_GROUP_STORAGE_KEY = "dailyiq-heatmap-group";
 
 function loadStoredMetricMode(): HeatmapMetricMode {
   try {
@@ -29,6 +43,19 @@ function loadStoredMetricMode(): HeatmapMetricMode {
     // Ignore localStorage failures.
   }
   return "change";
+}
+
+function loadStoredGroupId(): number | null {
+  try {
+    const raw = localStorage.getItem(HEATMAP_GROUP_STORAGE_KEY);
+    if (raw) {
+      const id = parseInt(raw, 10);
+      if (!isNaN(id)) return id;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 function getMetricToneClass(value: number | null, mode: HeatmapMetricMode): string {
@@ -77,34 +104,84 @@ function formatAsOf(asOf: number | null): string {
 }
 
 function HeatmapPage() {
-  const { tiles, asOf } = useSp500HeatmapStore();
+  const sidecarPort = useSidecarPort();
+  const { symbols: watchlistSymbols } = useWatchlist();
+
+  // Groups state
+  const [groups, setGroups] = useState<HeatmapGroup[]>([]);
+  const [activeGroupId, setActiveGroupId] = useState<number | null>(() => loadStoredGroupId());
+  const [groupDropdownOpen, setGroupDropdownOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingGroup, setEditingGroup] = useState<HeatmapGroup | null>(null);
+  const groupDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Heatmap state
   const [hovered, setHovered] = useState<HeatmapTile | null>(null);
   const [metricMode, setMetricMode] = useState<HeatmapMetricMode>(() => loadStoredMetricMode());
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
 
+  // Close group dropdown on outside click
+  useEffect(() => {
+    function onOutside(e: MouseEvent) {
+      if (groupDropdownRef.current && !groupDropdownRef.current.contains(e.target as Node)) {
+        setGroupDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+  }, []);
+
+  // Load groups from backend
+  useEffect(() => {
+    if (!sidecarPort) return;
+    fetchHeatmapGroups(sidecarPort)
+      .then(setGroups)
+      .catch(() => {});
+  }, [sidecarPort]);
+
+  // Persist active group id
+  useEffect(() => {
+    try {
+      if (activeGroupId === null) {
+        localStorage.removeItem(HEATMAP_GROUP_STORAGE_KEY);
+      } else {
+        localStorage.setItem(HEATMAP_GROUP_STORAGE_KEY, String(activeGroupId));
+      }
+    } catch {
+      // ignore
+    }
+  }, [activeGroupId]);
+
+  // Persist metric mode
   useEffect(() => {
     try {
       localStorage.setItem(HEATMAP_METRIC_STORAGE_KEY, metricMode);
     } catch {
-      // Ignore localStorage failures.
+      // ignore
     }
   }, [metricMode]);
 
-  // Heatmap prices are handled by the background universe price loop.
-  // Avoid registering them as active symbols, which would add extra TWS load.
+  const activeGroup = activeGroupId !== null ? (groups.find((g) => g.id === activeGroupId) ?? null) : null;
 
+  // Resolve heatmap URL
+  const heatmapUrl = useMemo(() => {
+    if (!sidecarPort) return null;
+    return resolveHeatmapUrl(sidecarPort, activeGroup, watchlistSymbols);
+  }, [sidecarPort, activeGroup, watchlistSymbols]);
+
+  const { tiles, asOf } = useHeatmapData(heatmapUrl);
+
+  // Container resize
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-
     const observer = new ResizeObserver(([entry]) => {
       setContainerSize({
         width: entry.contentRect.width,
         height: entry.contentRect.height,
       });
     });
-
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
@@ -201,14 +278,123 @@ function HeatmapPage() {
   const legendItems = getLegendItems(metricMode);
   const hoveredMetricValue = hovered ? getTileMetricValue(hovered, metricMode) : null;
 
+  // Active group display label
+  const activeLabel = activeGroup ? activeGroup.name : "S&P 500";
+
+  // Group CRUD handlers
+  async function handleSaveGroup(payload: HeatmapGroupPayload) {
+    if (!sidecarPort) return;
+    if (editingGroup) {
+      const updated = await updateHeatmapGroup(sidecarPort, editingGroup.id, payload);
+      setGroups((prev) => prev.map((g) => (g.id === updated.id ? updated : g)));
+    } else {
+      const created = await createHeatmapGroup(sidecarPort, payload);
+      setGroups((prev) => [...prev, created]);
+      setActiveGroupId(created.id);
+    }
+  }
+
+  async function handleDeleteGroup(group: HeatmapGroup) {
+    if (!sidecarPort) return;
+    await deleteHeatmapGroup(sidecarPort, group.id);
+    setGroups((prev) => prev.filter((g) => g.id !== group.id));
+    if (activeGroupId === group.id) setActiveGroupId(null);
+  }
+
   return (
     <div className="flex h-full min-h-0 bg-[#111318] text-white">
       <div className="min-w-0 flex-1 border-r border-white/[0.06]">
         <div className="flex h-8 items-center justify-between border-b border-white/[0.06] bg-[#0d0f13] px-3">
-          <div className="flex items-center gap-3">
-            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">
-              S&P 500 Map
-            </span>
+          <div className="flex items-center gap-2">
+            {/* Group selector dropdown */}
+            <div className="relative" ref={groupDropdownRef}>
+              <button
+                onClick={() => setGroupDropdownOpen((o) => !o)}
+                className="flex h-6 items-center gap-1.5 border border-white/[0.08] bg-[#131720] px-2 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-white/80 hover:border-white/[0.15] hover:text-white"
+              >
+                <span>{activeLabel}</span>
+                <ChevronDown className="h-3 w-3 text-white/40" />
+              </button>
+
+              {groupDropdownOpen && (
+                <div className="absolute left-0 top-full z-30 mt-0.5 w-52 border border-white/[0.10] bg-[#131720] shadow-xl">
+                  {/* S&P 500 default */}
+                  <button
+                    className={`flex w-full items-center justify-between px-3 py-1.5 text-left font-sans text-[11px] hover:bg-white/[0.05] ${
+                      activeGroupId === null ? "text-white" : "text-white/55"
+                    }`}
+                    onClick={() => { setActiveGroupId(null); setGroupDropdownOpen(false); }}
+                  >
+                    <span>S&P 500</span>
+                    {activeGroupId === null && <span className="h-1.5 w-1.5 rounded-full bg-[#1A56DB]" />}
+                  </button>
+
+                  {groups.length > 0 && (
+                    <div className="border-t border-white/[0.06]" />
+                  )}
+
+                  {groups.map((g) => (
+                    <div
+                      key={g.id}
+                      className={`flex items-center justify-between px-3 py-1.5 ${
+                        activeGroupId === g.id ? "bg-white/[0.04]" : "hover:bg-white/[0.03]"
+                      }`}
+                    >
+                      <button
+                        className={`flex-1 text-left font-sans text-[11px] ${
+                          activeGroupId === g.id ? "text-white" : "text-white/55 hover:text-white/80"
+                        }`}
+                        onClick={() => { setActiveGroupId(g.id); setGroupDropdownOpen(false); }}
+                      >
+                        {g.name}
+                        <span className="ml-1.5 font-mono text-[9px] text-white/25 uppercase">
+                          {g.type}
+                        </span>
+                      </button>
+                      <div className="flex items-center gap-0.5 pl-1">
+                        {activeGroupId === g.id && (
+                          <span className="h-1.5 w-1.5 rounded-full bg-[#1A56DB]" />
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingGroup(g);
+                            setEditorOpen(true);
+                            setGroupDropdownOpen(false);
+                          }}
+                          className="ml-1 flex h-5 w-5 items-center justify-center rounded-sm text-white/30 hover:bg-white/[0.06] hover:text-white/70"
+                        >
+                          <Pencil className="h-2.5 w-2.5" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDeleteGroup(g);
+                          }}
+                          className="flex h-5 w-5 items-center justify-center rounded-sm text-white/30 hover:bg-white/[0.06] hover:text-red"
+                        >
+                          <Trash2 className="h-2.5 w-2.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  <div className="border-t border-white/[0.06]" />
+                  <button
+                    className="flex w-full items-center gap-2 px-3 py-1.5 font-sans text-[11px] text-[#1A56DB] hover:bg-white/[0.04]"
+                    onClick={() => {
+                      setEditingGroup(null);
+                      setEditorOpen(true);
+                      setGroupDropdownOpen(false);
+                    }}
+                  >
+                    <Plus className="h-3 w-3" />
+                    New Group
+                  </button>
+                </div>
+              )}
+            </div>
+
             <span className="font-mono text-[10px] text-white/35">
               {loadedTiles}/{totalTiles}
             </span>
@@ -431,6 +617,14 @@ function HeatmapPage() {
           )}
         </div>
       </aside>
+
+      {editorOpen && (
+        <HeatmapGroupEditor
+          group={editingGroup}
+          onSave={handleSaveGroup}
+          onClose={() => { setEditorOpen(false); setEditingGroup(null); }}
+        />
+      )}
     </div>
   );
 }

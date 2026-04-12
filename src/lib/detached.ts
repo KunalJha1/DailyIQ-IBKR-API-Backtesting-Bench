@@ -9,6 +9,12 @@ export interface DetachedTabInfo {
   windowLabel: string;
   originalIndex: number;
   chartStateJson?: string | null;
+  /** Logical (CSS) position and size, saved continuously while the window is live */
+  windowX?: number;
+  windowY?: number;
+  windowWidth?: number;
+  windowHeight?: number;
+  windowMaximized?: boolean;
 }
 
 const KEY_PREFIX = "detached-tab:";
@@ -61,6 +67,23 @@ export function readDetachedTabInfo(label: string): DetachedTabInfo | null {
 /** Remove detached tab info once the window is reattached or discarded. */
 export function removeDetachedTabInfo(label: string): void {
   localStorage.removeItem(detachedKey(label));
+}
+
+/** Update only the window bounds in an existing detached tab entry. */
+export function updateDetachedWindowBounds(
+  label: string,
+  bounds: { x: number; y: number; width: number; height: number; maximized: boolean },
+): void {
+  const info = readDetachedTabInfo(label);
+  if (!info) return;
+  writeDetachedTabInfo({
+    ...info,
+    windowX: bounds.x,
+    windowY: bounds.y,
+    windowWidth: bounds.width,
+    windowHeight: bounds.height,
+    windowMaximized: bounds.maximized,
+  });
 }
 
 /** Enumerate any pending detached tabs persisted in localStorage. */

@@ -14,6 +14,117 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::api::process::{Command as SidecarCommand, CommandChild as SidecarChild};
 use tauri::{AppHandle, Manager};
 
+/// Windows Job Object support — ensures all spawned child processes are
+/// automatically killed by the OS when the Tauri host process exits, even
+/// on crash or task-kill (no graceful shutdown needed).
+#[cfg(target_os = "windows")]
+mod win_job {
+    use std::ffi::c_void;
+
+    pub type HANDLE = *mut c_void;
+
+    pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    pub const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: u32 = 9;
+    pub const PROCESS_ALL_ACCESS: u32 = 0x001F_0FFF;
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct JobObjectBasicLimitInformation {
+        pub per_process_user_time_limit: i64,
+        pub per_job_user_time_limit: i64,
+        pub limit_flags: u32,
+        pub minimum_working_set_size: usize,
+        pub maximum_working_set_size: usize,
+        pub active_process_limit: u32,
+        pub affinity: usize,
+        pub priority_class: u32,
+        pub scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct IoCounters {
+        pub read_operation_count: u64,
+        pub write_operation_count: u64,
+        pub other_operation_count: u64,
+        pub read_transfer_count: u64,
+        pub write_transfer_count: u64,
+        pub other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct JobObjectExtendedLimitInformation {
+        pub basic_limit_information: JobObjectBasicLimitInformation,
+        pub io_info: IoCounters,
+        pub process_memory_limit: usize,
+        pub job_memory_limit: usize,
+        pub peak_process_memory_used: usize,
+        pub peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn CreateJobObjectW(lp_attributes: *const c_void, lp_name: *const u16) -> HANDLE;
+        pub fn SetInformationJobObject(
+            h_job: HANDLE,
+            info_class: u32,
+            lp_info: *const c_void,
+            cb_info: u32,
+        ) -> i32;
+        pub fn AssignProcessToJobObject(h_job: HANDLE, h_process: HANDLE) -> i32;
+        pub fn OpenProcess(dw_access: u32, b_inherit: i32, dw_pid: u32) -> HANDLE;
+        pub fn CloseHandle(h_object: HANDLE) -> i32;
+    }
+}
+
+/// Wrapper to make the raw HANDLE Send + Sync so it can live in SidecarState.
+#[cfg(target_os = "windows")]
+struct WinJob(win_job::HANDLE);
+#[cfg(target_os = "windows")]
+unsafe impl Send for WinJob {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for WinJob {}
+
+/// Create a Job Object with KILL_ON_JOB_CLOSE so every assigned child process
+/// is automatically terminated when this process exits.
+#[cfg(target_os = "windows")]
+fn create_kill_on_close_job() -> Option<WinJob> {
+    use win_job::*;
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info = JobObjectExtendedLimitInformation::default();
+        info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            &info as *const _ as _,
+            std::mem::size_of_val(&info) as u32,
+        );
+        if ok == 0 {
+            CloseHandle(job);
+            return None;
+        }
+        Some(WinJob(job))
+    }
+}
+
+/// Assign a process (by PID) to the kill-on-close Job Object.
+#[cfg(target_os = "windows")]
+fn assign_to_job(job: &WinJob, pid: u32) {
+    use win_job::*;
+    unsafe {
+        let proc = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+        if !proc.is_null() {
+            AssignProcessToJobObject(job.0, proc);
+            CloseHandle(proc);
+        }
+    }
+}
+
 const DAILYIQ_API_KEY: &str = match option_env!("DAILYIQ_API_KEY") {
     Some(k) => k,
     None => "",
@@ -259,6 +370,7 @@ async fn spawn_tab_window(
     y: f64,
     width: f64,
     height: f64,
+    maximized: Option<bool>,
 ) -> Result<(), String> {
     let info = DetachedTabInfo {
         tab_id,
@@ -282,12 +394,13 @@ async fn spawn_tab_window(
         .insert(label.clone(), info);
 
     let url = tauri::WindowUrl::App(query.into());
+    let should_maximize = maximized.unwrap_or(true);
     let builder = tauri::WindowBuilder::new(&app_handle, &label, url)
         .title(&title)
         .inner_size(width, height)
         .min_inner_size(800.0, 600.0)
         .position(x, y)
-        .maximized(true)
+        .maximized(should_maximize)
         .focused(true)
         .visible(true)
         .decorations(false);
@@ -344,6 +457,14 @@ enum ManagedChild {
 }
 
 impl ManagedChild {
+    /// Returns the process ID.
+    fn pid(&self) -> u32 {
+        match self {
+            ManagedChild::System(child) => child.id(),
+            ManagedChild::Sidecar(child) => child.pid(),
+        }
+    }
+
     /// Returns true if the process has already exited.
     /// Only works for System children; Sidecar children always return false.
     fn has_exited(&mut self) -> bool {
@@ -402,6 +523,10 @@ struct SidecarState {
     shutting_down: Mutex<bool>,
     backend_status: Mutex<BackendStatus>,
     detached_tabs: Mutex<HashMap<String, DetachedTabInfo>>,
+    /// Windows-only: kill-on-close Job Object handle. All spawned child
+    /// processes are assigned to this job so they die with the host process.
+    #[cfg(target_os = "windows")]
+    win_job: Option<WinJob>,
 }
 
 fn is_shutting_down(state: &SidecarState) -> bool {
@@ -501,6 +626,11 @@ fn bundled_env(app_handle: &AppHandle) -> Result<HashMap<String, String>, String
     if !DAILYIQ_API_KEY.is_empty() {
         env.insert("DAILYIQ_API_KEY".to_string(), DAILYIQ_API_KEY.to_string());
     }
+    // Pass our PID so child processes can self-terminate if we exit unexpectedly.
+    env.insert(
+        "DAILYIQ_PARENT_PID".to_string(),
+        std::process::id().to_string(),
+    );
     Ok(env)
 }
 
@@ -664,6 +794,8 @@ fn spawn_dev_python(
     #[cfg(target_os = "windows")]
     let no_window_flag: u32 = 0x08000000;
 
+    let parent_pid = std::process::id().to_string();
+
     let child = if venv_python.exists() {
         {
             #[allow(unused_mut)]
@@ -671,6 +803,7 @@ fn spawn_dev_python(
             cmd.args(&args)
                 .current_dir(cwd)
                 .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+                .env("DAILYIQ_PARENT_PID", &parent_pid)
                 .env("PYTHONUNBUFFERED", "1");
             #[cfg(target_os = "windows")]
             {
@@ -687,6 +820,7 @@ fn spawn_dev_python(
             cmd.args(&args)
                 .current_dir(cwd)
                 .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+                .env("DAILYIQ_PARENT_PID", &parent_pid)
                 .env("PYTHONUNBUFFERED", "1");
             #[cfg(target_os = "windows")]
             {
@@ -703,6 +837,7 @@ fn spawn_dev_python(
                 cmd.args(&args)
                     .current_dir(cwd)
                     .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
+                    .env("DAILYIQ_PARENT_PID", &parent_pid)
                     .env("PYTHONUNBUFFERED", "1");
                 #[cfg(target_os = "windows")]
                 {
@@ -758,6 +893,10 @@ fn do_spawn_sidecar(app_handle: &AppHandle, state: &SidecarState) -> Result<u16,
         spawn_bundled_sidecar(app_handle, "dailyiq-sidecar", &args)?
     };
 
+    #[cfg(target_os = "windows")]
+    if let Some(job) = &state.win_job {
+        assign_to_job(job, child.pid());
+    }
     *state.child.lock().unwrap() = Some(child);
     *state.port.lock().unwrap() = Some(sidecar_port);
 
@@ -838,6 +977,10 @@ fn do_spawn_worker(app_handle: &AppHandle, state: &SidecarState) -> Result<(), S
         spawn_bundled_sidecar(app_handle, "dailyiq-worker", &args)?
     };
 
+    #[cfg(target_os = "windows")]
+    if let Some(job) = &state.win_job {
+        assign_to_job(job, child.pid());
+    }
     *state.worker_child.lock().unwrap() = Some(child);
     Ok(())
 }
@@ -853,6 +996,10 @@ fn do_spawn_valuation_worker(app_handle: &AppHandle, state: &SidecarState) -> Re
         spawn_bundled_sidecar(app_handle, "dailyiq-valuation-worker", &[])?
     };
 
+    #[cfg(target_os = "windows")]
+    if let Some(job) = &state.win_job {
+        assign_to_job(job, child.pid());
+    }
     *state.valuation_worker_child.lock().unwrap() = Some(child);
     Ok(())
 }
@@ -1008,6 +1155,11 @@ fn get_app_config(app_handle: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 fn main() {
+    // Create the Windows Job Object before building Tauri state so all
+    // subsequently spawned child processes can be assigned to it.
+    #[cfg(target_os = "windows")]
+    let win_job = create_kill_on_close_job();
+
     tauri::Builder::default()
         .manage(SidecarState {
             child: Mutex::new(None),
@@ -1025,6 +1177,8 @@ fn main() {
                 log_path: None,
             }),
             detached_tabs: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "windows")]
+            win_job,
         })
         .invoke_handler(tauri::generate_handler![
             start_oauth_server,

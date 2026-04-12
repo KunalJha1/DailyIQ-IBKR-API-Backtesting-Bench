@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
-import { Search, X } from "lucide-react";
+import { GripVertical, Search, X } from "lucide-react";
 import ComponentLinkMenu from "./ComponentLinkMenu";
 import CustomSelect from "./CustomSelect";
 import SymbolSearchModal from "./SymbolSearchModal";
@@ -108,6 +108,18 @@ function formatAge(eventTs: number | null): string {
   return `Sweep occurred ${elapsedDays} day${elapsedDays === 1 ? "" : "s"} ago`;
 }
 
+/** Compact label for the "Ago" column: "now", "5m", "2h", "3d", or "—" */
+function formatAgoShort(eventTs: number | null): string {
+  if (eventTs == null) return "—";
+  const elapsedMs = Math.max(0, Date.now() - eventTs);
+  const mins = Math.floor(elapsedMs / 60_000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
 function SymbolLogo({ symbol }: { symbol: string }) {
   const [failed, setFailed] = useState(false);
   const upper = symbol.toUpperCase();
@@ -130,6 +142,8 @@ function SymbolLogo({ symbol }: { symbol: string }) {
   );
 }
 
+const COL = "grid-cols-[16px_96px_minmax(0,1fr)_44px_108px]";
+
 function LiquiditySweepDetectorCard({
   linkChannel,
   onSetLinkChannel,
@@ -145,6 +159,10 @@ function LiquiditySweepDetectorCard({
   const [statuses, setStatuses] = useState<Record<string, LiquiditySweepStatus>>({});
   const [loading, setLoading] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  // "asc" = most recent first, "desc" = oldest first, null = manual drag order
+  const [agoSort, setAgoSort] = useState<"asc" | "desc" | null>(null);
   const { quotes, status: quoteStatus } = useWatchlistData(symbols);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pullStateRef = useRef<{
@@ -156,6 +174,21 @@ function LiquiditySweepDetectorCard({
     startY: 0,
     active: false,
   });
+
+  // Sorted display order; preserves manual drag order when agoSort is null.
+  // Symbols with no sweep always fall to the bottom when sorting.
+  const displaySymbols = useMemo(() => {
+    if (agoSort === null) return symbols;
+    return [...symbols].sort((a, b) => {
+      const tsA = statuses[a]?.eventTs ?? null;
+      const tsB = statuses[b]?.eventTs ?? null;
+      if (tsA === null && tsB === null) return 0;
+      if (tsA === null) return 1;
+      if (tsB === null) return -1;
+      // asc = most recent first → higher ts comes first
+      return agoSort === "asc" ? tsB - tsA : tsA - tsB;
+    });
+  }, [symbols, statuses, agoSort]);
 
   const refreshStatuses = useCallback(async () => {
     if (!sidecarPort || symbols.length === 0) {
@@ -205,11 +238,7 @@ function LiquiditySweepDetectorCard({
   }, [refreshStatuses, sidecarPort, symbols.length]);
 
   const resetPullState = useCallback(() => {
-    pullStateRef.current = {
-      pointerId: null,
-      startY: 0,
-      active: false,
-    };
+    pullStateRef.current = { pointerId: null, startY: 0, active: false };
     setPullDistance(0);
   }, []);
 
@@ -217,11 +246,7 @@ function LiquiditySweepDetectorCard({
     if (loading || symbols.length === 0 || event.button !== 0) return;
     const scroller = scrollRef.current;
     if (!scroller || scroller.scrollTop > 0) return;
-    pullStateRef.current = {
-      pointerId: event.pointerId,
-      startY: event.clientY,
-      active: true,
-    };
+    pullStateRef.current = { pointerId: event.pointerId, startY: event.clientY, active: true };
   }, [loading, symbols.length]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
@@ -265,8 +290,46 @@ function LiquiditySweepDetectorCard({
     persistConfig({ symbols: symbols.filter((item) => item !== symbol) });
   };
 
+  // Drag-and-drop handlers
+  const handleDragStart = (baseIdx: number) => (e: React.DragEvent) => {
+    setAgoSort(null); // drop into manual order when user starts dragging
+    setDragIndex(baseIdx);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOver = (displayIdx: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverIndex(displayIdx);
+  };
+
+  const handleDrop = (displayIdx: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    if (dragIndex === null || dragIndex === displayIdx) {
+      setDragIndex(null);
+      setDragOverIndex(null);
+      return;
+    }
+    const next = [...symbols];
+    const [moved] = next.splice(dragIndex, 1);
+    next.splice(displayIdx, 0, moved);
+    persistConfig({ symbols: next });
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const cycleAgoSort = () => {
+    setAgoSort((prev) => (prev === null ? "asc" : prev === "asc" ? "desc" : null));
+  };
+
   return (
     <div className="flex h-full flex-col overflow-hidden border border-white/[0.06] bg-panel">
+      {/* Title bar */}
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.10] bg-base px-2">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-medium text-white/80">Liquidity Sweeps</span>
@@ -304,6 +367,7 @@ function LiquiditySweepDetectorCard({
         </div>
       </div>
 
+      {/* Toolbar */}
       <div className="flex items-center gap-2 border-b border-white/[0.06] px-2 py-2">
         <CustomSelect
           value={timeframe}
@@ -328,6 +392,7 @@ function LiquiditySweepDetectorCard({
         </div>
       </div>
 
+      {/* Symbol chips */}
       {symbols.length > 0 ? (
         <div className="flex flex-wrap gap-1 border-b border-white/[0.06] px-2 py-2">
           {symbols.map((symbol) => (
@@ -344,6 +409,7 @@ function LiquiditySweepDetectorCard({
         </div>
       ) : null}
 
+      {/* Scroll area */}
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-auto scrollbar-none"
@@ -353,6 +419,7 @@ function LiquiditySweepDetectorCard({
         onPointerCancel={handlePointerEnd}
         onPointerLeave={handlePointerEnd}
       >
+        {/* Pull-to-refresh indicator */}
         <div
           className="flex items-end justify-center overflow-hidden border-b border-white/[0.04] px-3 text-center transition-[height,opacity] duration-150"
           style={{
@@ -364,6 +431,7 @@ function LiquiditySweepDetectorCard({
             {loading ? "Refreshing..." : pullDistance >= 52 ? "Release to refresh" : "Pull to refresh"}
           </span>
         </div>
+
         {symbols.length === 0 ? (
           <div className="flex h-full min-h-[180px] flex-col items-center justify-center gap-3 px-6 text-center">
             <Search className="h-5 w-5 text-white/18" strokeWidth={1.6} />
@@ -373,67 +441,138 @@ function LiquiditySweepDetectorCard({
             </div>
           </div>
         ) : (
-          symbols.map((symbol) => {
-            const sweep = statuses[symbol] ?? {
-              direction: null,
-              eventTs: null,
-              ageBars: null,
-              ageMinutes: null,
-              source: null,
-            };
-            const quote = quotes.get(symbol);
-            const symbolState = quoteStatus.get(symbol) ?? "pending";
-            const isBull = sweep.direction === "bull";
-            const badgeClass = isBull
-              ? "bg-blue text-white"
-              : sweep.direction === "bear"
-                ? "bg-red text-white"
-                : "bg-white/[0.08] text-white/60";
-
-            return (
+          <>
+            {/* Column headers */}
+            <div className={`grid ${COL} items-center gap-3 border-b border-white/[0.06] px-3 py-1.5`}>
+              <div />
+              <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-white/25">Symbol</div>
+              <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-white/25">Info</div>
               <button
-                key={symbol}
-                onClick={() => {
-                  if (linkChannel) linkBus.publish(linkChannel, symbol);
-                }}
-                className="grid w-full grid-cols-[102px_minmax(0,1fr)_108px] items-start gap-3 border-b border-white/[0.04] px-3 py-2.5 text-left transition-colors duration-75 hover:bg-white/[0.05]"
+                onClick={cycleAgoSort}
+                className={`flex items-center gap-0.5 font-mono text-[9px] uppercase tracking-[0.12em] transition-colors duration-75 ${
+                  agoSort !== null ? "text-blue" : "text-white/25 hover:text-white/50"
+                }`}
+                title={agoSort === null ? "Sort by most recent sweep" : agoSort === "asc" ? "Sort by oldest sweep" : "Clear sort"}
               >
-                <div className="flex min-w-0 items-start gap-2 pt-0.5">
-                  <SymbolLogo symbol={symbol} />
-                  <div className="min-w-0">
-                    <p className="font-mono text-[12px] font-semibold text-white/90">{symbol}</p>
-                    <p className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-white/25">
-                      {timeframe.toUpperCase()}
+                Ago
+                <span className="text-[8px]">
+                  {agoSort === "asc" ? " ↑" : agoSort === "desc" ? " ↓" : " ↕"}
+                </span>
+              </button>
+              <div className="text-right font-mono text-[9px] uppercase tracking-[0.12em] text-white/25">Status</div>
+            </div>
+
+            {/* Symbol rows */}
+            {displaySymbols.map((symbol, displayIdx) => {
+              const baseIdx = symbols.indexOf(symbol);
+              const sweep = statuses[symbol] ?? {
+                direction: null,
+                eventTs: null,
+                ageBars: null,
+                ageMinutes: null,
+                source: null,
+              };
+              const quote = quotes.get(symbol);
+              const symbolState = quoteStatus.get(symbol) ?? "pending";
+              const isBull = sweep.direction === "bull";
+              const badgeClass = isBull
+                ? "bg-blue text-white"
+                : sweep.direction === "bear"
+                  ? "bg-red text-white"
+                  : "bg-white/[0.08] text-white/60";
+              const agoLabel = formatAgoShort(sweep.eventTs);
+              const isDragging = dragIndex === baseIdx;
+              const isDragTarget = dragOverIndex === displayIdx && dragIndex !== null && dragIndex !== baseIdx;
+
+              return (
+                <div
+                  key={symbol}
+                  draggable={agoSort === null}
+                  onDragStart={handleDragStart(baseIdx)}
+                  onDragOver={handleDragOver(displayIdx)}
+                  onDrop={handleDrop(displayIdx)}
+                  onDragEnd={handleDragEnd}
+                  className={`grid ${COL} items-start gap-3 border-b px-3 py-2.5 transition-colors duration-75 ${
+                    isDragging
+                      ? "border-white/[0.04] opacity-40"
+                      : isDragTarget
+                        ? "border-blue/40 bg-blue/[0.04]"
+                        : "border-white/[0.04] hover:bg-white/[0.05]"
+                  }`}
+                >
+                  {/* Drag handle */}
+                  <div
+                    className={`flex items-center justify-center pt-1 ${
+                      agoSort !== null
+                        ? "cursor-not-allowed opacity-20"
+                        : "cursor-grab text-white/25 hover:text-white/55"
+                    }`}
+                    title={agoSort !== null ? "Clear Ago sort to reorder" : "Drag to reorder"}
+                  >
+                    <GripVertical className="h-3 w-3" strokeWidth={1.8} />
+                  </div>
+
+                  {/* Symbol + logo */}
+                  <button
+                    className="flex min-w-0 items-start gap-2 pt-0.5 text-left"
+                    onClick={() => { if (linkChannel) linkBus.publish(linkChannel, symbol); }}
+                  >
+                    <SymbolLogo symbol={symbol} />
+                    <div className="min-w-0">
+                      <p className="font-mono text-[12px] font-semibold text-white/90">{symbol}</p>
+                      <p className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-white/25">
+                        {timeframe.toUpperCase()}
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Description */}
+                  <button
+                    className="min-w-0 text-left"
+                    onClick={() => { if (linkChannel) linkBus.publish(linkChannel, symbol); }}
+                  >
+                    <p className="truncate text-[12px] text-white/74">
+                      {quote?.name ?? (symbolState === "error" ? "Unknown symbol" : "Loading...")}
                     </p>
+                    {sweep.direction ? (
+                      <>
+                        <p className="mt-0.5 font-mono text-[10px] text-white/40">
+                          {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
+                        </p>
+                        <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
+                          {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="mt-1 font-mono text-[10px] leading-[1.35] text-white/28">
+                        No active sweep in lookback window
+                      </p>
+                    )}
+                  </button>
+
+                  {/* Ago column */}
+                  <div className="flex items-start justify-center pt-1">
+                    <span className={`font-mono text-[11px] tabular-nums ${
+                      sweep.eventTs == null
+                        ? "text-white/20"
+                        : agoLabel === "now"
+                          ? "text-green"
+                          : "text-white/55"
+                    }`}>
+                      {agoLabel}
+                    </span>
+                  </div>
+
+                  {/* Badge */}
+                  <div className="flex justify-end pt-0.5">
+                    <span className={`inline-flex min-w-[88px] items-center justify-center rounded-full px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] ${badgeClass}`}>
+                      {sweep.direction === "bull" ? "Bull Sweep" : sweep.direction === "bear" ? "Bear Sweep" : "No Sweep"}
+                    </span>
                   </div>
                 </div>
-                <div className="min-w-0">
-                  <p className="truncate text-[12px] text-white/74">
-                    {quote?.name ?? (symbolState === "error" ? "Unknown symbol" : "Loading...")}
-                  </p>
-                  {sweep.direction ? (
-                    <>
-                      <p className="mt-0.5 font-mono text-[10px] text-white/40">
-                        {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
-                      </p>
-                      <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
-                        {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
-                      </p>
-                    </>
-                  ) : (
-                    <p className="mt-1 font-mono text-[10px] leading-[1.35] text-white/28">
-                      No active sweep in lookback window
-                    </p>
-                  )}
-                </div>
-                <div className="flex justify-end pt-0.5">
-                  <span className={`inline-flex min-w-[88px] items-center justify-center rounded-full px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] ${badgeClass}`}>
-                    {sweep.direction === "bull" ? "Bull Sweep" : sweep.direction === "bear" ? "Bear Sweep" : "No Sweep"}
-                  </span>
-                </div>
-              </button>
-            );
-          })
+              );
+            })}
+          </>
         )}
       </div>
 

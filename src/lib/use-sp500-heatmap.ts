@@ -12,7 +12,8 @@ type HeatmapStore = {
   subscriberCount: number;
 };
 
-const storesByPort = new Map<number, HeatmapStore>();
+// Per-URL singleton stores so multiple components polling the same URL share one request.
+const storesByUrl = new Map<string, HeatmapStore>();
 const listeners = new Set<() => void>();
 let storeVersion = 0;
 
@@ -32,8 +33,8 @@ function notifyStore() {
   }
 }
 
-function getOrCreateStore(sidecarPort: number): HeatmapStore {
-  const existing = storesByPort.get(sidecarPort);
+function getOrCreateStore(url: string): HeatmapStore {
+  const existing = storesByUrl.get(url);
   if (existing) return existing;
 
   const created: HeatmapStore = {
@@ -43,16 +44,16 @@ function getOrCreateStore(sidecarPort: number): HeatmapStore {
     inFlight: false,
     subscriberCount: 0,
   };
-  storesByPort.set(sidecarPort, created);
+  storesByUrl.set(url, created);
   return created;
 }
 
-async function fetchHeatmap(sidecarPort: number, store: HeatmapStore): Promise<void> {
+async function fetchHeatmapUrl(url: string, store: HeatmapStore): Promise<void> {
   if (store.inFlight) return;
 
   store.inFlight = true;
   try {
-    const res = await fetch(`http://127.0.0.1:${sidecarPort}/heatmap/sp500`);
+    const res = await fetch(url);
     if (!res.ok) return;
     const payload = await res.json();
     store.tiles = (payload.tiles as HeatmapTile[]) ?? [];
@@ -65,35 +66,59 @@ async function fetchHeatmap(sidecarPort: number, store: HeatmapStore): Promise<v
   }
 }
 
-function ensurePolling(sidecarPort: number, store: HeatmapStore): void {
+function ensurePolling(url: string, store: HeatmapStore): void {
   if (store.intervalId !== null) return;
 
-  void fetchHeatmap(sidecarPort, store);
+  void fetchHeatmapUrl(url, store);
   store.intervalId = window.setInterval(() => {
-    void fetchHeatmap(sidecarPort, store);
+    void fetchHeatmapUrl(url, store);
   }, HEATMAP_POLL_MS);
 }
 
-function stopPolling(sidecarPort: number, store: HeatmapStore): void {
+function stopPolling(url: string, store: HeatmapStore): void {
   if (store.intervalId !== null) {
     window.clearInterval(store.intervalId);
     store.intervalId = null;
   }
-  storesByPort.delete(sidecarPort);
+  storesByUrl.delete(url);
 }
 
-function subscribeHeatmap(sidecarPort: number): () => void {
-  const store = getOrCreateStore(sidecarPort);
+function subscribeHeatmapUrl(url: string): () => void {
+  const store = getOrCreateStore(url);
   store.subscriberCount += 1;
-  ensurePolling(sidecarPort, store);
+  ensurePolling(url, store);
 
   return () => {
     store.subscriberCount -= 1;
     if (store.subscriberCount <= 0) {
-      stopPolling(sidecarPort, store);
+      stopPolling(url, store);
     }
   };
 }
+
+/**
+ * Generic heatmap data hook — polls any heatmap endpoint URL every 5s.
+ * Pass `null` to skip fetching (e.g. when port is not yet known).
+ */
+export function useHeatmapData(url: string | null): { tiles: HeatmapTile[]; asOf: number | null } {
+  useEffect(() => {
+    if (!url) return;
+    return subscribeHeatmapUrl(url);
+  }, [url]);
+
+  const version = useSyncExternalStore(subscribeToStore, getStoreVersion);
+
+  return useMemo(() => {
+    if (!url) return { tiles: [], asOf: null };
+    const store = storesByUrl.get(url);
+    return {
+      tiles: store?.tiles ?? [],
+      asOf: store?.asOf ?? null,
+    };
+  }, [url, version]);
+}
+
+// ── Backward-compatible exports (used by existing code) ───────────────────────
 
 export function useSp500HeatmapData(): HeatmapTile[] {
   return useSp500HeatmapStore().tiles;
@@ -101,20 +126,6 @@ export function useSp500HeatmapData(): HeatmapTile[] {
 
 export function useSp500HeatmapStore(): { tiles: HeatmapTile[]; asOf: number | null } {
   const sidecarPort = useSidecarPort();
-
-  useEffect(() => {
-    if (!sidecarPort) return;
-    return subscribeHeatmap(sidecarPort);
-  }, [sidecarPort]);
-
-  const version = useSyncExternalStore(subscribeToStore, getStoreVersion);
-
-  return useMemo(() => {
-    if (!sidecarPort) return { tiles: [], asOf: null };
-    const store = storesByPort.get(sidecarPort);
-    return {
-      tiles: store?.tiles ?? [],
-      asOf: store?.asOf ?? null,
-    };
-  }, [sidecarPort, version]);
+  const url = sidecarPort ? `http://127.0.0.1:${sidecarPort}/heatmap/sp500` : null;
+  return useHeatmapData(url);
 }

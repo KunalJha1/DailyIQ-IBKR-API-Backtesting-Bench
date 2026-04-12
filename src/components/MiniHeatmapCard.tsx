@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useRef, useState, memo } from "react";
-import { X } from "lucide-react";
+import { X, ChevronDown, Plus } from "lucide-react";
 import ComponentLinkMenu from "./ComponentLinkMenu";
 import CustomSelect from "./CustomSelect";
-import { useSp500HeatmapData } from "../lib/use-sp500-heatmap";
+import HeatmapGroupEditor from "./HeatmapGroupEditor";
+import { useHeatmapData } from "../lib/use-sp500-heatmap";
+import {
+  fetchHeatmapGroups,
+  createHeatmapGroup,
+  resolveHeatmapUrl,
+  type HeatmapGroup,
+  type HeatmapGroupPayload,
+} from "../lib/heatmap-groups";
+import { useSidecarPort } from "../lib/tws";
+import { useWatchlist } from "../lib/watchlist";
 import {
   HEATMAP_METRIC_OPTIONS,
   type HeatmapMetricMode,
@@ -31,7 +41,51 @@ function MiniHeatmapCard({
   config,
   onConfigChange,
 }: MiniHeatmapCardProps) {
-  const tiles = useSp500HeatmapData();
+  const sidecarPort = useSidecarPort();
+  const { symbols: watchlistSymbols } = useWatchlist();
+
+  // Groups state
+  const [groups, setGroups] = useState<HeatmapGroup[]>([]);
+  const [groupDropdownOpen, setGroupDropdownOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const groupDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Active group from card config (persisted in dashboard layout)
+  const activeGroupId: number | null =
+    typeof config.groupId === "number" ? config.groupId : null;
+  const setActiveGroupId = (id: number | null) =>
+    onConfigChange({ ...config, groupId: id });
+
+  const activeGroup = activeGroupId !== null ? (groups.find((g) => g.id === activeGroupId) ?? null) : null;
+  const activeLabel = activeGroup ? activeGroup.name : "S&P 500";
+
+  // Load groups
+  useEffect(() => {
+    if (!sidecarPort) return;
+    fetchHeatmapGroups(sidecarPort)
+      .then(setGroups)
+      .catch(() => {});
+  }, [sidecarPort]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function onOutside(e: MouseEvent) {
+      if (groupDropdownRef.current && !groupDropdownRef.current.contains(e.target as Node)) {
+        setGroupDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+  }, []);
+
+  // Resolve heatmap URL
+  const heatmapUrl = useMemo(() => {
+    if (!sidecarPort) return null;
+    return resolveHeatmapUrl(sidecarPort, activeGroup, watchlistSymbols);
+  }, [sidecarPort, activeGroup, watchlistSymbols]);
+
+  const tiles = useHeatmapData(heatmapUrl).tiles;
+
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip] = useState<{
@@ -39,6 +93,7 @@ function MiniHeatmapCard({
     x: number;
     y: number;
   } | null>(null);
+
   const advanceDecline = useMemo(() => {
     const up = tiles.filter((t) => (t.changePct ?? 0) > 0).length;
     const down = tiles.filter((t) => (t.changePct ?? 0) < 0).length;
@@ -141,15 +196,67 @@ function MiniHeatmapCard({
     });
   };
 
+  async function handleSaveGroup(payload: HeatmapGroupPayload) {
+    if (!sidecarPort) return;
+    const created = await createHeatmapGroup(sidecarPort, payload);
+    setGroups((prev) => [...prev, created]);
+    setActiveGroupId(created.id);
+  }
+
   return (
     <div className="flex h-full flex-col overflow-hidden border border-white/[0.06] bg-panel">
       {/* Header */}
       <div
         className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.10] bg-base px-2"
       >
-        <span className="text-[11px] font-medium text-white/85">
-          S&P 500 Heatmap
-        </span>
+        {/* Group selector */}
+        <div className="relative" ref={groupDropdownRef}>
+          <button
+            onClick={() => setGroupDropdownOpen((o) => !o)}
+            className="flex items-center gap-1 font-mono text-[11px] font-medium text-white/85 hover:text-white"
+          >
+            <span>{activeLabel}</span>
+            <ChevronDown className="h-2.5 w-2.5 text-white/35" />
+          </button>
+
+          {groupDropdownOpen && (
+            <div className="absolute left-0 top-full z-30 mt-0.5 w-44 border border-white/[0.10] bg-[#131720] shadow-xl">
+              <button
+                className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left font-sans text-[11px] hover:bg-white/[0.05] ${
+                  activeGroupId === null ? "text-white" : "text-white/55"
+                }`}
+                onClick={() => { setActiveGroupId(null); setGroupDropdownOpen(false); }}
+              >
+                S&P 500
+                {activeGroupId === null && <span className="h-1.5 w-1.5 rounded-full bg-[#1A56DB]" />}
+              </button>
+
+              {groups.length > 0 && <div className="border-t border-white/[0.06]" />}
+
+              {groups.map((g) => (
+                <button
+                  key={g.id}
+                  className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left font-sans text-[11px] hover:bg-white/[0.05] ${
+                    activeGroupId === g.id ? "text-white" : "text-white/55"
+                  }`}
+                  onClick={() => { setActiveGroupId(g.id); setGroupDropdownOpen(false); }}
+                >
+                  <span className="truncate">{g.name}</span>
+                  {activeGroupId === g.id && <span className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[#1A56DB]" />}
+                </button>
+              ))}
+
+              <div className="border-t border-white/[0.06]" />
+              <button
+                className="flex w-full items-center gap-1.5 px-2.5 py-1.5 font-sans text-[11px] text-[#1A56DB] hover:bg-white/[0.04]"
+                onClick={() => { setEditorOpen(true); setGroupDropdownOpen(false); }}
+              >
+                <Plus className="h-3 w-3" />
+                New Group
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* Advance / Decline bar */}
         {advanceDecline.total > 0 && (
@@ -300,6 +407,14 @@ function MiniHeatmapCard({
           </>
         )}
       </div>
+
+      {editorOpen && (
+        <HeatmapGroupEditor
+          group={null}
+          onSave={handleSaveGroup}
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
     </div>
   );
 }

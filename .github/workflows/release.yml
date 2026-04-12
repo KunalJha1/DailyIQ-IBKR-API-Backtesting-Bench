@@ -66,21 +66,33 @@ jobs:
           mkdir -p ../src-tauri/binaries
           pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar \
             --hidden-import=ib_insync \
+            --hidden-import=ib_insync.ib \
             --hidden-import=ib_insync.contract \
             --hidden-import=ib_insync.objects \
+            --hidden-import=eventkit \
+            --hidden-import=nest_asyncio \
+            --hidden-import=psutil \
             --hidden-import=uvicorn.workers \
             --hidden-import=uvicorn.lifespan.on \
             --hidden-import=uvicorn.logging \
             --add-data "../data/tickers.json:data" main.py
           pyinstaller --clean --noconfirm --onefile --name dailyiq-worker \
             --hidden-import=ib_insync \
+            --hidden-import=ib_insync.ib \
             --hidden-import=ib_insync.contract \
             --hidden-import=ib_insync.objects \
+            --hidden-import=eventkit \
+            --hidden-import=nest_asyncio \
+            --hidden-import=psutil \
             --add-data "../data/tickers.json:data" worker_watchlist.py
           pyinstaller --clean --noconfirm --onefile --name dailyiq-valuation-worker \
             --hidden-import=ib_insync \
+            --hidden-import=ib_insync.ib \
             --hidden-import=ib_insync.contract \
             --hidden-import=ib_insync.objects \
+            --hidden-import=eventkit \
+            --hidden-import=nest_asyncio \
+            --hidden-import=psutil \
             --add-data "../data/tickers.json:data" worker_valuations.py
           cp dist/dailyiq-sidecar "../src-tauri/binaries/dailyiq-sidecar-${{ matrix.target }}"
           cp dist/dailyiq-worker "../src-tauri/binaries/dailyiq-worker-${{ matrix.target }}"
@@ -94,21 +106,33 @@ jobs:
           New-Item -ItemType Directory -Force -Path ..\src-tauri\binaries | Out-Null
           pyinstaller --clean --noconfirm --onefile --name dailyiq-sidecar `
             --hidden-import=ib_insync `
+            --hidden-import=ib_insync.ib `
             --hidden-import=ib_insync.contract `
             --hidden-import=ib_insync.objects `
+            --hidden-import=eventkit `
+            --hidden-import=nest_asyncio `
+            --hidden-import=psutil `
             --hidden-import=uvicorn.workers `
             --hidden-import=uvicorn.lifespan.on `
             --hidden-import=uvicorn.logging `
             --add-data "../data/tickers.json;data" main.py
           pyinstaller --clean --noconfirm --onefile --name dailyiq-worker `
             --hidden-import=ib_insync `
+            --hidden-import=ib_insync.ib `
             --hidden-import=ib_insync.contract `
             --hidden-import=ib_insync.objects `
+            --hidden-import=eventkit `
+            --hidden-import=nest_asyncio `
+            --hidden-import=psutil `
             --add-data "../data/tickers.json;data" worker_watchlist.py
           pyinstaller --clean --noconfirm --onefile --name dailyiq-valuation-worker `
             --hidden-import=ib_insync `
+            --hidden-import=ib_insync.ib `
             --hidden-import=ib_insync.contract `
             --hidden-import=ib_insync.objects `
+            --hidden-import=eventkit `
+            --hidden-import=nest_asyncio `
+            --hidden-import=psutil `
             --add-data "../data/tickers.json;data" worker_valuations.py
           Copy-Item dist/dailyiq-sidecar.exe "..\src-tauri\binaries\dailyiq-sidecar-${{ matrix.target }}.exe"
           Copy-Item dist/dailyiq-worker.exe "..\src-tauri\binaries\dailyiq-worker-${{ matrix.target }}.exe"

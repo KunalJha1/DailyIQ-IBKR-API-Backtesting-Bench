@@ -2077,6 +2077,31 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
                 client_id_mgr.release(shard_client_ids[i])
 
 
+def _start_parent_watchdog() -> None:
+    """Self-terminate if the Tauri host process disappears."""
+    parent_pid = int(os.environ.get("DAILYIQ_PARENT_PID", 0))
+    if not parent_pid:
+        return
+    import threading
+    try:
+        import psutil as _psutil
+    except ImportError:
+        logger.warning("psutil not installed — parent-death watchdog disabled")
+        return
+
+    def _watch() -> None:
+        while True:
+            try:
+                if not _psutil.pid_exists(parent_pid):
+                    logger.info("Parent process %d gone — worker shutting down", parent_pid)
+                    os._exit(0)
+            except Exception:
+                pass
+            threading.Event().wait(3)
+
+    threading.Thread(target=_watch, daemon=True, name="parent-watchdog").start()
+
+
 def main() -> None:
     global CLIENT_ID_SCAN_LIMIT
     parser = argparse.ArgumentParser(description="Watchlist worker")
@@ -2086,6 +2111,7 @@ def main() -> None:
     parser.add_argument("--client-id-max", type=int, default=CLIENT_ID_SCAN_LIMIT)
     args = parser.parse_args()
 
+    _start_parent_watchdog()
     ports = [args.tws_port] if args.tws_port else [7497, 7496]
     CLIENT_ID_SCAN_LIMIT = args.client_id_max
     asyncio.run(worker_loop(args.tws_host, ports, args.client_id))

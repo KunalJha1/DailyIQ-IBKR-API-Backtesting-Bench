@@ -742,6 +742,20 @@ function OptionsPage() {
                 {sourceLabel(summary?.source)}
               </span>
             </div>
+            {analytics.impliedMoveToExpiry != null && (
+              <div
+                className="flex min-w-[110px] flex-col gap-0.5 border border-[#8B5CF6]/25 px-3 py-2"
+                style={{ backgroundColor: BG_HOVER, borderRadius: 4 }}
+                title="Implied % move to the selected expiration. Primary: ATM straddle (call mid + put mid) ÷ spot. Fallback: ATM IV × √(DTE/365) when straddle data is thin."
+              >
+                <span className="text-[10px] uppercase tracking-[0.14em] text-white/45">
+                  Impl. Move{analytics.impliedMoveDte != null ? ` · ${analytics.impliedMoveDte}d` : ""}
+                </span>
+                <span className="font-mono text-[14px] tabular-nums text-[#8B5CF6]">
+                  ±{(analytics.impliedMoveToExpiry * 100).toFixed(2)}%
+                </span>
+              </div>
+            )}
           </div>
         </div>
 

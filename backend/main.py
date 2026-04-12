@@ -1,5 +1,14 @@
 """DailyIQ Sidecar — FastAPI HTTP API for DB-backed market data."""
 
+import sys
+
+# Fix asyncio event loop policy on Windows before any event loop is created.
+# ib_insync requires SelectorEventLoop; Python 3.8+ defaults to ProactorEventLoop
+# on Windows which causes connectivity issues in the PyInstaller bundle.
+if sys.platform == "win32":
+    import asyncio as _asyncio
+    _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
+
 import argparse
 import asyncio
 from collections import defaultdict
@@ -64,6 +73,7 @@ DEFAULT_TWS_PORTS = (7497, 7496)
 DEFAULT_TWS_CLIENT_ID = 1000
 PORTFOLIO_ROLE = "portfolio:reader"
 TICKERS_PATH = resource_path("data", "tickers.json")
+ETFS_PATH = resource_path("data", "etfs.json")
 SETTINGS_PATH = data_dir() / "tws-settings.json"
 FINNHUB_TEST_SYMBOL = "AAPL"
 FINNHUB_HTTP_TIMEOUT_S = 10.0
@@ -666,6 +676,31 @@ def _load_ticker_metadata() -> dict[str, dict]:
     return out
 
 
+def _load_etf_holdings() -> dict[str, list[dict]]:
+    """Load etfs.json → {ETF_SYMBOL: [{symbol, name, weight_pct}, ...]}"""
+    try:
+        with open(ETFS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    out: dict[str, list[dict]] = {}
+    for etf in data.get("etfs", []):
+        symbol = str(etf.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        holdings = [
+            {
+                "symbol": str(h.get("symbol") or "").strip().upper(),
+                "name": h.get("name") or "",
+                "weight_pct": float(h.get("weight_pct") or 0),
+            }
+            for h in etf.get("top_holdings", [])
+            if h.get("symbol")
+        ]
+        out[symbol] = holdings
+    return out
+
+
 CUSTOM_HEATMAP_MAX_SYMBOLS = 100
 
 
@@ -963,6 +998,42 @@ def read_options_estimate(symbol: str, expiration: int | None = None) -> dict:
     }
 
 
+def _fetch_live_quote_for_options(symbol: str) -> float | None:
+    """Return the freshest possible underlying price for the options screen.
+
+    Uses the same priority as the watchlist worker so the options screen and
+    watchlist always show the same price:
+      1. watchlist_quotes (kept fresh by background worker, TWS > DailyIQ > Yahoo)
+      2. market_snapshots
+      3. DailyIQ live snapshot (for symbols not on the watchlist)
+    Falls back silently so the options screen always loads even if data is unavailable.
+    """
+    if not symbol:
+        return None
+    try:
+        with sync_db_session() as conn:
+            row = conn.execute(
+                "SELECT last FROM watchlist_quotes WHERE symbol = ?", (symbol,)
+            ).fetchone()
+            if row and row[0]:
+                return float(row[0])
+            row = conn.execute(
+                "SELECT last FROM market_snapshots WHERE symbol = ?", (symbol,)
+            ).fetchone()
+            if row and row[0]:
+                return float(row[0])
+    except Exception:
+        pass
+    try:
+        from dailyiq_provider import fetch_quote_from_dailyiq
+        q = fetch_quote_from_dailyiq(symbol)
+        if q and q.get("last"):
+            return float(q["last"])
+    except Exception:
+        pass
+    return None
+
+
 def read_options_summary(symbol: str) -> dict:
     normalized = symbol.strip().upper()
     if not normalized:
@@ -1184,6 +1255,7 @@ def create_app() -> FastAPI:
         risk_free_rate=OPTIONS_DEFAULT_RISK_FREE_RATE,
     )
     ticker_metadata = _load_ticker_metadata()
+    etf_holdings = _load_etf_holdings()
 
     async def _probe_tws() -> tuple[str, int] | None:
         port = await probe_tws_port(DEFAULT_TWS_HOST, DEFAULT_TWS_PORTS)
@@ -1214,6 +1286,33 @@ def create_app() -> FastAPI:
         scorer.set_universe(sp500_symbols)
         scorer.start()
         options_worker.start()
+
+        # Parent-death watchdog: if the Tauri host process dies unexpectedly
+        # (crash, task-kill) the sidecar self-terminates so it doesn't linger
+        # as an orphan in Task Manager.
+        _parent_pid = int(os.environ.get("DAILYIQ_PARENT_PID", 0))
+        if _parent_pid:
+            import threading
+            try:
+                import psutil as _psutil
+                _psutil_ok = True
+            except ImportError:
+                _psutil = None  # type: ignore[assignment]
+                _psutil_ok = False
+                logger.warning("psutil not installed — parent-death watchdog disabled")
+
+            if _psutil_ok:
+                def _parent_watchdog() -> None:
+                    while True:
+                        try:
+                            if not _psutil.pid_exists(_parent_pid):
+                                logger.info("Parent process %d gone — sidecar shutting down", _parent_pid)
+                                os._exit(0)
+                        except Exception:
+                            pass
+                        threading.Event().wait(3)
+
+                threading.Thread(target=_parent_watchdog, daemon=True, name="parent-watchdog").start()
 
         # Pre-warm persistent IB connection for portfolio reads
         port = await probe_tws_port(DEFAULT_TWS_HOST, DEFAULT_TWS_PORTS)
@@ -2160,9 +2259,179 @@ def create_app() -> FastAPI:
             "tiles": tiles,
         }
 
+    @app.get("/heatmap/etf/{etf_symbol}")
+    async def get_etf_heatmap(etf_symbol: str):
+        sym = etf_symbol.strip().upper()
+        holdings = etf_holdings.get(sym)
+        if not holdings:
+            raise HTTPException(status_code=404, detail=f"ETF '{sym}' not found or has no holdings.")
+
+        # Build weight map: holding symbol → weight_pct
+        weight_map = {h["symbol"]: h["weight_pct"] for h in holdings}
+        sym_list = [h["symbol"] for h in holdings]
+
+        def _read():
+            if not sym_list:
+                return []
+            placeholders = ", ".join("?" * len(sym_list))
+            with sync_db_session() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT symbol, last, open, high, low, prev_close, change, change_pct,
+                           volume, bid, ask, mid, spread, source, status,
+                           quote_updated_at, intraday_updated_at, daily_updated_at, updated_at
+                    FROM market_snapshots
+                    WHERE symbol IN ({placeholders})
+                    """,
+                    sym_list,
+                ).fetchall()
+                row_map = {row[0]: row for row in rows}
+                w52_map = _fetch_week52(conn, sym_list)
+                tiles: list[dict] = []
+                for holding in holdings:
+                    h_sym = holding["symbol"]
+                    meta = ticker_metadata.get(h_sym)
+                    wh, wl = w52_map.get(h_sym, (None, None))
+                    if h_sym in row_map:
+                        tile = _snapshot_row_to_payload(row_map[h_sym], meta, wh, wl)
+                    else:
+                        tile = _heatmap_pending_tile(h_sym, meta, wh, wl)
+                    # Override sp500Weight with ETF holding weight for correct treemap sizing
+                    tile["sp500Weight"] = weight_map.get(h_sym, 0)
+                    tiles.append(tile)
+                val_map = _fetch_valuation_map(conn, [t["symbol"] for t in tiles])
+                _enrich_with_valuations(tiles, val_map)
+                _enrich_with_tech_scores(conn, tiles)
+                _enrich_with_sentiment_scores(tiles)
+                tiles.sort(key=lambda t: float(t.get("sp500Weight") or 0), reverse=True)
+                return tiles
+
+        tiles = await run_db(_read)
+        return {
+            "asOf": int(time.time() * 1000),
+            "universe": "etf",
+            "etfSymbol": sym,
+            "count": len(tiles),
+            "tiles": tiles,
+        }
+
+    # ── Heatmap Groups (CRUD) ──────────────────────────────────────────────────
+
+    class HeatmapGroupPayload(BaseModel):
+        name: str
+        type: str  # 'sp500' | 'watchlist' | 'etf' | 'custom'
+        etf_symbol: str | None = None
+        symbols: list[str] | None = None
+
+    @app.get("/heatmap/groups")
+    async def list_heatmap_groups():
+        def _read():
+            with sync_db_session() as conn:
+                rows = conn.execute(
+                    "SELECT id, name, type, etf_symbol, symbols, created_at, updated_at FROM heatmap_groups ORDER BY created_at ASC"
+                ).fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "type": row[2],
+                        "etfSymbol": row[3],
+                        "symbols": json.loads(row[4]) if row[4] else None,
+                        "createdAt": row[5],
+                        "updatedAt": row[6],
+                    }
+                    for row in rows
+                ]
+        return {"groups": await run_db(_read)}
+
+    @app.post("/heatmap/groups")
+    async def create_heatmap_group(payload: HeatmapGroupPayload):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Group name is required.")
+        if payload.type not in ("sp500", "watchlist", "etf", "custom"):
+            raise HTTPException(status_code=400, detail="Invalid group type.")
+
+        def _create():
+            with sync_db_session() as conn:
+                now = _now_ms()
+                cursor = conn.execute(
+                    "INSERT INTO heatmap_groups (name, type, etf_symbol, symbols, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        name,
+                        payload.type,
+                        payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
+                        json.dumps(payload.symbols) if payload.symbols is not None else None,
+                        now,
+                        now,
+                    ),
+                )
+                return {
+                    "id": cursor.lastrowid,
+                    "name": name,
+                    "type": payload.type,
+                    "etfSymbol": payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
+                    "symbols": payload.symbols,
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
+        return await run_db(_create)
+
+    @app.put("/heatmap/groups/{group_id}")
+    async def update_heatmap_group(group_id: int, payload: HeatmapGroupPayload):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Group name is required.")
+        if payload.type not in ("sp500", "watchlist", "etf", "custom"):
+            raise HTTPException(status_code=400, detail="Invalid group type.")
+
+        def _update():
+            with sync_db_session() as conn:
+                row = conn.execute("SELECT id FROM heatmap_groups WHERE id = ?", (group_id,)).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Heatmap group not found.")
+                now = _now_ms()
+                conn.execute(
+                    "UPDATE heatmap_groups SET name = ?, type = ?, etf_symbol = ?, symbols = ?, updated_at = ? WHERE id = ?",
+                    (
+                        name,
+                        payload.type,
+                        payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
+                        json.dumps(payload.symbols) if payload.symbols is not None else None,
+                        now,
+                        group_id,
+                    ),
+                )
+                return {
+                    "id": group_id,
+                    "name": name,
+                    "type": payload.type,
+                    "etfSymbol": payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
+                    "symbols": payload.symbols,
+                    "updatedAt": now,
+                }
+        return await run_db(_update)
+
+    @app.delete("/heatmap/groups/{group_id}")
+    async def delete_heatmap_group(group_id: int):
+        def _delete():
+            with sync_db_session() as conn:
+                row = conn.execute("SELECT id FROM heatmap_groups WHERE id = ?", (group_id,)).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Heatmap group not found.")
+                conn.execute("DELETE FROM heatmap_groups WHERE id = ?", (group_id,))
+                return {"ok": True}
+        return await run_db(_delete)
+
     @app.get("/options/summary")
     async def get_options_summary(symbol: str = ""):
-        return await run_db(read_options_summary, symbol)
+        summary, live_quote = await asyncio.gather(
+            run_db(read_options_summary, symbol),
+            asyncio.to_thread(_fetch_live_quote_for_options, symbol.strip().upper()),
+        )
+        if live_quote is not None:
+            summary["underlyingPrice"] = live_quote
+        return summary
 
     @app.get("/options/chain")
     async def get_options_chain(symbol: str = "", expiration: int | None = None):

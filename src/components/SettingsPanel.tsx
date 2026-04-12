@@ -87,6 +87,10 @@ export default function SettingsPanel({ open, onClose, updateAvailable }: Settin
     setUpdateStatus("downloading");
     setUpdateError("");
     try {
+      // Kill all sidecar/worker processes first so Windows releases file locks
+      // on their EXEs before the NSIS installer tries to overwrite them.
+      await invoke("kill_sidecar").catch(() => {});
+      await new Promise(r => setTimeout(r, 800));
       await installUpdate();
       await relaunch();
     } catch (err) {
@@ -629,7 +633,7 @@ export default function SettingsPanel({ open, onClose, updateAvailable }: Settin
                   className="flex items-center gap-1.5 rounded-md border border-blue/30 bg-blue/10 px-3 py-1 text-[11px] text-blue transition-colors duration-120 hover:bg-blue/20"
                 >
                   <Download className="h-3 w-3" strokeWidth={1.5} />
-                  Install & Restart
+                  Update & Relaunch
                 </button>
               ) : (
                 <button
