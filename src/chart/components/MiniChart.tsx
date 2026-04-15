@@ -4,7 +4,7 @@ import { ChartEngine } from '../core/ChartEngine';
 import { useChartData } from '../hooks/useChartData';
 import { indicatorRegistry } from '../indicators/registry';
 import { STRATEGY_KEYS } from '../indicators/strategyKeys';
-import type { Timeframe, ChartType, ActiveIndicator, YScaleMode, ChartLayout } from '../types';
+import type { Timeframe, ChartType, ActiveIndicator, YScaleMode, ChartLayout, SubPaneStateSnapshot } from '../types';
 import {
   createDefaultProbEngWidgetState,
   type ProbEngWidgetState,
@@ -413,6 +413,43 @@ function parseProbEngWidgetState(value: unknown): ProbEngWidgetState {
   return normX !== undefined && normY !== undefined ? { ...base, normX, normY } : base;
 }
 
+function sanitizeYScaleModeRecord(value: unknown): Record<string, YScaleMode> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, YScaleMode> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === 'auto' || item === 'log' || item === 'manual') {
+      result[key] = item;
+    }
+  }
+  return result;
+}
+
+function parseSubPaneState(value: unknown): SubPaneStateSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  const collapsedPaneIds = Array.isArray(value.collapsedPaneIds)
+    ? value.collapsedPaneIds.filter((item): item is string => typeof item === 'string')
+    : [];
+  const maximizedPaneId = typeof value.maximizedPaneId === 'string' ? value.maximizedPaneId : null;
+  return {
+    heightOverrides: Object.fromEntries(
+      Object.entries(sanitizeNumberRecord(value.heightOverrides))
+        .map(([paneId, height]) => [paneId, Math.max(60, Math.min(400, height))]),
+    ),
+    scaleModes: sanitizeYScaleModeRecord(value.scaleModes),
+    collapsedPaneIds,
+    maximizedPaneId,
+  };
+}
+
+function subPaneStateEqual(a?: SubPaneStateSnapshot, b?: SubPaneStateSnapshot): boolean {
+  const left = a ?? { heightOverrides: {}, scaleModes: {}, collapsedPaneIds: [], maximizedPaneId: null };
+  const right = b ?? { heightOverrides: {}, scaleModes: {}, collapsedPaneIds: [], maximizedPaneId: null };
+  return recordsEqual(left.heightOverrides, right.heightOverrides)
+    && recordsEqual(left.scaleModes, right.scaleModes)
+    && JSON.stringify([...left.collapsedPaneIds].sort()) === JSON.stringify([...right.collapsedPaneIds].sort())
+    && left.maximizedPaneId === right.maximizedPaneId;
+}
+
 function probEngWidgetStateEqual(a: ProbEngWidgetState, b: ProbEngWidgetState): boolean {
   const normEqual = (a.normX === b.normX && a.normY === b.normY)
     || (a.normX === undefined && a.normY === undefined && b.normX === undefined && b.normY === undefined);
@@ -727,6 +764,18 @@ export default function MiniChart({
     ));
   }, []);
 
+  const persistSubPaneState = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const nextState = engine.getSubPaneState();
+    const currentState = parseSubPaneState(configRef.current.subPaneState);
+    if (subPaneStateEqual(currentState, nextState)) return;
+    onConfigChange({
+      ...configRef.current,
+      subPaneState: nextState,
+    });
+  }, [onConfigChange]);
+
   useEffect(() => {
     syncPaneLayout();
   }, [activeIndicators, syncPaneLayout]);
@@ -770,11 +819,12 @@ export default function MiniChart({
       dragStateRef.current = null;
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      persistSubPaneState();
     };
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-  }, [syncPaneLayout]);
+  }, [persistSubPaneState, syncPaneLayout]);
 
   // Push data to engine using the same incremental path as the full chart
   useEffect(() => {
@@ -961,11 +1011,22 @@ export default function MiniChart({
     return { id: typeof s.id === 'string' ? s.id : SCRIPT_ID, source: s.source };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.scripts]);
+  const persistedSubPaneState = useMemo(
+    () => parseSubPaneState(config.subPaneState),
+    [config.subPaneState],
+  );
 
   const persistedIndicatorsFingerprint = useMemo(
     () => buildIndicatorFingerprint(persistedIndicators),
     [persistedIndicators],
   );
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setSubPaneState(persistedSubPaneState);
+    syncPaneLayout();
+  }, [engineVersion, persistedSubPaneState, syncPaneLayout]);
+
   const activeProbEngIndicator = activeIndicators.find(
     (indicator) => indicator.name === 'Probability Engine' && indicator.visible,
   );
@@ -1445,6 +1506,7 @@ export default function MiniChart({
     }
     syncIndicators();
     syncPaneLayout();
+    persistSubPaneState();
   };
 
   const beginIndicatorDrag = useCallback((indicatorId: string, sourcePaneId: string, clientX: number, clientY: number) => {
@@ -1491,6 +1553,7 @@ export default function MiniChart({
           if (engine) {
             engine.expandPane(hoveredPane.paneId);
             syncPaneLayout();
+            persistSubPaneState();
           }
         }
         setDragHoverPaneId(hoveredPane.paneId === dragState.sourcePaneId ? null : hoveredPane.paneId);
@@ -1528,7 +1591,7 @@ export default function MiniChart({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [chartLayout, dragHoverPaneId, dragState, makeDetachedPaneId, moveIndicatorToPane, source, syncPaneLayout]);
+  }, [chartLayout, dragHoverPaneId, dragState, makeDetachedPaneId, moveIndicatorToPane, persistSubPaneState, source, syncPaneLayout]);
 
   const clearProbEngDrag = useCallback((target?: HTMLDivElement | null) => {
     const drag = probEngDragRef.current;
@@ -2568,6 +2631,7 @@ export default function MiniChart({
                   if (!engine || !pane.collapsed) return;
                   engine.expandPane(pane.paneId);
                   syncPaneLayout();
+                  persistSubPaneState();
                 }}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -2575,6 +2639,7 @@ export default function MiniChart({
                   if (!engine || !pane.collapsed) return;
                   engine.expandPane(pane.paneId);
                   syncPaneLayout();
+                  persistSubPaneState();
                 }}
                 onDrop={(e) => {
                   e.preventDefault();
@@ -2656,7 +2721,11 @@ export default function MiniChart({
               return (
                 <button
                   key={dir}
-                  onClick={() => { engineRef.current?.movePane(pane.paneId, dir); syncPaneLayout(); }}
+                  onClick={() => {
+                    engineRef.current?.movePane(pane.paneId, dir);
+                    syncPaneLayout();
+                    persistSubPaneState();
+                  }}
                   disabled={disabled}
                   title={dir === 'up' ? 'Move pane up' : 'Move pane down'}
                   style={{
@@ -2679,6 +2748,7 @@ export default function MiniChart({
                 if (pane.collapsed) engineRef.current?.expandPane(pane.paneId);
                 else engineRef.current?.collapsePane(pane.paneId);
                 syncPaneLayout();
+                persistSubPaneState();
               }}
               title={pane.collapsed ? 'Expand pane' : 'Collapse pane'}
               style={{
@@ -2697,6 +2767,7 @@ export default function MiniChart({
                 if (pane.maximized) engineRef.current?.unmaximizePane();
                 else engineRef.current?.maximizePane(pane.paneId);
                 syncPaneLayout();
+                persistSubPaneState();
               }}
               title={pane.maximized ? 'Restore pane' : 'Maximize pane'}
               style={{
@@ -2711,7 +2782,11 @@ export default function MiniChart({
               <Maximize2 size={11} />
             </button>
             <button
-              onClick={() => { engineRef.current?.removePane(pane.paneId); syncPaneLayout(); }}
+              onClick={() => {
+                engineRef.current?.removePane(pane.paneId);
+                syncPaneLayout();
+                persistSubPaneState();
+              }}
               title="Delete pane"
               style={{
                 width: pane.collapsed ? 16 : 18, height: pane.collapsed ? 16 : 18,
@@ -2854,6 +2929,7 @@ export default function MiniChart({
                   const next = pane.yScaleMode === 'auto' ? 'manual' : 'auto';
                   engineRef.current?.setSubPaneScaleMode(pane.paneId, next);
                   syncPaneLayout();
+                  persistSubPaneState();
                 }}
                 style={{
                   fontFamily: '"JetBrains Mono", monospace',
@@ -2876,6 +2952,7 @@ export default function MiniChart({
                   const next = pane.yScaleMode === 'log' ? 'manual' : 'log';
                   engineRef.current?.setSubPaneScaleMode(pane.paneId, next);
                   syncPaneLayout();
+                  persistSubPaneState();
                 }}
                 style={{
                   fontFamily: '"JetBrains Mono", monospace',

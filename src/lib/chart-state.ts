@@ -1,5 +1,5 @@
 /** Persists per-tab chart state in sessionStorage */
-import type { ChartType, Timeframe, YScaleMode } from "../chart/types";
+import type { ChartType, Timeframe, YScaleMode, SubPaneStateSnapshot } from "../chart/types";
 import { indicatorRegistry } from "../chart/indicators/registry";
 import type { CustomStrategyDefinition } from "../chart/customStrategies";
 
@@ -51,6 +51,7 @@ export interface ChartState {
   indicatorPanelOpen?: boolean;
   strategyPanelOpen?: boolean;
   legendCollapsed?: boolean;
+  subPaneState?: SubPaneStateSnapshot;
 }
 
 const KEY_PREFIX = "chart-state:";
@@ -108,6 +109,34 @@ function sanitizeLineStyleRecord(
     if (item === "solid" || item === "dashed" || item === "dotted") result[key] = item;
   }
   return result;
+}
+
+function sanitizeYScaleModeRecord(value: unknown): Record<string, YScaleMode> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, YScaleMode> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === "auto" || item === "log" || item === "manual") {
+      result[key] = item;
+    }
+  }
+  return result;
+}
+
+function parseSubPaneState(value: unknown): SubPaneStateSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  const collapsedPaneIds = Array.isArray(value.collapsedPaneIds)
+    ? value.collapsedPaneIds.filter((item): item is string => typeof item === "string")
+    : [];
+  const maximizedPaneId = typeof value.maximizedPaneId === "string" ? value.maximizedPaneId : null;
+  return {
+    heightOverrides: Object.fromEntries(
+      Object.entries(sanitizeNumberRecord(value.heightOverrides))
+        .map(([paneId, height]) => [paneId, Math.max(60, Math.min(400, height))]),
+    ),
+    scaleModes: sanitizeYScaleModeRecord(value.scaleModes),
+    collapsedPaneIds,
+    maximizedPaneId,
+  };
 }
 
 function parseIndicators(value: unknown): PersistedChartIndicator[] {
@@ -218,6 +247,7 @@ export function loadChartState(tabId: string): ChartState | null {
       legendCollapsed: typeof (parsed as { legendCollapsed?: unknown }).legendCollapsed === "boolean"
         ? (parsed as { legendCollapsed: boolean }).legendCollapsed
         : false,
+      subPaneState: parseSubPaneState((parsed as { subPaneState?: unknown }).subPaneState),
       probEngWidget: isRecord((parsed as { probEngWidget?: unknown }).probEngWidget)
         ? (() => {
             const pw = (parsed as { probEngWidget?: unknown }).probEngWidget as Record<string, unknown>;

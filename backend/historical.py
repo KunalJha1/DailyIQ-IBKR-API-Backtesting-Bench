@@ -19,6 +19,7 @@ from db_utils import (
 )
 from runtime_paths import data_dir
 from schema import ensure_historical_schema
+from debug_bus import emit_debug_event
 
 logger = logging.getLogger(__name__)
 
@@ -1168,6 +1169,20 @@ async def get_historical_bars(
         lookback_days,
         MAX_DAILY_LOOKBACK_DAYS if is_daily else MAX_INTRADAY_LOOKBACK_DAYS,
     ))
+    emit_debug_event(
+        "historical",
+        "pipeline_start",
+        f"get_historical_bars start {symbol} {db_bar_size}",
+        {
+            "symbol": symbol,
+            "barSize": db_bar_size,
+            "duration": duration,
+            "lookbackDays": lookback_days,
+            "whatToShow": what_to_show,
+            "twsConnected": bool(tws_connected and ib is not None),
+            "forceDeep": force_deep,
+        },
+    )
 
     lock = _get_fetch_lock(symbol, db_bar_size)
     async with lock:
@@ -1184,6 +1199,12 @@ async def get_historical_bars(
                     if has_full_coverage:
                         logger.info(
                             f"Cache hit for {symbol} {cache_key} ({len(cached)} bars, source={cached_source})"
+                        )
+                        emit_debug_event(
+                            "historical",
+                            "cache_return",
+                            f"Cache hit {symbol} {cache_key}",
+                            {"symbol": symbol, "cacheKey": cache_key, "count": len(cached), "source": cached_source},
                         )
                         return cached, "cache"
                     logger.info(
@@ -1217,12 +1238,24 @@ async def get_historical_bars(
             try:
                 from dailyiq_provider import fetch_bars_from_dailyiq_async
                 diq_limit = _dailyiq_limit_for_fetch(db_bar_size, lookback_days, None)
+                emit_debug_event(
+                    "historical",
+                    "source_attempt",
+                    f"Attempt DailyIQ fast-path {symbol} {db_bar_size}",
+                    {"symbol": symbol, "source": "dailyiq", "mode": "fast-path", "limit": diq_limit},
+                )
                 diq_bars = await fetch_bars_from_dailyiq_async(symbol, timeframe=db_bar_size, limit=diq_limit)
                 if diq_bars:
                     fetched_bars = diq_bars
                     fetch_source = "dailyiq"
                     logger.info(
                         f"Fetched {len(diq_bars)} {cache_key} bars from DailyIQ for {symbol} (fast path)"
+                    )
+                    emit_debug_event(
+                        "historical",
+                        "source_success",
+                        f"DailyIQ fast-path returned {len(diq_bars)} bars for {symbol}",
+                        {"symbol": symbol, "source": "dailyiq", "count": len(diq_bars), "cacheKey": cache_key},
                     )
             except Exception as e:
                 logger.warning(f"DailyIQ historical fast-path failed for {symbol}: {e}")
@@ -1232,6 +1265,12 @@ async def get_historical_bars(
                 tws_bar = db_bar_size
                 tws_default_dur = DEFAULT_DAILY_DURATION if is_daily else duration
                 tws_dur = _incremental_tws_duration(last_ts_ms, tws_default_dur, is_daily)
+                emit_debug_event(
+                    "historical",
+                    "source_attempt",
+                    f"Attempt TWS fetch {symbol} {db_bar_size}",
+                    {"symbol": symbol, "source": "tws", "duration": tws_dur, "whatToShow": what_to_show},
+                )
                 # On a cold cache, we already have DailyIQ bars; use TWS for incremental
                 # gap-fill (authoritative) rather than a slow full paginated fetch.
                 tws_last_ts = last_ts_ms if fetched_bars else None
@@ -1272,6 +1311,12 @@ async def get_historical_bars(
                         f"Fetched {len(tws_bars)} {cache_key} bars from TWS for {symbol} "
                         f"(duration={tws_dur}, whatToShow={what_to_show})"
                     )
+                    emit_debug_event(
+                        "historical",
+                        "source_success",
+                        f"TWS returned {len(tws_bars)} bars for {symbol}",
+                        {"symbol": symbol, "source": "tws", "count": len(tws_bars), "duration": tws_dur},
+                    )
                     if last_ts_ms is None and tws_last_ts is None:
                         new_earliest = min(b["time"] for b in tws_bars)
                         if earliest_ts_ms is None or new_earliest >= earliest_ts_ms - 86400_000:
@@ -1285,12 +1330,24 @@ async def get_historical_bars(
             try:
                 from dailyiq_provider import fetch_bars_from_dailyiq_async
                 diq_limit = _dailyiq_limit_for_fetch(db_bar_size, lookback_days, last_ts_ms)
+                emit_debug_event(
+                    "historical",
+                    "source_attempt",
+                    f"Attempt DailyIQ fallback {symbol} {db_bar_size}",
+                    {"symbol": symbol, "source": "dailyiq", "mode": "fallback", "limit": diq_limit},
+                )
                 diq_bars = await fetch_bars_from_dailyiq_async(symbol, timeframe=db_bar_size, limit=diq_limit)
                 if diq_bars:
                     fetched_bars = diq_bars
                     fetch_source = "dailyiq"
                     logger.info(
                         f"Fetched {len(diq_bars)} {cache_key} bars from DailyIQ for {symbol}"
+                    )
+                    emit_debug_event(
+                        "historical",
+                        "source_success",
+                        f"DailyIQ fallback returned {len(diq_bars)} bars for {symbol}",
+                        {"symbol": symbol, "source": "dailyiq", "count": len(diq_bars), "cacheKey": cache_key},
                     )
             except Exception as e:
                 logger.warning(f"DailyIQ historical fetch failed for {symbol}: {e}")
@@ -1324,12 +1381,24 @@ async def get_historical_bars(
                     yf_period = yf_default
                 else:
                     yf_period = _incremental_yahoo_period(last_ts_ms, yf_default, is_daily)
+                emit_debug_event(
+                    "historical",
+                    "source_attempt",
+                    f"Attempt Yahoo fetch {symbol} {db_bar_size}",
+                    {"symbol": symbol, "source": "yahoo", "period": yf_period, "interval": yf_interval},
+                )
                 fetched_bars = await fetch_from_yahoo(symbol, period=yf_period, interval=yf_interval)
                 if fetched_bars:
                     fetch_source = "yahoo"
                     logger.info(
                         f"Fetched {len(fetched_bars)} {cache_key} bars from Yahoo for {symbol} "
                         f"(period={yf_period})"
+                    )
+                    emit_debug_event(
+                        "historical",
+                        "source_success",
+                        f"Yahoo returned {len(fetched_bars)} bars for {symbol}",
+                        {"symbol": symbol, "source": "yahoo", "count": len(fetched_bars), "period": yf_period},
                     )
                     # If earliest bar didn't move backwards, Yahoo has given us all it has.
                     new_earliest = min(b["time"] for b in fetched_bars)
@@ -1345,6 +1414,12 @@ async def get_historical_bars(
                 _init_schema(conn)
                 _write_bars(conn, symbol, fetched_bars, db_bar_size, source=fetch_source,
                             what_to_show=what_to_show, depth_complete=mark_depth_complete)
+                emit_debug_event(
+                    "historical",
+                    "write_complete",
+                    f"Persisted {len(fetched_bars)} bars for {symbol}",
+                    {"symbol": symbol, "source": fetch_source, "count": len(fetched_bars), "barSize": db_bar_size},
+                )
                 return _read_cached(conn, symbol, limit_days=lookback_days, table=table), fetch_source
 
         # Stale cache fallback
@@ -1353,8 +1428,20 @@ async def get_historical_bars(
             cached = _read_cached(conn, symbol, limit_days=lookback_days, table=table)
         if cached:
             logger.info(f"Returning stale cache for {symbol} ({len(cached)} bars)")
+            emit_debug_event(
+                "historical",
+                "stale_cache_return",
+                f"Returning stale cache for {symbol}",
+                {"symbol": symbol, "count": len(cached), "barSize": db_bar_size},
+            )
             return cached, "cache"
 
+        emit_debug_event(
+            "historical",
+            "empty_return",
+            f"No bars available for {symbol}",
+            {"symbol": symbol, "barSize": db_bar_size},
+        )
         return [], "none"
 
 

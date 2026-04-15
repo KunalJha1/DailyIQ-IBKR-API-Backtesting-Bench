@@ -21,6 +21,7 @@ from typing import Sequence
 import requests
 
 from db_utils import sync_db_session, execute_one_tx_with_retry
+from debug_bus import emit_debug_event
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,12 @@ def _dailyiq_get_json(
     """
     base = _base_url()
     if not base:
+        emit_debug_event(
+            "dailyiq",
+            "missing_api_key",
+            "DailyIQ request skipped: API key missing",
+            {"endpoint": endpoint},
+        )
         return None
 
     # Build cache key from endpoint + sorted params
@@ -114,6 +121,12 @@ def _dailyiq_get_json(
     cached = _read_cache(cache_key, ttl_s)
     if cached is not None:
         logger.debug("DailyIQ cache hit: %s", cache_key)
+        emit_debug_event(
+            "dailyiq",
+            "cache_hit",
+            f"DailyIQ cache hit: {endpoint}",
+            {"endpoint": endpoint, "cacheKey": cache_key},
+        )
         return cached
 
     # Acquire (or create) a per-key lock so only one thread fetches this endpoint
@@ -127,9 +140,21 @@ def _dailyiq_get_json(
         cached = _read_cache(cache_key, ttl_s)
         if cached is not None:
             logger.debug("DailyIQ cache hit (post-lock): %s", cache_key)
+            emit_debug_event(
+                "dailyiq",
+                "cache_hit_post_lock",
+                f"DailyIQ cache hit post-lock: {endpoint}",
+                {"endpoint": endpoint, "cacheKey": cache_key},
+            )
             return cached
 
         url = f"{base}/{endpoint.lstrip('/')}"
+        emit_debug_event(
+            "dailyiq",
+            "http_request",
+            f"GET /v1/.../{endpoint}",
+            {"endpoint": endpoint, "params": params or {}, "timeout": timeout},
+        )
         try:
             r = requests.get(url, params=params, timeout=timeout)
             if r.status_code == 429:
@@ -140,12 +165,30 @@ def _dailyiq_get_json(
                 return None
             data = r.json()
             _write_cache(cache_key, data)
+            emit_debug_event(
+                "dailyiq",
+                "http_success",
+                f"DailyIQ success: {endpoint}",
+                {"endpoint": endpoint, "status": 200},
+            )
             return data
         except requests.RequestException as exc:
             logger.warning("DailyIQ request failed for %s: %s", endpoint, exc)
+            emit_debug_event(
+                "dailyiq",
+                "http_exception",
+                f"DailyIQ request exception: {endpoint}",
+                {"endpoint": endpoint, "error": str(exc)},
+            )
             return None
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("DailyIQ response not JSON for %s: %s", endpoint, exc)
+            emit_debug_event(
+                "dailyiq",
+                "json_error",
+                f"DailyIQ JSON decode failed: {endpoint}",
+                {"endpoint": endpoint, "error": str(exc)},
+            )
             return None
         finally:
             with _inflight_lock:
@@ -196,6 +239,12 @@ def fetch_bars_from_dailyiq(
     limit = max(50, min(5000, limit))
 
     default_ttl = CACHE_TTL_BARS_DAILY if timeframe in ("1d", "1w") else CACHE_TTL_BARS_INTRADAY
+    emit_debug_event(
+        "dailyiq",
+        "bars_request",
+        f"Request DailyIQ bars {symbol} {timeframe}",
+        {"symbol": symbol, "timeframe": timeframe, "limit": limit},
+    )
     data = _dailyiq_get_json(
         "price-bars",
         params={"symbol": symbol, "timeframe": timeframe, "limit": limit, "order": "asc"},
@@ -222,6 +271,12 @@ def fetch_bars_from_dailyiq(
         logger.info(
             "Fetched %d %s bars from DailyIQ for %s", len(bars), timeframe, symbol
         )
+    emit_debug_event(
+        "dailyiq",
+        "bars_result",
+        f"DailyIQ bars result {symbol} {timeframe}: {len(bars)}",
+        {"symbol": symbol, "timeframe": timeframe, "count": len(bars)},
+    )
     return bars
 
 

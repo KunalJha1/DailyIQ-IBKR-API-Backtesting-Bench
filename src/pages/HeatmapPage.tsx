@@ -381,7 +381,7 @@ function HeatmapPage() {
 
                   <div className="border-t border-white/[0.06]" />
                   <button
-                    className="flex w-full items-center gap-2 px-3 py-1.5 font-sans text-[11px] text-[#1A56DB] hover:bg-white/[0.04]"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 font-sans text-[11px] text-[#7FB3FF] hover:bg-white/[0.04]"
                     onClick={() => {
                       setEditingGroup(null);
                       setEditorOpen(true);

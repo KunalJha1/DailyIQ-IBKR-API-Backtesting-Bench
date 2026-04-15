@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { ETF_LIST, type HeatmapGroupPayload, type HeatmapGroupType, type HeatmapGroup } from "../lib/heatmap-groups";
 
@@ -96,9 +97,9 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
     }
   }
 
-  return (
+  const content = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="flex w-[440px] flex-col border border-white/[0.10] bg-[#161B22] shadow-2xl">
@@ -284,4 +285,7 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
       </div>
     </div>
   );
+
+  if (typeof document === "undefined") return content;
+  return createPortal(content, document.body);
 }

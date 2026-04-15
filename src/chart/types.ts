@@ -137,6 +137,13 @@ export interface SubPaneLayout {
   maximized: boolean;
 }
 
+export interface SubPaneStateSnapshot {
+  heightOverrides: Record<string, number>;
+  scaleModes: Record<string, YScaleMode>;
+  collapsedPaneIds: string[];
+  maximizedPaneId: string | null;
+}
+
 export interface ScriptPlot {
   values: number[];
   label: string;

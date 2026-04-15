@@ -20,7 +20,19 @@ import {
   exportWorkspace,
 } from "./layout-storage";
 import { loadChartState, saveChartState } from "./chart-state";
+import { readMiniChartConfig, writeMiniChartConfig } from "./minichart-config-storage";
 import { isTauriRuntime } from "./platform";
+
+function deepClone<T>(value: T): T {
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(value);
+    } catch {
+      // Fall through to JSON clone.
+    }
+  }
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 function normalizeWorkspace(raw: WorkspaceFile): WorkspaceFile {
   const tabs = raw.tabs.map((tab) => {
@@ -111,6 +123,8 @@ interface LayoutContextValue {
     tabs: { id: string; title: string; type: string }[],
     activeTabId: string,
   ) => void;
+  /** Duplicate an existing tab's persisted state onto a new tab id */
+  duplicateTabState: (sourceTabId: string, newTabId: string) => void;
   /** Open file picker to load a different .diq workspace */
   loadFromFile: () => Promise<boolean>;
   /** Export workspace (with chart state) via Save As dialog */
@@ -131,6 +145,7 @@ const LayoutContext = createContext<LayoutContextValue>({
   updateComponent: () => {},
   setComponentLinkChannel: () => {},
   syncTabs: () => {},
+  duplicateTabState: () => {},
   loadFromFile: async () => false,
   exportToFile: async () => false,
   flushSave: async () => {},
@@ -391,6 +406,50 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
     [updateWorkspace],
   );
 
+  const duplicateTabState = useCallback(
+    (sourceTabId: string, newTabId: string) => {
+      if (!workspace || sourceTabId === newTabId) return;
+      if (workspace.tabs.some((tab) => tab.id === newTabId)) return;
+
+      const sourceTab = workspace.tabs.find((tab) => tab.id === sourceTabId);
+      if (!sourceTab) return;
+
+      const clonedTab: TabState = {
+        ...sourceTab,
+        id: newTabId,
+        layout: {
+          ...sourceTab.layout,
+          components: sourceTab.layout.components.map((component) => ({
+            ...component,
+            config: deepClone(component.config),
+          })),
+        },
+      };
+
+      updateWorkspace((ws) => {
+        if (ws.tabs.some((tab) => tab.id === newTabId)) return ws;
+        return {
+          ...ws,
+          tabs: [...ws.tabs, clonedTab],
+        };
+      });
+
+      const chartState = loadChartState(sourceTabId);
+      if (chartState) {
+        saveChartState(newTabId, deepClone(chartState));
+      }
+
+      for (const component of sourceTab.layout.components) {
+        if (component.type !== "minichart") continue;
+        const persistedConfig = readMiniChartConfig(sourceTabId, component.id);
+        if (persistedConfig) {
+          writeMiniChartConfig(newTabId, component.id, deepClone(persistedConfig));
+        }
+      }
+    },
+    [workspace, updateWorkspace],
+  );
+
   const loadFromFile = useCallback(async (): Promise<boolean> => {
     const filePath = await pickWorkspaceFile();
     if (!filePath) return false;
@@ -436,6 +495,7 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
       updateComponent,
       setComponentLinkChannel,
       syncTabs,
+      duplicateTabState,
       loadFromFile,
       exportToFile,
       flushSave,
@@ -453,6 +513,7 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
       updateComponent,
       setComponentLinkChannel,
       syncTabs,
+      duplicateTabState,
       loadFromFile,
       exportToFile,
       flushSave,

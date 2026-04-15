@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
-import { GripVertical, Search, X } from "lucide-react";
+import { GripVertical, Search, Settings, X } from "lucide-react";
 import ComponentLinkMenu from "./ComponentLinkMenu";
 import CustomSelect from "./CustomSelect";
 import SymbolSearchModal from "./SymbolSearchModal";
@@ -61,6 +61,12 @@ function readLookbackBars(config: Record<string, unknown>): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return 3;
   const normalized = Math.round(raw);
   return normalized >= 1 ? Math.min(normalized, 10) : 3;
+}
+
+function readShowExpandedInstructions(config: Record<string, unknown>): boolean {
+  const raw = config.showExpandedInstructions;
+  if (typeof raw !== "boolean") return true;
+  return raw;
 }
 
 function sourceLabel(source: string | null): string {
@@ -155,7 +161,9 @@ function LiquiditySweepDetectorCard({
   const symbols = useMemo(() => readSymbols(config), [config]);
   const timeframe = readTimeframe(config);
   const lookbackBars = readLookbackBars(config);
+  const showExpandedInstructions = readShowExpandedInstructions(config);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [statuses, setStatuses] = useState<Record<string, LiquiditySweepStatus>>({});
   const [loading, setLoading] = useState(false);
   const [pullDistance, setPullDistance] = useState(0);
@@ -165,6 +173,7 @@ function LiquiditySweepDetectorCard({
   const [agoSort, setAgoSort] = useState<"asc" | "desc" | null>(null);
   const { quotes, status: quoteStatus } = useWatchlistData(symbols);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
   const pullStateRef = useRef<{
     pointerId: number | null;
     startY: number;
@@ -237,6 +246,24 @@ function LiquiditySweepDetectorCard({
     };
   }, [refreshStatuses, sidecarPort, symbols.length]);
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handleClick = (event: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [settingsOpen]);
+
   const resetPullState = useCallback(() => {
     pullStateRef.current = { pointerId: null, startY: 0, active: false };
     setPullDistance(0);
@@ -244,6 +271,8 @@ function LiquiditySweepDetectorCard({
 
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (loading || symbols.length === 0 || event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-reorder-row='true']")) return;
     const scroller = scrollRef.current;
     if (!scroller || scroller.scrollTop > 0) return;
     pullStateRef.current = { pointerId: event.pointerId, startY: event.clientY, active: true };
@@ -295,6 +324,8 @@ function LiquiditySweepDetectorCard({
     setAgoSort(null); // drop into manual order when user starts dragging
     setDragIndex(baseIdx);
     e.dataTransfer.effectAllowed = "move";
+    const dragSymbol = symbols[baseIdx];
+    if (dragSymbol) e.dataTransfer.setData("text/plain", dragSymbol);
   };
 
   const handleDragOver = (displayIdx: number) => (e: React.DragEvent) => {
@@ -344,6 +375,47 @@ function LiquiditySweepDetectorCard({
           >
             Add
           </button>
+          <div ref={settingsRef} className="relative">
+            <button
+              onClick={() => setSettingsOpen((prev) => !prev)}
+              className="flex items-center justify-center rounded-sm transition-colors duration-75 hover:bg-white/[0.06] hover:text-white"
+              style={{
+                width: 16,
+                height: 16,
+                borderRadius: 2,
+                border: "none",
+                cursor: "pointer",
+                backgroundColor: settingsOpen ? "rgba(255,255,255,0.06)" : "transparent",
+                color: "#FFFFFF",
+              }}
+              title="Settings"
+            >
+              <Settings className="h-[13px] w-[13px]" strokeWidth={2} />
+            </button>
+            {settingsOpen ? (
+              <div className="absolute right-0 top-full z-[100] mt-1 w-[210px] rounded-md border border-white/[0.08] bg-[#1C2128] p-2.5 shadow-xl shadow-black/40">
+                <div className="mb-2 text-[9px] uppercase tracking-wider text-white/25">Display</div>
+                <button
+                  onClick={() => persistConfig({ showExpandedInstructions: !showExpandedInstructions })}
+                  className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-left transition-colors duration-75 hover:bg-white/[0.06]"
+                  title="Toggle expanded sweep instructions"
+                >
+                  <span className="text-[11px] text-white/75">Expanded instructions</span>
+                  <span
+                    className={`inline-flex h-5 min-w-[36px] items-center rounded-full px-1 transition-colors duration-100 ${
+                      showExpandedInstructions ? "bg-blue/30" : "bg-white/[0.14]"
+                    }`}
+                  >
+                    <span
+                      className={`h-3.5 w-3.5 rounded-full bg-white transition-transform duration-100 ${
+                        showExpandedInstructions ? "translate-x-4" : "translate-x-0"
+                      }`}
+                    />
+                  </span>
+                </button>
+              </div>
+            ) : null}
+          </div>
           <ComponentLinkMenu linkChannel={linkChannel} onSetLinkChannel={onSetLinkChannel} />
           <button
             onClick={onClose}
@@ -412,6 +484,7 @@ function LiquiditySweepDetectorCard({
       {/* Scroll area */}
       <div
         ref={scrollRef}
+        data-no-drag
         className="min-h-0 flex-1 overflow-auto scrollbar-none"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -487,6 +560,8 @@ function LiquiditySweepDetectorCard({
               return (
                 <div
                   key={symbol}
+                  data-no-drag
+                  data-reorder-row="true"
                   draggable={agoSort === null}
                   onDragStart={handleDragStart(baseIdx)}
                   onDragOver={handleDragOver(displayIdx)}
@@ -539,9 +614,11 @@ function LiquiditySweepDetectorCard({
                         <p className="mt-0.5 font-mono text-[10px] text-white/40">
                           {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
                         </p>
-                        <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
-                          {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
-                        </p>
+                        {showExpandedInstructions ? (
+                          <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
+                            {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
+                          </p>
+                        ) : null}
                       </>
                     ) : (
                       <p className="mt-1 font-mono text-[10px] leading-[1.35] text-white/28">

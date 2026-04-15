@@ -333,7 +333,7 @@ function DashboardPageComponent(_props: { tabId?: string }) {
         "ibkr-portfolio": {},
         "mini-screener": {},
         "mini-heatmap": {},
-        "liquidity-sweep-detector": { symbols: [], timeframe: "15m", lookbackBars: 3 },
+        "liquidity-sweep-detector": { symbols: [], timeframe: "15m", lookbackBars: 3, showExpandedInstructions: true },
         "options-snapshot": {},
       };
 

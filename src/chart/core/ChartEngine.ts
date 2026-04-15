@@ -4,6 +4,7 @@ import type {
   ActiveIndicator,
   ChartLayout,
   SubPaneLayout,
+  SubPaneStateSnapshot,
   YScaleMode,
   ChartBrandingMode,
   DrawingTool,
@@ -77,12 +78,12 @@ function etDatePartsFromMs(tsMs: number): { year: number; month: number; day: nu
   };
 }
 
-function sameUtcDay(a: number, b: number): boolean {
-  const left = new Date(a);
-  const right = new Date(b);
-  return left.getUTCFullYear() === right.getUTCFullYear()
-    && left.getUTCMonth() === right.getUTCMonth()
-    && left.getUTCDate() === right.getUTCDate();
+function sameEtDay(a: number, b: number): boolean {
+  const left = etDatePartsFromMs(a);
+  const right = etDatePartsFromMs(b);
+  return left.year === right.year
+    && left.month === right.month
+    && left.day === right.day;
 }
 
 function formatLiquidityPrice(price: number): string {
@@ -683,6 +684,44 @@ export class ChartEngine {
     return this.computeLayout();
   }
 
+  getSubPaneState(): SubPaneStateSnapshot {
+    return {
+      heightOverrides: Object.fromEntries(this.subPaneHeightOverrides.entries()),
+      scaleModes: Object.fromEntries(this.subPaneScaleModes.entries()),
+      collapsedPaneIds: Array.from(this.collapsedPanes.values()),
+      maximizedPaneId: this.maximizedPaneId,
+    };
+  }
+
+  setSubPaneState(state?: SubPaneStateSnapshot | null) {
+    this.subPaneHeightOverrides.clear();
+    this.subPaneScaleModes.clear();
+    this.collapsedPanes.clear();
+    this.maximizedPaneId = null;
+
+    if (state) {
+      for (const [paneId, value] of Object.entries(state.heightOverrides ?? {})) {
+        if (!Number.isFinite(value)) continue;
+        this.subPaneHeightOverrides.set(paneId, Math.max(60, Math.min(400, value)));
+      }
+      for (const [paneId, mode] of Object.entries(state.scaleModes ?? {})) {
+        if (mode === 'auto' || mode === 'log' || mode === 'manual') {
+          this.subPaneScaleModes.set(paneId, mode);
+        }
+      }
+      for (const paneId of state.collapsedPaneIds ?? []) {
+        if (typeof paneId === 'string') {
+          this.collapsedPanes.add(paneId);
+        }
+      }
+      if (typeof state.maximizedPaneId === 'string') {
+        this.maximizedPaneId = state.maximizedPaneId;
+      }
+    }
+
+    this.markDirty();
+  }
+
   setSubPaneHeight(paneId: string, height: number) {
     const clamped = Math.max(60, Math.min(400, height));
     this.subPaneHeightOverrides.set(paneId, clamped);
@@ -947,6 +986,7 @@ export class ChartEngine {
       if (
         tailOnly &&
         ind.name !== 'FVG Momentum' &&
+        ind.name !== 'Volume Profile' &&
         changeOffset > 0 &&
         changeOffset < this.bars.length &&
         ind.data?.length
@@ -959,6 +999,11 @@ export class ChartEngine {
   }
 
   private computeSingleIndicator(ind: ActiveIndicator) {
+    if (ind.name === 'Volume Profile') {
+      const bars = this.getVolumeProfileBars();
+      ind.data = computeIndicator(ind.name, bars, { ...ind.params, ...ind.textParams } as Record<string, number>);
+      return;
+    }
     ind.data = computeIndicator(ind.name, this.bars, { ...ind.params, ...ind.textParams } as Record<string, number>);
   }
 
@@ -2402,10 +2447,18 @@ export class ChartEngine {
     if (this.bars.length === 0) return 0;
     const lastTime = this.bars[this.bars.length - 1].time;
     let start = this.bars.length - 1;
-    while (start > 0 && sameUtcDay(this.bars[start - 1].time, lastTime)) {
+    while (start > 0 && sameEtDay(this.bars[start - 1].time, lastTime)) {
       start -= 1;
     }
     return start;
+  }
+
+  private getVolumeProfileBars(): OHLCVBar[] {
+    if (this.bars.length === 0) return this.bars;
+    const timeframeMs = getTimeframeMs(String(this.scaleX.timeframe));
+    if (timeframeMs >= 86_400_000) return this.bars;
+    const sessionStart = this.getCurrentDayStartIndex();
+    return this.bars.slice(sessionStart);
   }
 
   private liquiditySourceName(code: number, isBull: boolean): string {

@@ -29,6 +29,11 @@ function fSign(v: number | null | undefined, d = 2): string {
   return `±${s}%`;
 }
 
+function fDte(v: number | null | undefined, d = 1): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return v.toFixed(d);
+}
+
 /** Nearest ATM row */
 function atmRow(rows: OptionsChainRow[], spot: number): OptionsChainRow | null {
   if (!rows.length) return null;
@@ -347,7 +352,7 @@ function OptionsSnapshotCard({
                   Impl. Move to Exp
                 </span>
                 {dte != null && (
-                  <span className="text-[9px] text-white/30 font-mono">{dte}d remaining</span>
+                  <span className="text-[9px] text-white/30 font-mono">{fDte(dte)}d remaining</span>
                 )}
               </div>
               <span className="font-mono text-[20px] font-semibold tabular-nums text-[#8B5CF6]">
@@ -459,7 +464,7 @@ function OptionsSnapshotCard({
             {/* DTE */}
             <StatTile
               label="DTE"
-              value={dte != null ? String(dte) : "—"}
+              value={fDte(dte)}
               sub={dte != null ? "days to expiry" : undefined}
               color="text-white/70"
             />

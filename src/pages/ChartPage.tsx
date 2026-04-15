@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo, memo, type PointerEvent as ReactPointerEvent } from 'react';
 import { GripHorizontal, Lock, Unlock } from 'lucide-react';
-import type { Timeframe, ChartType, ActiveIndicator, ScriptResult, YScaleMode, ChartLayout } from '../chart/types';
+import type { Timeframe, ChartType, ActiveIndicator, ScriptResult, YScaleMode, ChartLayout, SubPaneStateSnapshot } from '../chart/types';
 import { ChartEngine } from '../chart/core/ChartEngine';
 import { useChartData } from '../chart/hooks/useChartData';
 import { useSidecarPort } from '../lib/tws';
@@ -515,6 +515,12 @@ function ChartPage({ tabId }: ChartPageProps) {
     }
   }, [indicatorColorDefaults]);
 
+  const getEngineSubPaneState = useCallback((): SubPaneStateSnapshot | undefined => {
+    const engine = engineRef.current;
+    if (!engine) return undefined;
+    return engine.getSubPaneState();
+  }, []);
+
   const serializedIndicatorsMatch = useCallback((
     serializedIndicators: PersistedChartIndicator[],
     engineIndicators: ActiveIndicator[],
@@ -661,12 +667,27 @@ function ChartPage({ tabId }: ChartPageProps) {
 
     const engine = engineRef.current;
     if (engine) {
+      engine.setSubPaneState(nextState.subPaneState);
       for (const indicator of [...engine.getActiveIndicators()]) {
         engine.removeIndicator(indicator.id);
       }
       engine.clearAllScripts();
     }
   }, [tabId]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setSubPaneState(persisted?.subPaneState);
+    setChartLayout(engine.getLayout());
+  }, [engineVersion, persisted?.subPaneState]);
+
+  const chartSubPaneLayoutKey = useMemo(() => {
+    if (!chartLayout) return '';
+    return chartLayout.subPanes
+      .map((pane) => `${pane.paneId}:${pane.height}:${pane.yScaleMode}:${pane.collapsed}:${pane.maximized}`)
+      .join('|');
+  }, [chartLayout]);
 
   // Subscribe to link bus for symbol changes
   useEffect(() => {
@@ -681,6 +702,7 @@ function ChartPage({ tabId }: ChartPageProps) {
   useEffect(() => {
     if (!tabId) return;
     if (activeIndicators.length === 0 && !restoredIndicatorsRef.current) return;
+    const subPaneState = getEngineSubPaneState() ?? persisted?.subPaneState;
     saveChartState(tabId, {
       symbol,
       timeframe,
@@ -699,8 +721,9 @@ function ChartPage({ tabId }: ChartPageProps) {
       indicatorPanelOpen,
       strategyPanelOpen,
       legendCollapsed,
+      subPaneState,
     });
-  }, [tabId, symbol, timeframe, chartType, yScaleMode, linkChannel, activeIndicators, stopperPx, indicatorColorDefaults, activeScriptSources, activeScriptIds, customStrategies, activeCustomStrategyIds, probEngWidget, tooltipFields, indicatorPanelOpen, strategyPanelOpen, legendCollapsed, serializeIndicators]);
+  }, [tabId, symbol, timeframe, chartType, yScaleMode, linkChannel, activeIndicators, stopperPx, indicatorColorDefaults, activeScriptSources, activeScriptIds, customStrategies, activeCustomStrategyIds, probEngWidget, tooltipFields, indicatorPanelOpen, strategyPanelOpen, legendCollapsed, serializeIndicators, getEngineSubPaneState, persisted?.subPaneState, chartSubPaneLayoutKey]);
 
   // Re-add persisted indicators once engine is ready
   useEffect(() => {

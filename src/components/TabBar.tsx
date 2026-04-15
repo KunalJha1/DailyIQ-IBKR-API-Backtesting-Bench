@@ -8,6 +8,7 @@ import {
 import {
   X,
   Plus,
+  Copy,
   LayoutDashboard,
   Search,
   BarChart2,
@@ -390,6 +391,12 @@ export default function TabBar() {
     [addTab],
   );
 
+  const handleDuplicateActiveTab = useCallback(() => {
+    if (!activeTabId) return;
+    duplicateTab(activeTabId);
+    setShowAdd(false);
+  }, [activeTabId, duplicateTab]);
+
   const handleOpenTestWindow = useCallback(async () => {
     setShowAdd(false);
     if (!isTauriRuntime()) return;
@@ -548,6 +555,14 @@ export default function TabBar() {
           className="fixed z-[100] min-w-[160px] rounded-md border border-white/[0.08] bg-[#1C2128] py-1 shadow-xl shadow-black/40"
           style={{ left: addPos.x, top: addPos.y }}
         >
+          <button
+            onClick={handleDuplicateActiveTab}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] text-white/60 transition-colors duration-75 hover:bg-white/[0.06] hover:text-white/80"
+          >
+            <Copy className="h-3 w-3 shrink-0 text-white/30" strokeWidth={1.5} />
+            Duplicate Current Page
+          </button>
+          <div className="mx-2 my-1 h-px bg-white/[0.06]" />
           {tabPresets.map((preset) => {
             const Icon = TAB_TYPE_ICONS[preset.type];
             return (

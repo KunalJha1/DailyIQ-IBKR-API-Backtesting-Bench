@@ -51,6 +51,10 @@ const NULL_RESULT: OptionsAnalytics = {
   impliedMoveDte: null,
 };
 
+function formatDteLabel(dte: number): string {
+  return dte.toFixed(1);
+}
+
 // ── Covered call scoring helpers ───────────────────────────────────────────────
 
 /**
@@ -213,7 +217,7 @@ export function useOptionsAnalytics(
         const cushionPct = ((best.strike - costBasis) / costBasis) * 100;
         const annPct = (best.annualizedReturn * 100).toFixed(1);
 
-        const dtePart = best.dte != null ? ` ${best.dte}d to expiry.` : "";
+        const dtePart = best.dte != null ? ` ${formatDteLabel(best.dte)}d to expiry.` : "";
         const deltaPart = best.delta != null ? ` Δ ${absDelta.toFixed(2)} (${assignRisk} assignment risk).` : "";
         const cushionPart = cushionPct > 0 ? ` ${cushionPct.toFixed(1)}% above cost basis.` : " At cost basis.";
 

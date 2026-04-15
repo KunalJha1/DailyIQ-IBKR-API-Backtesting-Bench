@@ -67,5 +67,13 @@ export function mergePersistedMiniChartConfig(
   ) {
     merged.probEngWidget = { ...(pw as Record<string, unknown>) };
   }
+  const subPaneState = persisted.subPaneState;
+  if (
+    subPaneState &&
+    typeof subPaneState === "object" &&
+    !Array.isArray(subPaneState)
+  ) {
+    merged.subPaneState = { ...(subPaneState as Record<string, unknown>) };
+  }
   return merged;
 }

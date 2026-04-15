@@ -101,7 +101,7 @@ const TabContext = createContext<TabContextValue>({
 });
 
 export function TabProvider({ children }: { children: ReactNode }) {
-  const { workspace, syncTabs } = useLayout();
+  const { workspace, syncTabs, duplicateTabState } = useLayout();
 
   // Initialize from workspace if available, otherwise fallback
   const initialTabs: Tab[] = workspace?.tabs.map((t) => ({
@@ -307,11 +307,13 @@ export function TabProvider({ children }: { children: ReactNode }) {
     (id: string) => {
       const source = tabs.find((t) => t.id === id);
       if (!source) return;
+      const newTabId = crypto.randomUUID();
       const newTab: Tab = {
-        id: crypto.randomUUID(),
+        id: newTabId,
         title: source.title,
         type: source.type,
       };
+      duplicateTabState(id, newTabId);
       setTabs((prev) => {
         const idx = prev.findIndex((t) => t.id === id);
         const next = [...prev];
@@ -320,7 +322,7 @@ export function TabProvider({ children }: { children: ReactNode }) {
       });
       setActiveTabId(newTab.id);
     },
-    [tabs],
+    [tabs, duplicateTabState],
   );
 
   const reorderTabs = useCallback((fromIndex: number, toIndex: number) => {

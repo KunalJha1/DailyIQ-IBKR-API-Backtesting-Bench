@@ -11,10 +11,11 @@ if sys.platform == "win32":
 
 import argparse
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -48,6 +49,7 @@ from historical import (
 from connection_pool import ConnectionPool, probe_tws_port
 from options_collector import get_market_session, estimate_option_price, DEFAULT_RISK_FREE_RATE as OPTIONS_DEFAULT_RISK_FREE_RATE
 from runtime_paths import data_dir, resource_path
+from debug_bus import emit_debug_event, set_debug_event_sink
 
 # Top-level imports for PyInstaller bundling — these modules are also imported
 # dynamically inside functions/routes, so static analysis misses them without this.
@@ -1239,6 +1241,45 @@ _refresh_last_triggered: dict[str, float] = {}
 _REFRESH_THROTTLE_SECONDS = 12.0
 _historical_revalidate_last_triggered: dict[str, float] = {}
 _HISTORICAL_REVALIDATE_THROTTLE_S = 8.0
+_DEBUG_EVENTS_MAX = 2000
+_debug_events: deque[dict] = deque(maxlen=_DEBUG_EVENTS_MAX)
+_debug_events_lock = threading.Lock()
+_debug_event_seq = 0
+
+
+def _push_debug_event(payload: dict) -> None:
+    global _debug_event_seq
+    with _debug_events_lock:
+        _debug_event_seq += 1
+        event = {
+            "id": _debug_event_seq,
+            "ts": int(payload.get("ts") or _now_ms()),
+            "category": str(payload.get("category") or "system"),
+            "action": str(payload.get("action") or "event"),
+        }
+        if "message" in payload and payload["message"] is not None:
+            event["message"] = str(payload["message"])
+        if isinstance(payload.get("data"), dict):
+            event["data"] = payload["data"]
+        _debug_events.append(event)
+
+
+def _read_debug_events(after_id: int | None, limit: int) -> tuple[list[dict], int]:
+    with _debug_events_lock:
+        latest_id = _debug_event_seq
+        events = list(_debug_events)
+    if after_id is not None:
+        events = [evt for evt in events if int(evt.get("id", 0)) > after_id]
+    if len(events) > limit:
+        events = events[-limit:]
+    return events, latest_id
+
+
+def _clear_debug_events() -> int:
+    with _debug_events_lock:
+        count = len(_debug_events)
+        _debug_events.clear()
+    return count
 
 
 def create_app() -> FastAPI:
@@ -1256,6 +1297,8 @@ def create_app() -> FastAPI:
         interval_minutes=OPTIONS_DEFAULT_INTERVAL_MINUTES,
         risk_free_rate=OPTIONS_DEFAULT_RISK_FREE_RATE,
     )
+    set_debug_event_sink(_push_debug_event)
+    emit_debug_event("sidecar", "startup", "Debug event sink attached")
     ticker_metadata = _load_ticker_metadata()
     etf_holdings = _load_etf_holdings()
 
@@ -1549,6 +1592,17 @@ def create_app() -> FastAPI:
             "startedAt": SIDECAR_STARTED_AT_MS,
             "uptimeMs": now_ms - SIDECAR_STARTED_AT_MS,
         }
+
+    @app.get("/debug/events")
+    async def get_debug_events(after_id: int | None = None, limit: int = 200):
+        safe_limit = max(1, min(limit, 1000))
+        events, next_id = _read_debug_events(after_id, safe_limit)
+        return {"events": events, "next_id": next_id}
+
+    @app.post("/debug/events/clear")
+    async def clear_debug_events():
+        cleared = _clear_debug_events()
+        return {"cleared": cleared}
 
     @app.get("/tws-status")
     async def tws_status(request: Request):
@@ -2501,8 +2555,21 @@ def create_app() -> FastAPI:
             return []
         sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         tf_list = [tf.strip().lower() for tf in timeframes.split(",") if tf.strip()]
+        emit_debug_event(
+            "technicals",
+            "scores_request",
+            f"Requested technical scores for {len(sym_list)} symbol(s)",
+            {"symbols": sym_list[:20], "timeframes": tf_list},
+        )
         from score_worker import read_scores_for_timeframes
-        return await run_db(read_scores_for_timeframes, sym_list, tf_list)
+        rows = await run_db(read_scores_for_timeframes, sym_list, tf_list)
+        emit_debug_event(
+            "technicals",
+            "scores_result",
+            f"Returned technical scores for {len(rows)} row(s)",
+            {"rows": len(rows)},
+        )
+        return rows
 
     @app.get("/technicals/indicators")
     async def get_technical_indicators(symbols: str = "", indicators: str = "[]"):
@@ -2519,8 +2586,21 @@ def create_app() -> FastAPI:
             indicator_specs = []
         if not indicator_specs:
             return {sym: {} for sym in sym_list}
+        emit_debug_event(
+            "technicals",
+            "indicator_request",
+            f"Requested indicators for {len(sym_list)} symbol(s)",
+            {"symbols": sym_list[:20], "indicatorCount": len(indicator_specs)},
+        )
         from technicals import compute_indicators_for_symbols
-        return await run_db(compute_indicators_for_symbols, sym_list, indicator_specs)
+        payload = await run_db(compute_indicators_for_symbols, sym_list, indicator_specs)
+        emit_debug_event(
+            "technicals",
+            "indicator_result",
+            "Indicator computation complete",
+            {"symbolCount": len(payload)},
+        )
+        return payload
 
     @app.get("/technicals/liquidity-sweeps")
     async def get_liquidity_sweeps(
@@ -2534,6 +2614,12 @@ def create_app() -> FastAPI:
         if not sym_list:
             return {}
         safe_lookback = max(1, min(lookback_bars, 10))
+        emit_debug_event(
+            "technicals",
+            "liquidity_sweep_request",
+            f"Requested liquidity sweeps for {len(sym_list)} symbol(s)",
+            {"symbols": sym_list[:20], "timeframe": timeframe, "lookbackBars": safe_lookback},
+        )
         from technicals import detect_liquidity_sweeps_for_symbols
         raw = await run_db(
             detect_liquidity_sweeps_for_symbols,
@@ -2555,6 +2641,12 @@ def create_app() -> FastAPI:
                 "ageMinutes": max(0, (now_ms - event_ts_int) // 60000) if event_ts_int is not None else None,
                 "source": status.get("source") if isinstance(status.get("source"), str) else None,
             }
+        emit_debug_event(
+            "technicals",
+            "liquidity_sweep_result",
+            "Liquidity sweep computation complete",
+            {"symbolCount": len(payload)},
+        )
         return payload
 
     @app.get("/historical")
@@ -2576,6 +2668,20 @@ def create_app() -> FastAPI:
         symbol = symbol.upper()
         db_bar_size = _normalize_bar_size(bar_size)
         requested_duration = duration if duration else target_duration_for_bar_size(db_bar_size)
+        emit_debug_event(
+            "historical",
+            "request",
+            f"Historical request {symbol} {db_bar_size}",
+            {
+                "symbol": symbol,
+                "barSize": db_bar_size,
+                "duration": requested_duration,
+                "whatToShow": what_to_show.upper(),
+                "tsStart": ts_start,
+                "tsEnd": ts_end,
+                "limit": limit,
+            },
+        )
         # Mark symbol as active so the worker can prioritize TWS backfill + realtime bars.
         def _touch_active():
             with sync_db_session() as conn:
@@ -2600,6 +2706,12 @@ def create_app() -> FastAPI:
             if (now - last) < _HISTORICAL_REVALIDATE_THROTTLE_S:
                 return
             _historical_revalidate_last_triggered[refresh_key] = now
+            emit_debug_event(
+                "historical",
+                "revalidate_queued",
+                f"Queued background revalidation for {symbol} {db_bar_size}",
+                {"symbol": symbol, "barSize": db_bar_size, "duration": fetch_duration},
+            )
 
             async def _revalidate_task() -> None:
                 # Always enqueue for the dedicated worker so TWS/backfill can
@@ -2653,6 +2765,12 @@ def create_app() -> FastAPI:
             }
             if result["count"] > 0:
                 _spawn_background_revalidate(requested_duration)
+                emit_debug_event(
+                    "historical",
+                    "window_cache_hit",
+                    f"Served cached window for {symbol} {db_bar_size}",
+                    {"count": result["count"]},
+                )
                 return payload
 
             await run_db(
@@ -2706,6 +2824,12 @@ def create_app() -> FastAPI:
         if cached["count"] > 0:
             _spawn_background_revalidate(requested_duration)
             bars, source = cached["bars"], "cache"
+            emit_debug_event(
+                "historical",
+                "cache_hit",
+                f"Served cached series for {symbol} {db_bar_size}",
+                {"count": cached["count"]},
+            )
         else:
             await run_db(
                 enqueue_historical_priority,
@@ -2732,6 +2856,12 @@ def create_app() -> FastAPI:
                 pass
             if bars:
                 _spawn_background_revalidate(requested_duration)
+            emit_debug_event(
+                "historical",
+                "cache_miss_fetch",
+                f"Cache miss fetch for {symbol} {db_bar_size} completed",
+                {"count": len(bars), "source": source},
+            )
         return {
             "symbol": symbol,
             "bars": bars,

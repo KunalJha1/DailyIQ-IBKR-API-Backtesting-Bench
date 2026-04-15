@@ -12,6 +12,7 @@ import { isTauriRuntime, usePlatform } from "../lib/platform";
 import WindowControls from "../components/WindowControls";
 import TabBar from "../components/TabBar";
 import SettingsPanel from "../components/SettingsPanel";
+import BackendDebugTerminal from "../components/BackendDebugTerminal";
 
 const DashboardPage = React.lazy(() => import("./DashboardPage"));
 const ScreenerPage = React.lazy(() => import("./ScreenerPage"));
@@ -46,6 +47,7 @@ export default function Dashboard() {
   const {
     status,
     port,
+    sidecarPort,
     clientId,
     connectionType,
     finnhubStatus,
@@ -83,6 +85,7 @@ export default function Dashboard() {
           ? "saved"
           : "off";
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [updateInstalling, setUpdateInstalling] = useState(false);
@@ -139,6 +142,15 @@ export default function Dashboard() {
           {updateAvailable && (
             <span className="absolute -right-1.5 -top-0.5 h-[5px] w-[5px] rounded-full bg-red" />
           )}
+        </button>
+        <button
+          onClick={() => setTerminalOpen((prev) => !prev)}
+          className={`shrink-0 text-[11px] font-light transition-all duration-100 ${
+            terminalOpen ? "text-sky-300" : "text-white/30 hover:text-white/80"
+          }`}
+          title="Toggle backend debug terminal"
+        >
+          Terminal
         </button>
         {appVersion ? (
           <span
@@ -198,6 +210,13 @@ export default function Dashboard() {
           <WindowControls />
         </div>
       </header>
+
+      {terminalOpen ? (
+        <BackendDebugTerminal
+          sidecarPort={sidecarPort}
+          backendState={backendState}
+        />
+      ) : null}
 
       {/* Update banner */}
       {updateAvailable && (

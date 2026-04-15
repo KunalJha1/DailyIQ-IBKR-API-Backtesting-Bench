@@ -42,6 +42,11 @@ function formatGreek(value: number | null | undefined, digits = 3): string {
   return value.toFixed(digits);
 }
 
+function formatDte(value: number | null | undefined, digits = 1): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return value.toFixed(digits);
+}
+
 
 function formatTimestamp(value: number | null | undefined): string {
   if (!value) return "—";
@@ -749,7 +754,7 @@ function OptionsPage() {
                 title="Implied % move to the selected expiration. Primary: ATM straddle (call mid + put mid) ÷ spot. Fallback: ATM IV × √(DTE/365) when straddle data is thin."
               >
                 <span className="text-[10px] uppercase tracking-[0.14em] text-white/45">
-                  Impl. Move{analytics.impliedMoveDte != null ? ` · ${analytics.impliedMoveDte}d` : ""}
+                  Impl. Move{analytics.impliedMoveDte != null ? ` · ${formatDte(analytics.impliedMoveDte)}d` : ""}
                 </span>
                 <span className="font-mono text-[14px] tabular-nums text-[#8B5CF6]">
                   ±{(analytics.impliedMoveToExpiry * 100).toFixed(2)}%
@@ -1247,7 +1252,7 @@ function OptionsPage() {
                     <>
                       <span style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", whiteSpace: "nowrap" }}>DTE</span>
                       <span style={{ fontFamily: "monospace", fontSize: 11, color: "rgba(255,255,255,0.82)", fontVariantNumeric: "tabular-nums" }}>
-                        {d.metrics.dte}d
+                        {formatDte(d.metrics.dte)}d
                         {(d.type === "coveredCall" || d.type === "equivalentPut") && (
                           <span style={{ marginLeft: 4, fontSize: 10, color: d.metrics.dte >= 21 && d.metrics.dte <= 45 ? "#00C853" : "rgba(255,255,255,0.40)" }}>
                             {d.metrics.dte >= 21 && d.metrics.dte <= 45 ? "✓ theta window" : d.metrics.dte < 21 ? "short" : "long"}

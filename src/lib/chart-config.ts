@@ -1,4 +1,4 @@
-import type { ChartType, Timeframe, YScaleMode } from "../chart/types";
+import type { ChartType, Timeframe, YScaleMode, SubPaneStateSnapshot } from "../chart/types";
 import { indicatorRegistry } from "../chart/indicators/registry";
 import type {
   ChartState,
@@ -23,6 +23,7 @@ export interface DailyIqChartConfig {
   activeCustomStrategyIds: string[];
   probEngWidget: ProbEngWidgetState;
   tooltipFields: Record<string, boolean>;
+  subPaneState?: SubPaneStateSnapshot;
 }
 
 export interface DailyIqChartFile {
@@ -72,6 +73,34 @@ function sanitizeBooleanRecord(value: unknown): Record<string, boolean> {
     if (typeof item === "boolean") result[key] = item;
   }
   return result;
+}
+
+function sanitizeYScaleModeRecord(value: unknown): Record<string, YScaleMode> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, YScaleMode> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === "auto" || item === "log" || item === "manual") {
+      result[key] = item;
+    }
+  }
+  return result;
+}
+
+function parseSubPaneState(value: unknown): SubPaneStateSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  const collapsedPaneIds = Array.isArray(value.collapsedPaneIds)
+    ? value.collapsedPaneIds.filter((item): item is string => typeof item === "string")
+    : [];
+  const maximizedPaneId = typeof value.maximizedPaneId === "string" ? value.maximizedPaneId : null;
+  return {
+    heightOverrides: Object.fromEntries(
+      Object.entries(sanitizeNumberRecord(value.heightOverrides))
+        .map(([paneId, height]) => [paneId, Math.max(60, Math.min(400, height))]),
+    ),
+    scaleModes: sanitizeYScaleModeRecord(value.scaleModes),
+    collapsedPaneIds,
+    maximizedPaneId,
+  };
 }
 
 function parseIndicators(value: unknown): PersistedChartIndicator[] {
@@ -156,6 +185,7 @@ function sanitizeChartConfig(value: unknown): DailyIqChartConfig | null {
         })()
       : createDefaultProbEngWidgetState(),
     tooltipFields: sanitizeBooleanRecord(value.tooltipFields),
+    subPaneState: parseSubPaneState(value.subPaneState),
   };
 }
 
@@ -182,6 +212,14 @@ export function createDailyIqChartFile(config: DailyIqChartConfig): DailyIqChart
       activeCustomStrategyIds: [...config.activeCustomStrategyIds],
       probEngWidget: { ...config.probEngWidget },
       tooltipFields: { ...config.tooltipFields },
+      subPaneState: config.subPaneState
+        ? {
+            heightOverrides: { ...config.subPaneState.heightOverrides },
+            scaleModes: { ...config.subPaneState.scaleModes },
+            collapsedPaneIds: [...config.subPaneState.collapsedPaneIds],
+            maximizedPaneId: config.subPaneState.maximizedPaneId,
+          }
+        : undefined,
     },
   };
 }
@@ -232,6 +270,14 @@ export function chartStateToDailyIqChartConfig(state: ChartState): DailyIqChartC
     activeCustomStrategyIds: [...(state.activeCustomStrategyIds ?? [])],
     probEngWidget: { ...(state.probEngWidget ?? createDefaultProbEngWidgetState()) },
     tooltipFields: { ...(state.tooltipFields ?? {}) },
+    subPaneState: state.subPaneState
+      ? {
+          heightOverrides: { ...state.subPaneState.heightOverrides },
+          scaleModes: { ...state.subPaneState.scaleModes },
+          collapsedPaneIds: [...state.subPaneState.collapsedPaneIds],
+          maximizedPaneId: state.subPaneState.maximizedPaneId,
+        }
+      : undefined,
   };
 }
 
@@ -260,6 +306,14 @@ export function dailyIqChartConfigToChartState(config: DailyIqChartConfig): Char
     activeCustomStrategyIds: [...config.activeCustomStrategyIds],
     probEngWidget: { ...config.probEngWidget },
     tooltipFields: { ...config.tooltipFields },
+    subPaneState: config.subPaneState
+      ? {
+          heightOverrides: { ...config.subPaneState.heightOverrides },
+          scaleModes: { ...config.subPaneState.scaleModes },
+          collapsedPaneIds: [...config.subPaneState.collapsedPaneIds],
+          maximizedPaneId: config.subPaneState.maximizedPaneId,
+        }
+      : undefined,
   };
 }
 
@@ -279,6 +333,7 @@ export function miniChartConfigToDailyIqChartConfig(
     scripts: config.scripts,
     probEngWidget: config.probEngWidget,
     tooltipFields: config.tooltipFields,
+    subPaneState: config.subPaneState,
   });
 
   return chart ?? {
@@ -295,6 +350,7 @@ export function miniChartConfigToDailyIqChartConfig(
     activeCustomStrategyIds: [],
     probEngWidget: createDefaultProbEngWidgetState(),
     tooltipFields: {},
+    subPaneState: undefined,
   };
 }
 
@@ -322,5 +378,13 @@ export function dailyIqChartConfigToMiniChartConfig(
     scripts: config.scripts.map((script) => ({ ...script })),
     probEngWidget: { ...config.probEngWidget },
     tooltipFields: { ...config.tooltipFields },
+    subPaneState: config.subPaneState
+      ? {
+          heightOverrides: { ...config.subPaneState.heightOverrides },
+          scaleModes: { ...config.subPaneState.scaleModes },
+          collapsedPaneIds: [...config.subPaneState.collapsedPaneIds],
+          maximizedPaneId: config.subPaneState.maximizedPaneId,
+        }
+      : undefined,
   };
 }
