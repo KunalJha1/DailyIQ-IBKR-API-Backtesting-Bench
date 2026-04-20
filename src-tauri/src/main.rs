@@ -763,6 +763,26 @@ fn stop_backend_stack(app_handle: &AppHandle, state: &SidecarState, reason: &str
     });
 }
 
+fn shutdown_app_runtime(
+    app_handle: &AppHandle,
+    state: &SidecarState,
+    reason: &str,
+    skip_label: Option<&str>,
+) {
+    if !is_shutting_down(state) {
+        stop_backend_stack(app_handle, state, reason);
+    }
+    for (label, win) in app_handle.windows() {
+        if let Some(skip) = skip_label {
+            if label == skip {
+                continue;
+            }
+        }
+        let _ = win.close();
+    }
+    app_handle.exit(0);
+}
+
 fn spawn_dev_python(
     app_handle: &AppHandle,
     script_path: &PathBuf,
@@ -1134,6 +1154,16 @@ fn kill_sidecar(state: tauri::State<'_, SidecarState>) {
     });
 }
 
+#[tauri::command]
+fn shutdown_app(app_handle: AppHandle, state: tauri::State<'_, SidecarState>) {
+    shutdown_app_runtime(
+        &app_handle,
+        &state,
+        "Frontend requested full app shutdown; stopping backend stack",
+        None,
+    );
+}
+
 /// Absolute path to the running executable (for diagnosing duplicate installs / shortcut targets).
 #[tauri::command]
 fn get_executable_path() -> Result<String, String> {
@@ -1188,6 +1218,7 @@ fn main() {
             spawn_sidecar,
             restart_sidecar,
             kill_sidecar,
+            shutdown_app,
             get_sidecar_port,
             get_backend_status,
             get_executable_path,
@@ -1392,24 +1423,21 @@ fn main() {
         .on_window_event(|event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
                 let label = event.window().label().to_string();
-                // Only kill the sidecar when the main window closes.
-                // Detached tab windows close freely without touching the sidecar.
-                if label == "main" {
-                    // Prevent the window from closing until child processes are killed.
-                    // Using CloseRequested (not Destroyed) because on Windows, Destroyed
-                    // fires too late — the runtime may already be partially torn down.
+                // Detached windows close independently.
+                // Primary windows trigger full app shutdown.
+                let is_detached = label.starts_with("detached-");
+                let is_test_window = label.starts_with("test-window-");
+                if label == "main" || (!is_detached && !is_test_window) {
                     api.prevent_close();
                     let window = event.window().clone();
                     let app_handle = window.app_handle();
                     let state: tauri::State<SidecarState> = window.state();
-                    stop_backend_stack(&app_handle, &state, "Main window closing; stopping backend stack");
-                    // Close any detached tab windows so they don't linger as orphan processes.
-                    for (lbl, win) in app_handle.windows() {
-                        if lbl != "main" {
-                            let _ = win.close();
-                        }
-                    }
-                    app_handle.exit(0);
+                    shutdown_app_runtime(
+                        &app_handle,
+                        &state,
+                        "Primary window closing; stopping backend stack and exiting app",
+                        Some(&label),
+                    );
                 } else {
                     let state: tauri::State<SidecarState> = event.window().state();
                     state.detached_tabs.lock().unwrap().remove(&label);
@@ -1427,3 +1455,4 @@ fn main() {
             }
         });
 }
+

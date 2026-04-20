@@ -2821,7 +2821,13 @@ def create_app() -> FastAPI:
             what_to_show,
             requested_duration,
         )
-        if cached["count"] > 0:
+        has_cache = cached["count"] > 0
+        cache_ready = (
+            has_cache
+            and bool(cached.get("is_fresh"))
+            and bool(cached.get("has_full_coverage"))
+        )
+        if cache_ready:
             _spawn_background_revalidate(requested_duration)
             bars, source = cached["bars"], "cache"
             emit_debug_event(
@@ -2831,6 +2837,17 @@ def create_app() -> FastAPI:
                 {"count": cached["count"]},
             )
         else:
+            if has_cache:
+                emit_debug_event(
+                    "historical",
+                    "cache_stale_refetch",
+                    f"Cached series stale/incomplete for {symbol} {db_bar_size}; fetching live",
+                    {
+                        "count": cached["count"],
+                        "isFresh": bool(cached.get("is_fresh")),
+                        "hasFullCoverage": bool(cached.get("has_full_coverage")),
+                    },
+                )
             await run_db(
                 enqueue_historical_priority,
                 symbol,
@@ -2846,7 +2863,7 @@ def create_app() -> FastAPI:
                         symbol=symbol,
                         ib=None,
                         tws_connected=False,
-                        duration=seed_duration_for_bar_size(bar_size),
+                        duration=requested_duration,
                         bar_size=bar_size,
                         what_to_show=what_to_show,
                     ),
@@ -2856,10 +2873,19 @@ def create_app() -> FastAPI:
                 pass
             if bars:
                 _spawn_background_revalidate(requested_duration)
+                cached = await run_db(
+                    read_cached_series,
+                    symbol,
+                    db_bar_size,
+                    what_to_show,
+                    requested_duration,
+                )
+            elif has_cache:
+                bars, source = cached["bars"], "cache"
             emit_debug_event(
                 "historical",
-                "cache_miss_fetch",
-                f"Cache miss fetch for {symbol} {db_bar_size} completed",
+                "cache_refetch",
+                f"Cache refetch for {symbol} {db_bar_size} completed",
                 {"count": len(bars), "source": source},
             )
         return {

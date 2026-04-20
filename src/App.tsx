@@ -14,6 +14,8 @@ import { LayoutProvider, useLayout } from "./lib/layout";
 import { TwsProvider } from "./lib/tws";
 import { TabProvider, useTabs } from "./lib/tabs";
 import { appWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/tauri";
+import { exit } from "@tauri-apps/api/process";
 import { WatchlistProvider, useWatchlist } from "./lib/watchlist";
 import { isTauriRuntime } from "./lib/platform";
 import { initPerfDiagnostics } from "./lib/perf-diagnostics";
@@ -68,10 +70,24 @@ function CloseGuard() {
       if (isClosing) return;
       isClosing = true;
       event.preventDefault();
-      if (!isDetachedWindow()) {
+      const detached = isDetachedWindow();
+      if (!detached) {
         setMainWindowClosing(true);
       }
       await Promise.all([flushLayout(), flushTabs(), flushWatchlist()]);
+      if (!detached) {
+        try {
+          await invoke("shutdown_app");
+          return;
+        } catch {
+          try {
+            await exit(0);
+            return;
+          } catch {
+            // Fall back to native close if force exit is unavailable.
+          }
+        }
+      }
       await appWindow.close();
     });
     return () => {

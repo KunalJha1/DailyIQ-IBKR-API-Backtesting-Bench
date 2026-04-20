@@ -2454,7 +2454,12 @@ export class ChartEngine {
     const drawColor = ind.colors?.volumes ?? indicatorRegistry[ind.name].outputs[1]?.color ?? COLORS.blue;
     const upColor = ind.colors?.upVolume ?? '#00C853';
     const downColor = ind.colors?.downVolume ?? '#FF3D71';
-    const binHeight = Math.max(2, Math.floor((clipBottom - clipTop) / Math.max(bins, 1) * 0.9));
+    const rowHeight = (clipBottom - clipTop) / Math.max(bins, 1);
+    const binHeight = Math.max(1, Math.floor(rowHeight * 0.84));
+    const barDividerColor = this.withAlpha('#000000', 0.82);
+    const solidFillColor = this.withAlpha(drawColor, 0.9);
+    const upFillColor = this.withAlpha(upColor, 0.9);
+    const downFillColor = this.withAlpha(downColor, 0.9);
 
     let maxDrawnWidth = 0;
     let minDrawnY = Infinity;
@@ -2478,10 +2483,13 @@ export class ChartEngine {
       if (splitSum > 0) {
         const downWidth = width * ((Number.isFinite(down) ? down : 0) / splitSum);
         const upWidth = width - downWidth;
-        if (downWidth > 0.5) this.renderer.rect(leftX, topY, downWidth, binHeight, downColor);
-        if (upWidth > 0.5) this.renderer.rect(leftX + downWidth, topY, upWidth, binHeight, upColor);
+        if (downWidth > 0.5) this.renderer.rect(leftX, topY, downWidth, binHeight, downFillColor);
+        if (upWidth > 0.5) this.renderer.rect(leftX + downWidth, topY, upWidth, binHeight, upFillColor);
       } else {
-        this.renderer.rect(leftX, topY, width, binHeight, drawColor);
+        this.renderer.rect(leftX, topY, width, binHeight, solidFillColor);
+      }
+      if (binHeight >= 2 && width >= 2) {
+        this.renderer.rectStroke(leftX, topY, width, binHeight, barDividerColor, 1);
       }
 
       maxDrawnWidth = Math.max(maxDrawnWidth, width);

@@ -60,6 +60,8 @@ FINNHUB_WATCHLIST_POLL_S = 600.0
 FINNHUB_WATCHLIST_SYMBOL_SLEEP_S = 1.5
 FINNHUB_UNIVERSE_SYMBOL_SLEEP_S = 4.0
 FINNHUB_HTTP_TIMEOUT_S = 10.0
+CONNECTED_FALLBACK_POLL_S = 30.0
+TWS_FALLBACK_STALE_S = 180.0
 TICK_THROTTLE_S = 3.0
 ACTIVE_REFRESH_S = 5.0
 ACTIVE_TTL_S = 120
@@ -1019,6 +1021,62 @@ def read_latest_bid_ask(symbol: str) -> tuple[float | None, float | None]:
     return bid, ask
 
 
+def read_symbols_needing_quote_fallback(
+    symbols: List[str],
+    *,
+    include_stale_tws: bool,
+) -> list[str]:
+    """Return symbols that still need non-TWS quote fallback.
+
+    This allows DailyIQ/Yahoo fallback to keep running while TWS is connected,
+    but only for symbols that are missing a usable recent TWS quote.
+    """
+    normalized = normalize_watchlist_symbols(symbols)
+    if not normalized:
+        return []
+
+    placeholders = ", ".join("?" * len(normalized))
+    with sync_db_session() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT symbol, last, source, updated_at
+            FROM watchlist_quotes
+            WHERE symbol IN ({placeholders})
+            """,
+            normalized,
+        ).fetchall()
+
+    by_symbol: dict[str, tuple] = {
+        str(row[0]).strip().upper(): row
+        for row in rows
+        if row and row[0]
+    }
+    stale_cutoff_ms = int(time.time() * 1000) - int(TWS_FALLBACK_STALE_S * 1000)
+
+    needs_fallback: list[str] = []
+    for sym in normalized:
+        row = by_symbol.get(sym)
+        if row is None:
+            needs_fallback.append(sym)
+            continue
+
+        last = _price(row[1])
+        source = str(row[2] or "").strip().lower()
+        updated_at = int(row[3] or 0)
+
+        if last is None:
+            needs_fallback.append(sym)
+            continue
+        if source != "tws":
+            if updated_at <= 0 or updated_at < stale_cutoff_ms:
+                needs_fallback.append(sym)
+            continue
+        if include_stale_tws and (updated_at <= 0 or updated_at < stale_cutoff_ms):
+            needs_fallback.append(sym)
+
+    return needs_fallback
+
+
 def normalize_watchlist_symbols(rows: List[str]) -> List[str]:
     symbols: list[str] = []
     seen: set[str] = set()
@@ -1751,38 +1809,51 @@ async def worker_loop(host: str, ports: List[int], client_id: int) -> None:
     async def yahoo_loop():
         while True:
             cycle_started = time.monotonic()
-            if _any_shard_connected():
-                await asyncio.sleep(FINNHUB_WATCHLIST_POLL_S)
-                continue
             symbols = _quote_symbols()
+            tws_connected = _any_shard_connected()
+            poll_interval_s = CONNECTED_FALLBACK_POLL_S if tws_connected else FINNHUB_WATCHLIST_POLL_S
             if not symbols:
-                await asyncio.sleep(FINNHUB_WATCHLIST_POLL_S)
+                await asyncio.sleep(poll_interval_s)
+                continue
+            regular_hours = _is_regular_market_hours()
+            if tws_connected:
+                fallback_symbols = await asyncio.to_thread(
+                    read_symbols_needing_quote_fallback,
+                    symbols,
+                    include_stale_tws=regular_hours,
+                )
+            else:
+                fallback_symbols = symbols
+            if not fallback_symbols:
+                await asyncio.sleep(poll_interval_s)
                 continue
             try:
-                _reg_hrs = _is_regular_market_hours()
-                source = ("Finnhub" if _load_finnhub_api_key() else "Yahoo") if _reg_hrs else "Yahoo"
+                source = ("Finnhub" if _load_finnhub_api_key() else "Yahoo") if regular_hours else "Yahoo"
+                mode = "connected-partial" if tws_connected else "disconnected-full"
                 start_msg = (
-                    f"[Quote fallback] Starting {source} refresh for {len(symbols)} symbols"
-                    f" ({'regular' if _reg_hrs else 'extended'} hours)"
-                    f"; next cycle in {int(FINNHUB_WATCHLIST_POLL_S)}s"
+                    f"[Quote fallback] Starting {source} refresh for "
+                    f"{len(fallback_symbols)}/{len(symbols)} symbols "
+                    f"({mode}, {'regular' if regular_hours else 'extended'} hours)"
+                    f"; next cycle in {int(poll_interval_s)}s"
                 )
                 print(start_msg, flush=True)
                 logger.info(start_msg)
                 selected_source, quotes = await asyncio.to_thread(
-                    fetch_watchlist_quotes_with_fallback, symbols
+                    fetch_watchlist_quotes_with_fallback, fallback_symbols
                 )
                 for q in quotes:
                     await asyncio.to_thread(upsert_quote, q)
                 logger.info(
-                    "[Quote fallback] %s returned %d/%d quotes",
+                    "[Quote fallback] %s returned %d/%d quotes (tracked symbols=%d)",
                     selected_source,
                     len(quotes),
+                    len(fallback_symbols),
                     len(symbols),
                 )
             except Exception as exc:
                 logger.warning(f"Quote fallback poll failed: {exc}")
             elapsed = time.monotonic() - cycle_started
-            await asyncio.sleep(max(0.0, FINNHUB_WATCHLIST_POLL_S - elapsed))
+            await asyncio.sleep(max(0.0, poll_interval_s - elapsed))
 
     async def backfill_loop():
         last_backfill: Dict[str, float] = {}

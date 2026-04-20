@@ -646,8 +646,21 @@ def _read_cached_window(
     has_synthetic = table in _synthetic_tables
     select_cols = "ts, open, high, low, close, volume, synthetic" if has_synthetic else "ts, open, high, low, close, volume"
 
-    # When only limit is given (no time bounds), fetch the most recent bars
+    # Limit-only: fetch most recent N bars.
     if limit is not None and ts_start is None and ts_end is None:
+        rows = conn.execute(
+            f"""
+            SELECT {select_cols}
+            FROM {table}
+            WHERE {where}
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        ).fetchall()
+        rows.reverse()  # restore chronological order
+    # Left-pan window (ts_end + limit): fetch bars nearest to ts_end, not oldest in table.
+    elif limit is not None and ts_start is None and ts_end is not None:
         rows = conn.execute(
             f"""
             SELECT {select_cols}

@@ -80,6 +80,7 @@ export default function DetachedWindow() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const closingRef = useRef(false);
   const allowNativeCloseRef = useRef(false);
+  const lastDragRegionClickTimeRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,15 +252,18 @@ export default function DetachedWindow() {
   const handleDragRegionMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("[data-no-drag]")) return;
     if (e.button === 0 && isTauriRuntime()) {
+      const now = Date.now();
+      if (now - lastDragRegionClickTimeRef.current < 300) {
+        lastDragRegionClickTimeRef.current = 0;
+        appWindow
+          .isMaximized()
+          .then((max) => (max ? appWindow.unmaximize() : appWindow.maximize()))
+          .catch(() => {});
+        return;
+      }
+      lastDragRegionClickTimeRef.current = now;
       appWindow.startDragging().catch(() => {});
     }
-  };
-
-  const handleDragRegionDblClick = () => {
-    if (!isTauriRuntime()) return;
-    appWindow.isMaximized().then((max) => {
-      max ? appWindow.unmaximize() : appWindow.maximize();
-    }).catch(() => {});
   };
 
   if (!info) {
@@ -268,7 +272,6 @@ export default function DetachedWindow() {
         <div
           className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.06] bg-base"
           onMouseDown={handleDragRegionMouseDown}
-          onDoubleClick={handleDragRegionDblClick}
         >
           <span className="px-3 font-mono text-[11px] text-white/30">DailyIQ</span>
           <WindowControls
@@ -298,7 +301,6 @@ export default function DetachedWindow() {
         <div
           className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.06] bg-base"
           onMouseDown={handleDragRegionMouseDown}
-          onDoubleClick={handleDragRegionDblClick}
         >
           <span className="px-3 font-mono text-[11px] text-white/30">DailyIQ</span>
           <WindowControls
@@ -329,7 +331,6 @@ export default function DetachedWindow() {
       <div
         className="flex h-8 shrink-0 cursor-default select-none items-center justify-between border-b border-white/[0.06] bg-base"
         onMouseDown={handleDragRegionMouseDown}
-        onDoubleClick={handleDragRegionDblClick}
       >
         <span className="px-3 font-mono text-[11px] text-white/45">{info.title}</span>
         <WindowControls

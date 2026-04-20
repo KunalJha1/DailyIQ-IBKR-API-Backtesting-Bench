@@ -19,7 +19,7 @@ import {
   TrendingUp,
   type LucideIcon,
 } from "lucide-react";
-import { useTabs, tabPresets, type TabType } from "../lib/tabs";
+import { useTabs, tabPresets, type Tab, type TabType } from "../lib/tabs";
 
 const TAB_TYPE_ICONS: Record<TabType, LucideIcon> = {
   dashboard: LayoutDashboard,
@@ -33,8 +33,9 @@ const TAB_TYPE_ICONS: Record<TabType, LucideIcon> = {
 };
 import TabContextMenu from "./TabContextMenu";
 import { invoke } from "@tauri-apps/api/tauri";
+import { exit } from "@tauri-apps/api/process";
 import { isTauriRuntime } from "../lib/platform";
-import { removeDetachedTabInfo, writeDetachedTabInfo } from "../lib/detached";
+import { isDetachedWindow, removeDetachedTabInfo, writeDetachedTabInfo } from "../lib/detached";
 import { loadChartState } from "../lib/chart-state";
 
 const DRAG_START_DISTANCE = 6;
@@ -264,15 +265,26 @@ export default function TabBar() {
       }
 
       const tabStripRect = tabListRef.current?.getBoundingClientRect() ?? null;
-      const pointerBelowStrip = tabStripRect
-        ? e.clientY > tabStripRect.bottom
-        : false;
+      const pointerDeltaX = tabStripRect
+        ? e.clientX < tabStripRect.left
+          ? tabStripRect.left - e.clientX
+          : e.clientX > tabStripRect.right
+            ? e.clientX - tabStripRect.right
+            : 0
+        : 0;
+      const pointerDeltaY = tabStripRect
+        ? e.clientY < tabStripRect.top
+          ? tabStripRect.top - e.clientY
+          : e.clientY > tabStripRect.bottom
+            ? e.clientY - tabStripRect.bottom
+            : 0
+        : 0;
+      const pointerOutsideStripDistance = Math.hypot(pointerDeltaX, pointerDeltaY);
       const tearOffReady =
         isTauriRuntime() &&
         drag.detachable &&
-        pointerBelowStrip &&
         tabStripRect !== null &&
-        e.clientY - tabStripRect.bottom >= TEAR_OFF_DISTANCE;
+        pointerOutsideStripDistance >= TEAR_OFF_DISTANCE;
       drag.tearOffReady = tearOffReady;
 
       setDragPreview({
@@ -415,6 +427,20 @@ export default function TabBar() {
     }
   }, []);
 
+  const handleCloseTab = useCallback((tab: Tab) => {
+    if (isTauriRuntime() && !isDetachedWindow() && tab.type === "dashboard") {
+      void invoke("shutdown_app").catch(async () => {
+        try {
+          await exit(0);
+        } catch {
+          closeTab(tab.id);
+        }
+      });
+      return;
+    }
+    closeTab(tab.id);
+  }, [closeTab]);
+
   return (
     <div className="relative flex h-8 shrink-0 items-end border-b border-white/[0.06] bg-base select-none">
       <div
@@ -461,7 +487,7 @@ export default function TabBar() {
                   className={`h-1.5 w-1.5 shrink-0 rounded-full transition-colors ${
                     previewPhase === "tearoff-ready" ? "bg-blue" : "bg-white/18 group-hover:bg-blue/65"
                   }`}
-                  title="Drag downward to open in a child window"
+                  title="Drag away from the tab strip to open in a child window"
                 />
               ) : null}
 
@@ -485,7 +511,7 @@ export default function TabBar() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    closeTab(tab.id);
+                    handleCloseTab(tab);
                   }}
                   className={`ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded-sm transition-colors duration-75 ${
                     isActive
@@ -542,7 +568,7 @@ export default function TabBar() {
               {dragPreview.phase === "tearoff-ready"
                 ? "Release to detach"
                 : dragPreview.detachable
-                  ? "Drag down to detach"
+                  ? "Drag away to detach"
                   : "Drag to reorder"}
             </p>
           </div>
