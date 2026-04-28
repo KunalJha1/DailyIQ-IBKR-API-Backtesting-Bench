@@ -144,13 +144,21 @@ function AppRoutes() {
 
 function App() {
   const [configReady, setConfigReady] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
 
   useEffect(() => {
     initPerfDiagnostics();
-    initSupabase().then(() => setConfigReady(true));
+    initSupabase()
+      .then(() => setConfigReady(true))
+      .catch((e) => {
+        console.error("[app] Failed to initialize config:", e);
+        setConfigError(String(e?.message ?? e));
+        setConfigReady(true);
+      });
   }, []);
 
   if (!configReady) return <SplashScreen label="Starting app" />;
+  if (configError) return <SplashScreen label={`Config error: ${configError}`} />;
 
   const windowMode = resolveWindowMode();
 

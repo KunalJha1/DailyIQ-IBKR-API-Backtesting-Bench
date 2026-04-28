@@ -426,6 +426,7 @@ interface IndicatorLegendProps {
   leftOffset?: number;
   allCollapsed?: boolean;
   onCollapsedChange?: (v: boolean) => void;
+  hideScriptButton?: boolean;
 }
 
 export default function IndicatorLegend({
@@ -448,6 +449,7 @@ export default function IndicatorLegend({
   leftOffset = 8,
   allCollapsed: allCollapsedProp,
   onCollapsedChange,
+  hideScriptButton = false,
 }: IndicatorLegendProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -623,7 +625,7 @@ export default function IndicatorLegend({
               {/* Action buttons — show on hover */}
               {isHovered && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 1, marginLeft: 2 }}>
-                  {meta.scriptSource && (
+                  {meta.scriptSource && !hideScriptButton && (
                     <IconBtn
                       onClick={() => {
                         if (onOpenBuiltInScript) {

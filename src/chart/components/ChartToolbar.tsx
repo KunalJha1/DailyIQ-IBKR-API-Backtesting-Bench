@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import type { Timeframe, ChartType } from '../types';
 import type { ActiveIndicator } from '../types';
 import { TIMEFRAMES, CHART_TYPES } from '../constants';
@@ -64,6 +64,7 @@ interface ChartToolbarProps {
   onZoomReset?: () => void;
   onExportChart?: () => void;
   onImportChart?: () => void;
+  rightSlot?: React.ReactNode;
 }
 
 export default function ChartToolbar({
@@ -109,6 +110,7 @@ export default function ChartToolbar({
   onZoomReset,
   onExportChart: _onExportChart,
   onImportChart: _onImportChart,
+  rightSlot,
 }: ChartToolbarProps) {
   const [chartTypeOpen, setChartTypeOpen] = useState(false);
   const [symbolSearchOpen, setSymbolSearchOpen] = useState(false);
@@ -338,6 +340,8 @@ export default function ChartToolbar({
 
       {/* Spacer */}
       <div className="flex-1" />
+
+      {rightSlot}
 
       {/* Data source indicator */}
       <div className="flex items-center gap-1.5 mr-1">

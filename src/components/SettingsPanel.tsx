@@ -571,6 +571,80 @@ export default function SettingsPanel({ open, onClose, updateAvailable }: Settin
             </div>
           </section>
 
+          {/* Terminal API Docs — admin only */}
+          {(session?.role === "admin") && (
+            <section className="mt-6 border-t border-white/[0.06] pt-6">
+              <div className="mb-3">
+                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-white/30">
+                  Terminal API
+                </h3>
+                <p className="mt-1 max-w-[320px] text-[10px] leading-4 text-white/35">
+                  Public endpoints for authenticating a separate terminal / CLI application. All endpoints are hosted at{" "}
+                  <span className="font-mono text-white/50">{import.meta.env.VITE_DAILYIQ_URL ?? "https://dailyiq.me"}/api-proxy/auth</span>.
+                </p>
+              </div>
+
+              {/* Email + password */}
+              <div className="mb-3 rounded-md border border-white/[0.06] bg-base/60 px-3 py-3">
+                <p className="mb-1 font-mono text-[10px] font-semibold text-blue/70">
+                  POST /terminal-login
+                </p>
+                <p className="mb-2 text-[10px] leading-4 text-white/40">
+                  Authenticate with email and password. Returns an API key and user info.
+                </p>
+                <div className="rounded border border-white/[0.06] bg-black/30 px-2 py-1.5 font-mono text-[10px] leading-5 text-white/55">
+                  <span className="text-white/30">// Request body</span>{"\n"}
+                  {"{"} "email": "user@example.com", "password": "..." {"}"}
+                </div>
+                <div className="mt-1.5 rounded border border-white/[0.06] bg-black/30 px-2 py-1.5 font-mono text-[10px] leading-5 text-white/55">
+                  <span className="text-white/30">// Response</span>{"\n"}
+                  {"{"} "api_key": "...", "user_id": "...", "email": "...", "name": "..." {"}"}
+                </div>
+              </div>
+
+              {/* Google OAuth — step 1 */}
+              <div className="mb-3 rounded-md border border-white/[0.06] bg-base/60 px-3 py-3">
+                <p className="mb-1 font-mono text-[10px] font-semibold text-blue/70">
+                  GET /terminal-google-url
+                </p>
+                <p className="mb-2 text-[10px] leading-4 text-white/40">
+                  Returns a Google OAuth URL. Open it in a browser. After consent, Google redirects to{" "}
+                  <span className="font-mono">localhost:17284/?code=...</span> — capture the{" "}
+                  <span className="font-mono">code</span> param and pass it to{" "}
+                  <span className="font-mono">/terminal-google-exchange</span>.
+                </p>
+                <div className="rounded border border-white/[0.06] bg-black/30 px-2 py-1.5 font-mono text-[10px] leading-5 text-white/55">
+                  <span className="text-white/30">// Response</span>{"\n"}
+                  {"{"} "url": "https://accounts.google.com/o/oauth2/auth?..." {"}"}
+                </div>
+              </div>
+
+              {/* Google OAuth — step 2 */}
+              <div className="mb-3 rounded-md border border-white/[0.06] bg-base/60 px-3 py-3">
+                <p className="mb-1 font-mono text-[10px] font-semibold text-blue/70">
+                  POST /terminal-google-exchange
+                </p>
+                <p className="mb-2 text-[10px] leading-4 text-white/40">
+                  Exchange the OAuth code from Google's redirect for a session. Returns the same shape as{" "}
+                  <span className="font-mono">/terminal-login</span>.
+                </p>
+                <div className="rounded border border-white/[0.06] bg-black/30 px-2 py-1.5 font-mono text-[10px] leading-5 text-white/55">
+                  <span className="text-white/30">// Request body</span>{"\n"}
+                  {"{"} "code": "&lt;code from redirect&gt;" {"}"}
+                </div>
+                <div className="mt-1.5 rounded border border-white/[0.06] bg-black/30 px-2 py-1.5 font-mono text-[10px] leading-5 text-white/55">
+                  <span className="text-white/30">// Response</span>{"\n"}
+                  {"{"} "api_key": "...", "user_id": "...", "email": "...", "name": "..." {"}"}
+                </div>
+              </div>
+
+              <p className="text-[10px] leading-4 text-white/25">
+                Store the returned <span className="font-mono">api_key</span> as a bearer token.
+                Pass it as <span className="font-mono">Authorization: Bearer &lt;api_key&gt;</span> on all authenticated requests.
+              </p>
+            </section>
+          )}
+
           {/* App Updates */}
           <section className="mt-6 border-t border-white/[0.06] pt-6">
             <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">

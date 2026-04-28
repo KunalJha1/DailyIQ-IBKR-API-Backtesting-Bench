@@ -68,7 +68,7 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
     outputs: [
       { key: 'fast', label: 'EMA 5', color: C[3], style: 'line', lineWidth: 1.5 },
       { key: 'mid', label: 'EMA 20', color: C[4], style: 'line', lineWidth: 1.5 },
-      { key: 'slow', label: 'EMA 200', color: C[6], style: 'line', lineWidth: 1.5 },
+      { key: 'slow', label: 'EMA 200', color: '#3B82F6', style: 'line', lineWidth: 1.5 },
     ],
     scriptSource: emaRibbonScript,
     isBuiltIn: true,

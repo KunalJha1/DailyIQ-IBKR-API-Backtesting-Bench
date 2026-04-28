@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo, memo, type PointerEvent as ReactPointerEvent } from 'react';
-import { GripHorizontal, Lock, Unlock } from 'lucide-react';
+import { GripHorizontal, Lock, Unlock, LayoutGrid } from 'lucide-react';
 import type { Timeframe, ChartType, ActiveIndicator, ScriptResult, YScaleMode, ChartLayout, SubPaneStateSnapshot } from '../chart/types';
 import { ChartEngine } from '../chart/core/ChartEngine';
 import { useChartData } from '../chart/hooks/useChartData';
@@ -49,8 +49,11 @@ import {
   DIQ_TABLE_TIMEFRAMES,
 } from '../chart/indicators/overlays/dailyIQTechnicalTable.constants';
 
+type SplitLayout = '1' | '2h' | '2v' | '4' | '3h' | '3v' | '9';
+
 interface ChartPageProps {
   tabId?: string;
+  allowSplit?: boolean;
 }
 
 const PROBENG_WIDGET_WIDTH = 188;
@@ -1072,7 +1075,39 @@ function DailyIQTechnicalTableOverlay({
   );
 }
 
-function ChartPage({ tabId }: ChartPageProps) {
+const LAYOUT_OPTIONS: { id: SplitLayout; label: string; cols: number; rows: number }[] = [
+  { id: '1',  label: 'Single', cols: 1, rows: 1 },
+  { id: '2h', label: '1 × 2',  cols: 2, rows: 1 },
+  { id: '2v', label: '2 × 1',  cols: 1, rows: 2 },
+  { id: '4',  label: '2 × 2',  cols: 2, rows: 2 },
+  { id: '3h', label: '1 × 3',  cols: 3, rows: 1 },
+  { id: '3v', label: '3 × 1',  cols: 1, rows: 3 },
+  { id: '9',  label: '3 × 3',  cols: 3, rows: 3 },
+];
+
+function LayoutPicker({ current, onSelect, style }: { current: SplitLayout; onSelect: (l: SplitLayout) => void; style?: React.CSSProperties }) {
+  return (
+    <div style={{ background: '#161B22', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 4, minWidth: 130, ...style }}>
+      <div style={{ fontSize: 10, color: '#8B949E', fontFamily: 'monospace', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Layout</div>
+      {LAYOUT_OPTIONS.map(({ id, label, cols, rows }) => (
+        <button
+          key={id}
+          onClick={() => onSelect(id)}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, background: current === id ? 'rgba(255,255,255,0.08)' : 'transparent', border: 'none', borderRadius: 5, padding: '4px 8px', cursor: 'pointer', width: '100%' }}
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 10px)`, gridTemplateRows: `repeat(${rows}, 8px)`, gap: 2, flexShrink: 0 }}>
+            {Array.from({ length: cols * rows }).map((_, i) => (
+              <div key={i} style={{ background: current === id ? '#58A6FF' : '#30363D', borderRadius: 2 }} />
+            ))}
+          </div>
+          <span style={{ color: current === id ? '#E6EDF3' : '#8B949E', fontSize: 11, fontFamily: 'monospace' }}>{label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ChartPage({ tabId, allowSplit = true }: ChartPageProps) {
   const chartToolRailWidth = 56;
   const defaultIndicatorsRef = useRef<PersistedChartIndicator[]>(createDefaultPersistedChartIndicators());
   const chartOverlayRef = useRef<HTMLDivElement>(null);
@@ -1141,6 +1176,8 @@ function ChartPage({ tabId }: ChartPageProps) {
   const [technicalTableSnapshot, setTechnicalTableSnapshot] = useState<TechnicalTableSnapshot | null>(null);
   const [chartNotice, setChartNotice] = useState<string | null>(null);
   const [chartLayout, setChartLayout] = useState<ChartLayout | null>(null);
+  const [splitLayout, setSplitLayout] = useState<SplitLayout>('1');
+  const [splitPickerOpen, setSplitPickerOpen] = useState(false);
   const [dragState, setDragState] = useState<{ indicatorId: string; sourcePaneId: string } | null>(null);
   const [draggingMouse, setDraggingMouse] = useState<{ x: number; y: number } | null>(null);
   const [dragHoverPaneId, setDragHoverPaneId] = useState<string | null>(null);
@@ -1148,6 +1185,7 @@ function ChartPage({ tabId }: ChartPageProps) {
   const [technicalTableDragging, setTechnicalTableDragging] = useState(false);
   const [technicalTableResizing, setTechnicalTableResizing] = useState(false);
   const restoredIndicatorsRef = useRef(false);
+  const userRemovedIndicatorIds = useRef<Set<string>>(new Set());
   const paneDividerDragRef = useRef<{ paneId: string; startY: number; startHeight: number } | null>(null);
   const scriptDividerDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const probEngDragRef = useRef<{
@@ -1519,9 +1557,13 @@ function ChartPage({ tabId }: ChartPageProps) {
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine || bars.length === 0) return;
-    const desiredIndicators = activeIndicators.length > 0
+    const base = activeIndicators.length > 0
       ? serializeIndicators(activeIndicators)
       : restoredIndicators;
+    // Never re-add indicators the user explicitly removed this session.
+    const desiredIndicators = base.filter(
+      (ind) => !userRemovedIndicatorIds.current.has(ind.name),
+    );
     if (desiredIndicators.length === 0) return;
 
     const engineIndicators = engine.getActiveIndicators();
@@ -1894,7 +1936,12 @@ function ChartPage({ tabId }: ChartPageProps) {
   const handleRemoveIndicator = useCallback((id: string) => {
     const engine = engineRef.current;
     if (!engine) return;
+    const allIds = engine.getActiveIndicators().map(i => `${i.name}:${i.id}`);
+    console.log('[removeIndicator] requested id:', id, 'engine has:', allIds);
+    const removedName = engine.getActiveIndicators().find((ind) => ind.id === id)?.name;
+    if (removedName) userRemovedIndicatorIds.current.add(removedName);
     engine.removeIndicator(id);
+    console.log('[removeIndicator] after removal, engine has:', engine.getActiveIndicators().map(i => i.name));
     setActiveIndicators([...engine.getActiveIndicators()]);
   }, []);
 
@@ -2438,6 +2485,39 @@ function ChartPage({ tabId }: ChartPageProps) {
   const isIntradayChart = getTimeframeMs(timeframe) < 86_400_000;
   const liveFollowEnabled = isIntradayChart && source !== 'offline';
 
+  if (allowSplit && splitLayout !== '1') {
+    const gridStyle: React.CSSProperties =
+      splitLayout === '2h' ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr', width: '100%', height: '100%' }
+      : splitLayout === '2v' ? { display: 'grid', gridTemplateColumns: '1fr', gridTemplateRows: '1fr 1fr', width: '100%', height: '100%' }
+      : splitLayout === '3h' ? { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gridTemplateRows: '1fr', width: '100%', height: '100%' }
+      : splitLayout === '3v' ? { display: 'grid', gridTemplateColumns: '1fr', gridTemplateRows: '1fr 1fr 1fr', width: '100%', height: '100%' }
+      : splitLayout === '9' ? { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gridTemplateRows: '1fr 1fr 1fr', width: '100%', height: '100%' }
+      : { display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', width: '100%', height: '100%' };
+    const cols = splitLayout === '3h' || splitLayout === '9' ? 3 : splitLayout === '2h' || splitLayout === '4' ? 2 : 1;
+    const rows = splitLayout === '3v' || splitLayout === '9' ? 3 : splitLayout === '2v' ? 2 : splitLayout === '4' ? 2 : 1;
+    const paneCount = cols * rows;
+    return (
+      <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+        <div style={gridStyle}>
+          {Array.from({ length: paneCount }).map((_, i) => (
+            <div key={i} style={{ position: 'relative', overflow: 'hidden', borderRight: (i + 1) % cols !== 0 ? '1px solid rgba(255,255,255,0.06)' : undefined, borderBottom: Math.floor(i / cols) < rows - 1 ? '1px solid rgba(255,255,255,0.06)' : undefined }}>
+              <ChartPage tabId={i === 0 ? tabId : `${tabId ?? 'chart'}-pane${i}`} allowSplit={false} />
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={() => setSplitPickerOpen((v) => !v)}
+          title="Change layout"
+          style={{ position: 'absolute', top: 6, right: 10, zIndex: 30, background: 'rgba(22,27,34,0.9)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 5, padding: '3px 6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, color: '#8B949E', fontSize: 11 }}
+        >
+          <LayoutGrid size={12} />
+          <span style={{ fontFamily: 'monospace' }}>{splitLayout === '2h' ? '1×2' : splitLayout === '2v' ? '2×1' : splitLayout === '3h' ? '1×3' : splitLayout === '3v' ? '3×1' : splitLayout === '9' ? '3×3' : '2×2'}</span>
+        </button>
+        {splitPickerOpen && <LayoutPicker current={splitLayout} onSelect={(l) => { setSplitLayout(l); setSplitPickerOpen(false); }} style={{ position: 'absolute', top: 34, right: 10, zIndex: 40 }} />}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full bg-base relative">
       <ChartToolbar
@@ -2492,7 +2572,24 @@ function ChartPage({ tabId }: ChartPageProps) {
         onZoomReset={() => engineRef.current?.resetZoom()}
         // onExportChart={() => { void handleExportChart(); }}
         // onImportChart={() => { void handleImportChart(); }}
+        rightSlot={allowSplit ? (
+          <button
+            onClick={() => setSplitPickerOpen((v) => !v)}
+            title="Split layout"
+            style={{ background: splitPickerOpen ? 'rgba(88,166,255,0.12)' : 'transparent', border: splitPickerOpen ? '1px solid rgba(88,166,255,0.4)' : '1px solid transparent', borderRadius: 5, padding: '3px 5px', cursor: 'pointer', display: 'flex', alignItems: 'center', color: splitPickerOpen ? '#58A6FF' : '#8B949E' }}
+          >
+            <LayoutGrid size={14} />
+          </button>
+        ) : undefined}
       />
+
+      {allowSplit && splitPickerOpen && (
+        <LayoutPicker
+          current={splitLayout}
+          onSelect={(l) => { setSplitLayout(l); setSplitPickerOpen(false); }}
+          style={{ position: 'absolute', top: 38, right: 10, zIndex: 50 }}
+        />
+      )}
 
       {chartNotice && (
         <div className="pointer-events-none absolute left-1/2 top-[42px] z-20 -translate-x-1/2">

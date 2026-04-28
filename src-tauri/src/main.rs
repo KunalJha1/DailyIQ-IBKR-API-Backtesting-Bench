@@ -204,6 +204,31 @@ fn extract_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
+fn url_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((h * 16 + l) as u8 as char);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 #[tauri::command]
 fn start_oauth_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
@@ -248,11 +273,37 @@ fn start_oauth_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
                 .unwrap_or("");
 
             if path.starts_with("/callback") {
-                // Serve the relay page that reads the fragment and redirects
-                let _ = stream.write_all(relay_page.as_bytes());
-                let _ = stream.flush();
+                let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+                let code = extract_param(query, "code").map(|s| url_decode(s));
+
+                if let Some(code) = code {
+                    // Google authorization code flow — emit code to frontend
+                    let _ = stream.write_all(success_page.as_bytes());
+                    let _ = stream.flush();
+                    drop(stream);
+
+                    let payload = serde_json::json!({ "code": code });
+
+                    if let Some(window) = app_handle.get_window("main") {
+                        let json = serde_json::to_string(&payload).unwrap_or_default();
+                        let js = format!(
+                            "window.dispatchEvent(new CustomEvent('oauth-code', {{ detail: {} }}));",
+                            json
+                        );
+                        let _ = window.eval(&js);
+                        let _ = window.set_focus();
+                    }
+
+                    let _ = app_handle.emit_all("oauth-code", payload);
+                    got_tokens = true;
+                    break;
+                } else {
+                    // No code param — serve relay page (fragment-based fallback)
+                    let _ = stream.write_all(relay_page.as_bytes());
+                    let _ = stream.flush();
+                }
             } else if path.starts_with("/token?") {
-                // Extract tokens from query params
+                // Legacy fragment relay path
                 let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
                 let access_token = extract_param(query, "access_token")
                     .unwrap_or_default()
@@ -271,8 +322,6 @@ fn start_oauth_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
                         "refresh_token": refresh_token,
                     });
 
-                    // Primary: inject tokens directly into the webview via eval
-                    // (bypasses Tauri event system which can silently fail)
                     if let Some(window) = app_handle.get_window("main") {
                         let json = serde_json::to_string(&payload).unwrap_or_default();
                         let js = format!(
@@ -283,7 +332,6 @@ fn start_oauth_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
                         let _ = window.set_focus();
                     }
 
-                    // Fallback: also emit via Tauri event system
                     let _ = app_handle.emit_all("oauth-callback", payload);
                 }
                 got_tokens = true;
@@ -1230,6 +1278,15 @@ fn main() {
             {
                 if let Some(window) = app.get_window("main") {
                     let _ = window.set_decorations(false);
+                }
+            }
+
+            // On macOS, Tauri windows don't always receive focus on launch.
+            // Explicitly request focus so the window is immediately interactive.
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(window) = app.get_window("main") {
+                    let _ = window.set_focus();
                 }
             }
 

@@ -2171,6 +2171,101 @@ def create_app() -> FastAPI:
 
         return {"quotes": await run_db(_read)}
 
+    @app.post("/quotes/bulk")
+    async def get_quotes_bulk(body: dict):
+        """Bulk quote fetch — accepts {"symbols": ["AAPL","MSFT",...]} in the request body.
+
+        Identical response shape to GET /quotes but avoids URL-length limits when
+        fetching quotes for large symbol lists (e.g. a terminal watchlist of 100+
+        tickers). Symbols are deduplicated and uppercased server-side.
+        """
+        raw_symbols = body.get("symbols", [])
+        if not isinstance(raw_symbols, list) or not raw_symbols:
+            return {"quotes": []}
+        sym_list = list(dict.fromkeys(s.strip().upper() for s in raw_symbols if s.strip()))
+        if not sym_list:
+            return {"quotes": []}
+
+        def _read_bulk():
+            placeholders = ", ".join("?" * len(sym_list))
+            with sync_db_session() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT symbol, last, bid, ask, mid, open, high, low, prev_close,
+                           change, change_pct, volume, spread, trailing_pe, forward_pe,
+                           market_cap, valuation_updated_at,
+                           source, updated_at
+                    FROM watchlist_quotes
+                    WHERE symbol IN ({placeholders})
+                    """,
+                    sym_list,
+                ).fetchall()
+                quotes = []
+                for r in rows:
+                    if not _is_valid_quote_row(r):
+                        continue
+                    bid = r[2]
+                    ask = r[3]
+                    if not bid or bid <= 0 or not ask or ask <= 0:
+                        sym = r[0]
+                        try:
+                            if not bid or bid <= 0:
+                                bid_row = conn.execute(
+                                    "SELECT close FROM ohlcv_1m_bid WHERE symbol = ? ORDER BY ts DESC LIMIT 1",
+                                    (sym,),
+                                ).fetchone()
+                                bid = bid_row[0] if bid_row and bid_row[0] and bid_row[0] > 0 else None
+                            if not ask or ask <= 0:
+                                ask_row = conn.execute(
+                                    "SELECT close FROM ohlcv_1m_ask WHERE symbol = ? ORDER BY ts DESC LIMIT 1",
+                                    (sym,),
+                                ).fetchone()
+                                ask = ask_row[0] if ask_row and ask_row[0] and ask_row[0] > 0 else None
+                        except Exception:
+                            bid = bid if bid and bid > 0 else None
+                            ask = ask if ask and ask > 0 else None
+                    mid = round((bid + ask) / 2, 4) if bid and ask else r[4]
+                    spread = round(ask - bid, 4) if bid and ask else None
+                    week52_high = None
+                    week52_low = None
+                    try:
+                        ts_52w_ago = int((time.time() - 52 * 7 * 86400) * 1000)
+                        w52_row = conn.execute(
+                            "SELECT MAX(high), MIN(low) FROM ohlcv_1d WHERE symbol = ? AND ts >= ?",
+                            (r[0], ts_52w_ago),
+                        ).fetchone()
+                        if w52_row and w52_row[0] is not None:
+                            week52_high = round(w52_row[0], 2)
+                            week52_low = round(w52_row[1], 2)
+                    except Exception as e:
+                        logger.warning(f"52W H/L query failed for {r[0]}: {e}")
+                    quotes.append({
+                        "symbol": r[0],
+                        "last": r[1],
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "open": r[5],
+                        "high": r[6],
+                        "low": r[7],
+                        "prevClose": r[8],
+                        "change": r[9],
+                        "changePct": r[10],
+                        "volume": r[11],
+                        "spread": spread,
+                        "trailingPE": r[13],
+                        "forwardPE": r[14],
+                        "marketCap": r[15],
+                        "valuationUpdatedAt": r[16],
+                        "week52High": week52_high,
+                        "week52Low": week52_low,
+                        "source": r[17],
+                        "updatedAt": r[18],
+                    })
+                return quotes
+
+        return {"quotes": await run_db(_read_bulk)}
+
     @app.get("/market/snapshots")
     async def get_market_snapshots(symbols: str = ""):
         if not symbols:
@@ -2550,7 +2645,20 @@ def create_app() -> FastAPI:
         return {"registered": len(sym_list)}
 
     @app.get("/technicals/scores")
-    async def get_technical_scores(symbols: str = "", timeframes: str = ""):
+    async def get_technical_scores(
+        symbols: str = "",
+        timeframes: str = "",
+        include_indicators: bool = False,
+    ):
+        """Return cached technical scores for the requested symbols/timeframes.
+
+        Query params:
+        - symbols: comma-separated ticker list (required)
+        - timeframes: comma-separated subset of 1m,5m,15m,1h,4h,1d,1w (empty = all)
+        - include_indicators: if true, each row gains an `indicators` key with the
+          raw per-timeframe indicator values (RSI, MACD, BB, StochRSI, etc.) and
+          the per-indicator signal classification used to derive the score.
+        """
         if not symbols:
             return []
         sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
@@ -2559,15 +2667,66 @@ def create_app() -> FastAPI:
             "technicals",
             "scores_request",
             f"Requested technical scores for {len(sym_list)} symbol(s)",
-            {"symbols": sym_list[:20], "timeframes": tf_list},
+            {"symbols": sym_list[:20], "timeframes": tf_list, "include_indicators": include_indicators},
         )
         from score_worker import read_scores_for_timeframes
         rows = await run_db(read_scores_for_timeframes, sym_list, tf_list)
+
+        if include_indicators:
+            # Compute raw indicator values + signal classifications for each
+            # requested timeframe so callers don't need a separate round-trip.
+            from technicals import (
+                _load_df,
+                compute_all_technicals,
+                classify_technicals,
+                SUPPORTED_TIMEFRAMES,
+                MIN_BARS,
+            )
+            from db_utils import sync_db_session
+
+            active_tfs = tf_list if tf_list else list(SUPPORTED_TIMEFRAMES)
+
+            def _compute_indicators():
+                out: dict[str, dict] = {}
+                try:
+                    with sync_db_session() as conn:
+                        for sym in sym_list:
+                            sym_data: dict[str, dict] = {}
+                            for tf in active_tfs:
+                                if tf not in set(SUPPORTED_TIMEFRAMES):
+                                    continue
+                                try:
+                                    df = _load_df(conn, sym, tf)
+                                    if df is None or len(df) < MIN_BARS:
+                                        sym_data[tf] = {"available": False}
+                                        continue
+                                    last_close = float(df["close"].iloc[-1])
+                                    raw = compute_all_technicals(df)
+                                    classification = classify_technicals(raw, last_close)
+                                    sym_data[tf] = {
+                                        "available": True,
+                                        "last_close": last_close,
+                                        "score": classification.get("score_0_100"),
+                                        "avg_signal": classification.get("avg_signal"),
+                                        "indicators": raw,
+                                    }
+                                except Exception as e:
+                                    logger.warning(f"indicators({sym},{tf}): {e}")
+                                    sym_data[tf] = {"available": False}
+                            out[sym] = sym_data
+                except Exception as e:
+                    logger.error(f"get_technical_scores include_indicators: {e}")
+                return out
+
+            indicator_data = await run_db(_compute_indicators)
+            for row in rows:
+                row["indicators"] = indicator_data.get(row["symbol"], {})
+
         emit_debug_event(
             "technicals",
             "scores_result",
             f"Returned technical scores for {len(rows)} row(s)",
-            {"rows": len(rows)},
+            {"rows": len(rows), "include_indicators": include_indicators},
         )
         return rows
 

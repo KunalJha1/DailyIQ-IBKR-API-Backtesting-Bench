@@ -316,20 +316,13 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
               const changeIdx = prevBars.length > 0
                 ? prevBars.findIndex(b => b.time >= firstNewTs)
                 : 0;
-              let resolvedUpdateMode: 'full' | 'tail' = 'full';
-              let resolvedTailChangeOffset = 0;
-              setRawBars(prev => {
-                const merged = mergeBarsByTime(prev, incoming);
-                const nextBars = requestConfig.rawBarSize === '1d' ? merged : trimIntradayTail(merged);
-                const offset = Math.max(0, changeIdx === -1 ? prevBars.length : changeIdx);
-                if (canUseTailUpdate(prev, nextBars, offset)) {
-                  resolvedUpdateMode = 'tail';
-                  resolvedTailChangeOffset = offset;
-                }
-                return nextBars;
-              });
-              setTailChangeOffset(resolvedTailChangeOffset);
-              setUpdateMode(resolvedUpdateMode);
+              const merged = mergeBarsByTime(prevBars, incoming);
+              const nextBars = requestConfig.rawBarSize === '1d' ? merged : trimIntradayTail(merged);
+              const offset = Math.max(0, changeIdx === -1 ? prevBars.length : changeIdx);
+              const canTail = canUseTailUpdate(prevBars, nextBars, offset);
+              setRawBars(nextBars);
+              setTailChangeOffset(canTail ? offset : 0);
+              setUpdateMode(canTail ? 'tail' : 'full');
               setRawBarSize(requestConfig.rawBarSize);
               setSource(pack.source);
             });

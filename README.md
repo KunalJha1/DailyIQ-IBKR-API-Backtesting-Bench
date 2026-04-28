@@ -204,31 +204,125 @@ This design keeps the UI responsive, reduces repeated external fetches, and allo
 
 ## API Overview
 
-The FastAPI sidecar exposes 30 REST endpoints covering:
+The FastAPI sidecar exposes REST endpoints covering:
 
 - health and provider status
 - Finnhub validation
 - IBKR and manual portfolio operations
 - watchlist read/write flows
-- quotes and market snapshots
+- quotes and market snapshots (single and bulk)
 - S&P 500 heatmap data
 - options summary and option chain retrieval
 - active-symbol registration
 - technical scores and indicator reads
 - historical bar delivery
 
-Representative routes include:
+### Key routes
 
-- `GET /health`
-- `GET /portfolio`
-- `GET /watchlist`
-- `GET /quotes`
-- `GET /market/snapshots`
-- `GET /heatmap/sp500`
-- `GET /options/summary`
-- `GET /options/chain`
-- `GET /technicals/scores`
-- `GET /historical`
+| Method | Route | Description |
+|---|---|---|
+| `GET` | `/health` | Sidecar liveness + provider status |
+| `GET` | `/portfolio` | Unified IBKR + manual portfolio snapshot |
+| `GET` | `/watchlist` | Watchlist symbols and metadata |
+| `GET` | `/quotes?symbols=AAPL,MSFT` | Per-symbol quotes from local cache |
+| `POST` | `/quotes/bulk` | **Bulk quote snapshot** — accepts `{"symbols": [...]}` body; same response as `/quotes` but avoids URL-length limits for 100+ symbol lists; deduplicates symbols server-side |
+| `GET` | `/market/snapshots` | Full market snapshot payloads including technicals, sentiment, and valuations |
+| `GET` | `/heatmap/sp500` | S&P 500 heatmap data |
+| `GET` | `/options/summary` | Options summary for a symbol |
+| `GET` | `/options/chain` | Full options chain with computed Greeks |
+| `GET` | `/technicals/scores` | Cached 0-100 technical scores per timeframe |
+| `GET` | `/technicals/indicators` | Raw indicator values for custom specs |
+| `GET` | `/historical` | Historical OHLCV bars from local cache |
+
+### `/quotes/bulk` — bulk quote snapshot
+
+Use this instead of `GET /quotes` when fetching quotes for large symbol lists (e.g. a terminal watchlist or screener result set). Sending 100+ symbols as a query string risks URL truncation and is slow to re-encode.
+
+```http
+POST /quotes/bulk
+Content-Type: application/json
+
+{"symbols": ["AAPL", "MSFT", "NVDA", "TSLA", "META"]}
+```
+
+Response shape is identical to `GET /quotes`:
+
+```json
+{
+  "quotes": [
+    {
+      "symbol": "AAPL",
+      "last": 189.45,
+      "bid": 189.40,
+      "ask": 189.50,
+      "mid": 189.45,
+      "open": 188.10,
+      "high": 190.20,
+      "low": 187.80,
+      "prevClose": 188.00,
+      "change": 1.45,
+      "changePct": 0.77,
+      "volume": 42000000,
+      "spread": 0.10,
+      "trailingPE": 29.1,
+      "forwardPE": 26.4,
+      "marketCap": 2950000000000,
+      "valuationUpdatedAt": 1714000000000,
+      "week52High": 198.23,
+      "week52Low": 143.90,
+      "source": "ibkr",
+      "updatedAt": 1714050000000
+    }
+  ]
+}
+```
+
+Fields `bid`, `ask`, `week52High`, `week52Low` are filled from `ohlcv_1m_bid/ask` and `ohlcv_1d` when the primary quote row is incomplete. Symbols not found in the cache are omitted from the response.
+
+### `/technicals/scores` — technical scores with optional raw indicators
+
+By default returns cached 0-100 scores per timeframe. Add `include_indicators=true` to also receive the full raw indicator values and per-indicator signal classification used to compute the score — useful for terminal dashboards that want to display RSI, MACD histogram, BB position, etc. without a separate `/technicals/indicators` round-trip.
+
+```
+GET /technicals/scores?symbols=AAPL,MSFT&timeframes=1h,1d&include_indicators=true
+```
+
+With `include_indicators=true`, each row gains an `indicators` key:
+
+```json
+[
+  {
+    "symbol": "AAPL",
+    "score_1h": 68,
+    "score_1d": 72,
+    "last_updated_utc": "2026-04-26T14:30:00",
+    "indicators": {
+      "1h": {
+        "available": true,
+        "last_close": 189.45,
+        "score": 68,
+        "avg_signal": 0.36,
+        "indicators": {
+          "RSI":   {"value": 58.3},
+          "%K":    {"k": 63.1},
+          "STRSI": {"k": 61.4},
+          "CCI":   {"value": 112.5},
+          "BB":    {"upper": 192.0, "mid": 187.5, "lower": 183.0, "close": 189.45},
+          "BBP":   {"value": 0.71},
+          "MA":    {"value": 186.2},
+          "VWAP":  {"value": 188.9},
+          "ST":    {"direction": "BULL"},
+          "REG":   {"slope": 0.04},
+          "MS":    {"value": 0.12}
+        }
+      },
+      "1d": {"available": true, "last_close": 189.45, "score": 72, ...}
+    }
+  }
+]
+```
+
+Timeframes where insufficient OHLCV history exists return `{"available": false}`.
 
 ---
 

@@ -104,8 +104,9 @@ export class Viewport {
     this.manualYScale = false;
     this.pendingScrollToEnd = true;
     if (this.totalBars > 0) {
-      // Bars already loaded — scroll to end immediately so there's no jump to index 0
-      this.scrollToEnd();
+      // Snap immediately (no animation) so there's no backwards-scroll artifact when
+      // new timeframe data arrives and re-targets a completely different position.
+      this.scrollToEndImmediate();
     } else {
       // No bars yet — wait for first non-empty setTotalBars
       this.initialized = false;
@@ -125,6 +126,12 @@ export class Viewport {
     if (!this.initialized || this.pendingScrollToEnd) {
       this.initialized = true;
       this.pendingScrollToEnd = false;
+      // Auto-fit: if data is too sparse to fill the default window, shrink barsVisible
+      // so bars occupy most of the chart rather than a thin sliver on the left.
+      const naturalFit = total + DEFAULT_FRONT_MARGIN_BARS;
+      if (naturalFit < this.barsVisible) {
+        this.barsVisible = Math.max(MIN_BARS_VISIBLE, naturalFit);
+      }
       this.scrollToEnd();
       return;
     }
@@ -230,7 +237,7 @@ export class Viewport {
         Math.min(MAX_BARS_VISIBLE, this.barsVisible + (this.animTargetBarsVisible - this.barsVisible) * eased)
       );
       // Keep anchor bar locked to its screen ratio throughout zoom
-      this.startIndex = this.clampStart(this.animAnchorBar! - this.barsVisible * this.animAnchorRatio!);
+      this.startIndex = this.clampStartWithData(this.animAnchorBar! - this.barsVisible * this.animAnchorRatio!);
       if (t >= 1) {
         this.animTargetBarsVisible = null;
         this.animAnchorBar = null;
@@ -307,7 +314,7 @@ export class Viewport {
     if (newBarsVisible === this.barsVisible) return;
 
     this.barsVisible = newBarsVisible;
-    this.startIndex = this.clampStart(anchorBar - this.barsVisible * anchorRatio);
+    this.startIndex = this.clampStartWithData(anchorBar - this.barsVisible * anchorRatio);
   }
 
   /** Zoom by an explicit multiplicative factor (e.g. 1.05 = 5% more bars visible). */
@@ -322,7 +329,7 @@ export class Viewport {
     if (Math.abs(newBarsVisible - this.barsVisible) < 0.001) return;
 
     this.barsVisible = newBarsVisible;
-    this.startIndex = this.clampStart(anchorBar - this.barsVisible * anchorRatio);
+    this.startIndex = this.clampStartWithData(anchorBar - this.barsVisible * anchorRatio);
   }
 
   /**
@@ -546,6 +553,16 @@ export class Viewport {
 
   private clampStart(v: number): number {
     return Math.max(0, Math.min(this.getMaxStart(), v));
+  }
+
+  // Like clampStart but also ensures the visible window overlaps at least 1 real bar.
+  // Used for zoom ops — pan is intentionally allowed to go into the blank right margin.
+  private clampStartWithData(v: number): number {
+    const clamped = this.clampStart(v);
+    if (this.totalBars > 0 && clamped >= this.totalBars) {
+      return Math.max(0, this.totalBars - 1);
+    }
+    return clamped;
   }
 
   private getVariableBarSlot(index: number): { left: number; width: number } | null {

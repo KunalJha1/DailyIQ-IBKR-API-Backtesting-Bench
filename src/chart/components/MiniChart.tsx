@@ -328,7 +328,7 @@ const INDICATOR_CATEGORIES = [
   { key: 'volume' as const, label: 'Volume' },
 ];
 
-const HIDDEN_INDICATOR_KEYS = new Set<string>();
+const HIDDEN_INDICATOR_KEYS = new Set<string>(['Gap Zones']);
 
 interface PersistedMiniIndicator {
   name: string;
@@ -1118,6 +1118,10 @@ export default function MiniChart({
         ...(indicatorColorDefaults[indicator.name] ?? {}),
         ...indicator.colors,
       };
+      // Migrate stale EMA Ribbon 200 color (orange → blue)
+      if (indicator.name === 'EMA Ribbon 5/20/200' && mergedColors.slow === '#F97316') {
+        mergedColors.slow = '#3B82F6';
+      }
       for (const [outputKey, color] of Object.entries(mergedColors)) {
         engine.updateIndicatorColor(id, outputKey, color);
       }
@@ -3053,6 +3057,7 @@ export default function MiniChart({
           onMoveDown={(id) => moveIndicator(id, 'down')}
           onDragStart={setDraggingIndicatorId}
           onDragEnd={() => setDraggingIndicatorId(null)}
+          hideScriptButton
           onSetDefaultColor={(indicatorName, outputKey, color) => {
             const defaults =
               (configRef.current.indicatorColorDefaults as Record<string, Record<string, string>> | undefined) ?? {};

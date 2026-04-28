@@ -6,53 +6,65 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { getSupabase } from "./supabase";
-import type { Session } from "@supabase/supabase-js";
 import { open } from "@tauri-apps/api/shell";
 import { invoke } from "@tauri-apps/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { isTauriRuntime } from "./platform";
 
+const SESSION_KEY = "dailyiq-terminal-session";
+const DAILYIQ_URL = import.meta.env.VITE_DAILYIQ_URL ?? "https://dailyiq.me";
+
+export interface DailyIQSession {
+  api_key: string;
+  user_id: string;
+  role?: string;
+  user: {
+    email: string;
+    user_metadata: { full_name?: string };
+  };
+}
+
 interface AuthContextValue {
-  session: Session | null;
+  session: DailyIQSession | null;
   loading: boolean;
   authError: string | null;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
+  setSessionFromLogin: (data: { api_key: string; user_id: string; email: string; name: string }) => void;
 }
 
-interface OAuthTokens {
-  access_token: string;
-  refresh_token: string;
-}
-
-function readCachedSession(): Session | null {
+function readCachedSession(): DailyIQSession | null {
   try {
-    const raw = window.localStorage.getItem("dailyiq-auth");
+    const raw = window.localStorage.getItem(SESSION_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (parsed?.access_token && parsed?.user) return parsed as Session;
-  } catch { /* corrupted or missing */ }
+    if (parsed?.api_key && parsed?.user?.email) return parsed as DailyIQSession;
+  } catch { /* corrupted */ }
   return null;
 }
 
 const AuthContext = createContext<AuthContextValue>({
   session: null,
-  loading: true,
+  loading: false,
   authError: null,
   signInWithGoogle: async () => {},
   signOut: async () => {},
+  setSessionFromLogin: () => {},
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const cached = readCachedSession();
-  const [session, setSession] = useState<Session | null>(cached);
-  const [loading, setLoading] = useState(!cached);
+  const [session, setSession] = useState<DailyIQSession | null>(readCachedSession);
+  const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const signOut = useCallback(async () => {
-    await getSupabase().auth.signOut();
+    window.localStorage.removeItem(SESSION_KEY);
     setSession(null);
+  }, []);
+
+  const setSessionFromLogin = useCallback((data: { api_key: string; user_id: string; email: string; name: string }) => {
+    const s = saveSession(data);
+    setSession(s);
   }, []);
 
   const signInWithGoogle = useCallback(async () => {
@@ -63,105 +75,87 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    // Start a local HTTP server to receive the OAuth callback
     let port: number;
     try {
       port = await invoke<number>("start_oauth_server");
-    } catch (e) {
-      // Port likely already in use from a previous click
-      console.warn("[auth] OAuth server already running, reusing port");
+    } catch {
       port = 17284;
     }
 
-    const { data, error } = await getSupabase().auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        skipBrowserRedirect: true,
-        redirectTo: `http://localhost:${port}/callback`,
-      },
-    });
-
-    if (error) {
-      console.error("Google OAuth error:", error.message);
-      setAuthError(error.message);
+    // Fetch the Google OAuth URL from DailyIQ backend
+    let authUrl: string;
+    try {
+      const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-google-url`);
+      const data = await res.json();
+      if (!res.ok || !data.url) throw new Error(data.detail || "Failed to get OAuth URL");
+      // Replace the redirect_uri port in case it differs
+      authUrl = data.url.replace("localhost:17284", `localhost:${port}`);
+    } catch (e) {
+      setAuthError(`Unable to start Google sign-in: ${e instanceof Error ? e.message : String(e)}`);
       return;
     }
 
-    if (!data.url) {
-      console.error("[auth] No OAuth URL returned — check VITE_SUPABASE_ANON_KEY in .env");
-      setAuthError("Unable to start Google sign-in. Check your configuration.");
-      return;
-    }
-
-    await open(data.url);
+    await open(authUrl);
   }, []);
 
   useEffect(() => {
-    getSupabase().auth
-      .getSession()
-      .then(({ data: { session } }) => {
-        setSession(session);
-      })
-      .catch((error) => {
-        console.error("[auth] Failed to load session:", error);
-        setAuthError("Unable to initialize authentication.");
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-
-    const {
-      data: { subscription },
-    } = getSupabase().auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
-
-    // Handle OAuth tokens from the Rust side and set the Supabase session
     let handled = false;
-    const handleTokens = async (tokens: OAuthTokens) => {
-      if (handled) return; // prevent double-handling from both listeners
+
+    const handleCode = async (code: string) => {
+      if (handled) return;
       handled = true;
-      console.log("[auth] Received OAuth tokens, setting session...");
-      const { data, error } = await getSupabase().auth.setSession({
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-      });
-      if (error) {
-        console.error("[auth] Failed to set session:", error.message);
-        handled = false; // allow retry from the other listener
-      } else {
-        console.log("[auth] Session set, user:", data.session?.user?.email);
-        setSession(data.session);
+      setLoading(true);
+      try {
+        const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-google-exchange`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        const data = await res.json();
+        console.log("[auth] exchange response", res.status, data);
+        if (!res.ok) {
+          setAuthError(data?.detail || `Google sign-in failed (${res.status}).`);
+          handled = false;
+          return;
+        }
+        if (!data?.api_key || !data?.email) {
+          console.error("[auth] exchange response missing api_key/email:", data);
+          setAuthError("Sign-in error: unexpected response from server.");
+          handled = false;
+          return;
+        }
+        setSessionFromLogin(data);
+      } catch (e) {
+        console.error("[auth] exchange fetch failed:", e);
+        setAuthError(`Unable to complete Google sign-in: ${e instanceof Error ? e.message : String(e)}`);
+        handled = false;
+      } finally {
+        setLoading(false);
       }
     };
 
     // Primary: DOM CustomEvent injected by Rust via window.eval()
     const onDomEvent = (e: Event) => {
-      const detail = (e as CustomEvent<OAuthTokens>).detail;
-      if (detail?.access_token && detail?.refresh_token) {
-        handleTokens(detail);
-      }
+      const detail = (e as CustomEvent<{ code: string }>).detail;
+      if (detail?.code) handleCode(detail.code);
     };
-    window.addEventListener("oauth-tokens", onDomEvent);
+    window.addEventListener("oauth-code", onDomEvent);
 
     // Fallback: Tauri event system
     const unlisten = isTauriRuntime()
-      ? listen<OAuthTokens>("oauth-callback", (event) => {
-          if (event.payload?.access_token && event.payload?.refresh_token) {
-            handleTokens(event.payload);
-          }
+      ? listen<{ code: string }>("oauth-code", (event) => {
+          if (event.payload?.code) handleCode(event.payload.code);
         })
       : Promise.resolve(() => {});
 
     return () => {
-      subscription.unsubscribe();
-      window.removeEventListener("oauth-tokens", onDomEvent);
+      window.removeEventListener("oauth-code", onDomEvent);
       unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [setSessionFromLogin]);
 
   return (
-    <AuthContext.Provider value={{ session, loading, authError, signInWithGoogle, signOut }}>
+    <AuthContext.Provider value={{ session, loading, authError, signInWithGoogle, signOut, setSessionFromLogin }}>
       {children}
     </AuthContext.Provider>
   );
@@ -169,4 +163,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   return useContext(AuthContext);
+}
+
+export function saveSession(data: { api_key: string; user_id: string; email: string; name: string; role?: string }): DailyIQSession {
+  const session: DailyIQSession = {
+    api_key: data.api_key,
+    user_id: data.user_id,
+    role: data.role,
+    user: {
+      email: data.email,
+      user_metadata: { full_name: data.name },
+    },
+  };
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  return session;
 }

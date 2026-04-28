@@ -2959,8 +2959,27 @@ export class ChartEngine {
       const prev = validPoints[i - 1];
       const curr = validPoints[i];
       const avgValue = (prev.value + curr.value) / 2;
-      const fillColor = this.technicalScoreFillColor(avgValue);
       const strokeColor = this.technicalScoreStrokeColor(avgValue);
+
+      const segTopY = Math.min(prev.y, curr.y, baselineY);
+      const segBottomY = Math.max(prev.y, curr.y, baselineY);
+      let fillStyle: string | CanvasGradient = this.technicalScoreFillColor(avgValue);
+
+      if (segBottomY > segTopY) {
+        const grad = this.ctx.createLinearGradient(0, segTopY, 0, segBottomY);
+        if (avgValue >= 50) {
+          const intensity = Math.min(1, Math.max(0, (avgValue - 50) / 50));
+          const alpha = 0.18 + intensity * 0.42;
+          grad.addColorStop(0, `rgba(0, 200, 83, ${alpha.toFixed(3)})`);
+          grad.addColorStop(1, 'rgba(0, 200, 83, 0)');
+        } else {
+          const intensity = Math.min(1, Math.max(0, (50 - avgValue) / 50));
+          const alpha = 0.18 + intensity * 0.42;
+          grad.addColorStop(0, 'rgba(190, 24, 56, 0)');
+          grad.addColorStop(1, `rgba(190, 24, 56, ${alpha.toFixed(3)})`);
+        }
+        fillStyle = grad;
+      }
 
       this.ctx.beginPath();
       this.ctx.moveTo(prev.x, baselineY);
@@ -2968,7 +2987,7 @@ export class ChartEngine {
       this.ctx.lineTo(curr.x, curr.y);
       this.ctx.lineTo(curr.x, baselineY);
       this.ctx.closePath();
-      this.ctx.fillStyle = fillColor;
+      this.ctx.fillStyle = fillStyle;
       this.ctx.fill();
 
       this.ctx.beginPath();

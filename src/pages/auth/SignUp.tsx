@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, User, Mail, Lock } from "lucide-react";
-import { getSupabase } from "../../lib/supabase";
+import { useAuth } from "../../lib/auth";
+
+const DAILYIQ_URL = import.meta.env.VITE_DAILYIQ_URL ?? "https://dailyiq.me";
 
 export default function SignUp() {
   const [name, setName] = useState("");
@@ -11,6 +13,7 @@ export default function SignUp() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const { setSessionFromLogin } = useAuth();
 
   const getPasswordStrength = (pw: string): { label: string; width: string; color: string } => {
     if (pw.length === 0) return { label: "", width: "0%", color: "bg-gray-200" };
@@ -30,21 +33,28 @@ export default function SignUp() {
       setError("Passwords do not match.");
       return;
     }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
       return;
     }
     setSubmitting(true);
-    const { error: signUpError } = await getSupabase().auth.signUp({
-      email,
-      password,
-      options: { data: { full_name: name } },
-    });
-    setSubmitting(false);
-    if (signUpError) {
-      setError(signUpError.message);
-    } else {
+    try {
+      const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data?.detail || "Sign up failed. Please try again.");
+        return;
+      }
+      setSessionFromLogin(data);
       setSuccess(true);
+    } catch {
+      setError("Unable to reach DailyIQ servers. Check your internet connection.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -61,13 +71,13 @@ export default function SignUp() {
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Create Account</h2>
         <p className="mt-1.5 text-sm text-gray-500">
-          Create an account to get started.
+          Create your DailyIQ account to get started.
         </p>
       </div>
 
       {success ? (
         <div className="rounded-md bg-green-50 px-4 py-3 text-sm text-green-700">
-          Account created! Check your email to confirm, then sign in.
+          Account created! Check your email to verify, then continue using the app.
         </div>
       ) : (
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -137,7 +147,7 @@ export default function SignUp() {
           </div>
 
           <button type="submit" className="auth-btn-primary" disabled={submitting}>
-            {submitting ? "Creating..." : "Create Account"}
+            {submitting ? "Creating account..." : "Create Account"}
           </button>
         </form>
       )}
@@ -147,6 +157,18 @@ export default function SignUp() {
         <Link to="/signin" className="font-medium text-blue hover:underline">
           Sign in
         </Link>
+      </p>
+
+      <p className="text-center text-[11px] text-gray-400">
+        Forgot password?{" "}
+        <a
+          href={`${DAILYIQ_URL}/forgot-password`}
+          target="_blank"
+          rel="noreferrer"
+          className="underline hover:text-gray-600"
+        >
+          Reset at dailyiq.me
+        </a>
       </p>
     </div>
   );

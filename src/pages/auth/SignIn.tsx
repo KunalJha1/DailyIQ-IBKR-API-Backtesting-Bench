@@ -1,27 +1,38 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Mail, Lock, Eye, EyeOff } from "lucide-react";
-import { getSupabase } from "../../lib/supabase";
+import { useAuth } from "../../lib/auth";
+
+const DAILYIQ_URL = import.meta.env.VITE_DAILYIQ_URL ?? "https://dailyiq.me";
 
 export default function SignIn() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const { setSessionFromLogin } = useAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
-    const { error: signInError } = await getSupabase().auth.signInWithPassword({
-      email,
-      password,
-    });
-    setSubmitting(false);
-    if (signInError) {
-      setError(signInError.message);
+    try {
+      const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data?.detail || "Sign in failed. Check your credentials.");
+        return;
+      }
+      setSessionFromLogin(data);
+    } catch {
+      setError("Unable to reach DailyIQ servers. Check your internet connection.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -38,7 +49,7 @@ export default function SignIn() {
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Sign In</h2>
         <p className="mt-1.5 text-sm text-gray-500">
-          Enter your credentials to continue.
+          Use your DailyIQ account credentials.
         </p>
       </div>
 
@@ -82,17 +93,13 @@ export default function SignIn() {
           </button>
         </div>
 
-        <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 text-sm text-gray-600">
-            <input
-              type="checkbox"
-              checked={remember}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-gray-300"
-            />
-            Remember me
-          </label>
-          <a href="#" className="text-sm text-blue hover:underline">
+        <div className="flex items-center justify-end">
+          <a
+            href={`${DAILYIQ_URL}/forgot-password`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm text-blue hover:underline"
+          >
             Forgot password?
           </a>
         </div>
@@ -104,9 +111,14 @@ export default function SignIn() {
 
       <p className="text-center text-sm text-gray-500">
         Don&apos;t have an account?{" "}
-        <Link to="/signup" className="font-medium text-blue hover:underline">
-          Create one
-        </Link>
+        <a
+          href={`${DAILYIQ_URL}/signup`}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-blue hover:underline"
+        >
+          Create one at dailyiq.me
+        </a>
       </p>
     </div>
   );
