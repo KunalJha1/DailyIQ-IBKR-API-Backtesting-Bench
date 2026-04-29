@@ -11,20 +11,20 @@ export default function AlertBanner() {
       {visible.map(n => (
         <div
           key={n.id}
-          className="pointer-events-auto flex items-center gap-2.5 rounded-md border border-amber-500/30 bg-[#0D1117]/95 px-3 py-2 shadow-lg shadow-black/50 backdrop-blur-sm"
+          className="pointer-events-auto flex items-center gap-2.5 rounded-md border border-yellow-300/90 bg-yellow-300 px-3 py-2 shadow-lg shadow-yellow-500/30"
         >
-          <Bell size={12} className="shrink-0 text-amber-400" />
-          <span className="flex-1 font-mono text-[11px] text-white/80">
-            <span className="text-amber-400">{n.symbol}</span>
+          <Bell size={12} className="shrink-0 text-yellow-950" />
+          <span className="flex-1 font-mono text-[11px] text-yellow-950">
+            <span className="text-black">{n.symbol}</span>
             {' — '}
             {n.label}
             {' → '}
-            <span className="text-white/60">{n.triggeredValue.toFixed(2)}</span>
+            <span className="text-yellow-900/80">{n.triggeredValue.toFixed(2)}</span>
           </span>
           <button
             type="button"
             onClick={() => dismissNotification(n.id)}
-            className="flex h-5 w-5 items-center justify-center rounded text-white/35 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+            className="flex h-5 w-5 items-center justify-center rounded text-yellow-950/60 transition-colors hover:bg-black/10 hover:text-black"
           >
             <X size={11} />
           </button>

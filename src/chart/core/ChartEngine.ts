@@ -179,6 +179,8 @@ export class ChartEngine {
   private suspended = false;
   /** True while a frame callback is queued (idle loop stops when false and no work pending). */
   private renderLoopScheduled = false;
+  private livePriceCountdownTimer: number | null = null;
+  private livePriceCountdownLabel: string | null = null;
   private invalidateCanvasRect = () => {
     this.cachedCanvasRect = null;
   };
@@ -212,6 +214,7 @@ export class ChartEngine {
     cancelAnimationFrame(this.rafId);
     this.rafId = 0;
     this.renderLoopScheduled = false;
+    this.clearLivePriceCountdownTimer();
     this.unbindEvents();
   }
 
@@ -222,6 +225,7 @@ export class ChartEngine {
     cancelAnimationFrame(this.rafId);
     this.rafId = 0;
     this.renderLoopScheduled = false;
+    this.clearLivePriceCountdownTimer();
   }
 
   /** Restart rendering; schedules a frame if the chart is dirty or has pending input. */
@@ -229,6 +233,8 @@ export class ChartEngine {
     if (this.destroyed || !this.suspended) return;
     this.suspended = false;
     this.contentDirty = true;
+    this.syncLivePriceCountdownLabel();
+    this.scheduleLivePriceCountdownTick();
     this.scheduleFrame();
   }
 
@@ -256,6 +262,8 @@ export class ChartEngine {
         this.viewport.scrollToLatestWithRightBlank(preservedRightBlankBars);
       }
     }
+    this.syncLivePriceCountdownLabel();
+    this.scheduleLivePriceCountdownTick();
     this.markDirty();
   }
 
@@ -330,6 +338,8 @@ export class ChartEngine {
 
   setTimeframe(tf: Timeframe) {
     this.scaleX.timeframe = tf;
+    this.syncLivePriceCountdownLabel();
+    this.scheduleLivePriceCountdownTick();
     this.markDirty();
   }
 
@@ -412,6 +422,8 @@ export class ChartEngine {
     if (isLive && this.bars.length > 0) {
       this.viewport.scrollToEnd();
     }
+    this.syncLivePriceCountdownLabel();
+    this.scheduleLivePriceCountdownTick();
     this.markDirty();
   }
 
@@ -1331,10 +1343,13 @@ export class ChartEngine {
     if (this.bars.length === 0) return;
     const lastBar = this.bars[this.bars.length - 1];
     const lastPrice = lastBar.close;
+    const countdownLabel = this.liveMode ? this.livePriceCountdownLabel : null;
+    const hasCountdown = Boolean(countdownLabel);
+    const boxHeight = hasCountdown ? 28 : 20;
 
     const pixelY = this.viewport.priceToPixelY(lastPrice);
     if (pixelY < this.viewport.chartTop || pixelY > this.viewport.chartTop + this.viewport.chartHeight) return;
-    const labelY = this.clampMainAxisLabelY(pixelY);
+    const labelY = this.clampMainAxisLabelY(pixelY, boxHeight);
     if (labelY == null) return;
 
     // Determine day direction: find first bar of the same calendar day as the last bar
@@ -1364,8 +1379,20 @@ export class ChartEngine {
     this.renderer.dashedLine(this.viewport.chartLeft, pixelY, priceAxisX, pixelY, isUp ? 'rgba(0,200,83,0.35)' : 'rgba(255,61,113,0.35)', 1, [4, 4]);
 
     // Draw the price box on the y-axis (same layout as crosshair label)
-    this.renderer.rect(priceAxisX, labelY - 10, PRICE_AXIS_WIDTH, 20, boxColor);
-    this.renderer.text(this.formatAxisPrice(lastPrice), priceAxisX + 6, labelY, '#FFFFFF', 'left');
+    this.renderer.rect(priceAxisX, labelY - boxHeight / 2, PRICE_AXIS_WIDTH, boxHeight, boxColor);
+    if (hasCountdown && countdownLabel) {
+      this.renderer.textBlock(
+        [this.formatAxisPrice(lastPrice), countdownLabel],
+        priceAxisX + 4,
+        labelY,
+        '#FFFFFF',
+        'left',
+        FONT_MONO_SMALL,
+        10,
+      );
+    } else {
+      this.renderer.text(this.formatAxisPrice(lastPrice), priceAxisX + 6, labelY, '#FFFFFF', 'left');
+    }
   }
 
   private renderVisibleRangeExtremeMarkers() {
@@ -1477,11 +1504,63 @@ export class ChartEngine {
     };
   }
 
-  private clampMainAxisLabelY(pixelY: number): number | null {
-    const labelMinY = this.viewport.chartTop + 10;
-    const labelMaxY = this.viewport.chartTop + this.viewport.chartHeight - PRICE_AXIS_CONTROL_HEIGHT - 10;
+  private clampMainAxisLabelY(pixelY: number, labelHeight: number = 20): number | null {
+    const labelHalfHeight = labelHeight / 2;
+    const labelMinY = this.viewport.chartTop + labelHalfHeight;
+    const labelMaxY = this.viewport.chartTop + this.viewport.chartHeight - PRICE_AXIS_CONTROL_HEIGHT - labelHalfHeight;
     if (labelMaxY <= labelMinY) return null;
     return Math.min(Math.max(pixelY, labelMinY), labelMaxY);
+  }
+
+  private clearLivePriceCountdownTimer() {
+    if (this.livePriceCountdownTimer == null) return;
+    window.clearTimeout(this.livePriceCountdownTimer);
+    this.livePriceCountdownTimer = null;
+  }
+
+  private scheduleLivePriceCountdownTick() {
+    this.clearLivePriceCountdownTimer();
+    if (this.destroyed || this.suspended || !this.liveMode || this.bars.length === 0) return;
+    this.livePriceCountdownTimer = window.setTimeout(() => {
+      this.livePriceCountdownTimer = null;
+      this.syncLivePriceCountdownLabel();
+      this.scheduleLivePriceCountdownTick();
+    }, 1000);
+  }
+
+  private syncLivePriceCountdownLabel() {
+    const nextLabel = this.computeLivePriceCountdownLabel();
+    if (nextLabel === this.livePriceCountdownLabel) return;
+    this.livePriceCountdownLabel = nextLabel;
+    this.markDirty();
+  }
+
+  private computeLivePriceCountdownLabel(): string | null {
+    if (!this.liveMode || this.bars.length === 0) return null;
+    const lastBar = this.bars[this.bars.length - 1];
+    if (!lastBar) return null;
+
+    const timeframeMs = getTimeframeMs(String(this.scaleX.timeframe));
+    if (!Number.isFinite(timeframeMs) || timeframeMs <= 0) return null;
+
+    const msUntilNextBar = Math.max(0, (lastBar.time + timeframeMs) - Date.now());
+    return this.formatNextBarCountdown(msUntilNextBar);
+  }
+
+  private formatNextBarCountdown(msRemaining: number): string {
+    const totalSeconds = Math.max(0, Math.ceil(msRemaining / 1000));
+    const days = Math.floor(totalSeconds / 86_400);
+    const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+    const minutes = Math.floor((totalSeconds % 3_600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (days > 0) {
+      return `${days}d ${String(hours).padStart(2, '0')}h`;
+    }
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   }
 
   private formatAxisPrice(price: number): string {

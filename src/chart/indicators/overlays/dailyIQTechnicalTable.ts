@@ -316,8 +316,6 @@ export function computeDailyIQTechnicalTable(
   const ema200 = ema(closes, 200);
   const volMA = sma(volumes, volLen);
 
-  const buy = new Array<number>(len).fill(NaN);
-  const sell = new Array<number>(len).fill(NaN);
   const bullSweepMarkers = new Array<number>(len).fill(NaN);
   const bearSweepMarkers = new Array<number>(len).fill(NaN);
 
@@ -336,38 +334,17 @@ export function computeDailyIQTechnicalTable(
     if (bullishSweep) bullSweepMarkers[i] = lows[i];
     if (bearishSweep) bearSweepMarkers[i] = highs[i];
 
-    const crossUp = Number.isFinite(fast[i - 1])
-      && Number.isFinite(slow[i - 1])
-      && Number.isFinite(fast[i])
-      && Number.isFinite(slow[i])
-      && fast[i - 1] <= slow[i - 1]
-      && fast[i] > slow[i];
-
-    const crossDown = Number.isFinite(fast[i - 1])
-      && Number.isFinite(slow[i - 1])
-      && Number.isFinite(fast[i])
-      && Number.isFinite(slow[i])
-      && fast[i - 1] >= slow[i - 1]
-      && fast[i] < slow[i];
-
-    const volOk = !useVolFilter || (Number.isFinite(volMA[i]) && volumes[i] > volMA[i]);
-
-    const baseLong = crossUp && Number.isFinite(trend[i]) && closes[i] > trend[i] && volOk;
-    const baseShort = crossDown && Number.isFinite(trend[i]) && closes[i] < trend[i] && volOk;
-
-    const longSignal = requireSweepEntry ? (baseLong && bullishSweep) : baseLong;
-    const shortSignal = requireSweepEntry ? (baseShort && bearishSweep) : baseShort;
-
-    if (longSignal) buy[i] = lows[i];
-    if (shortSignal) sell[i] = highs[i];
+    if (useVolFilter || requireSweepEntry) {
+      // Keep params live for compatibility with saved layouts, but this
+      // indicator no longer paints BUY/SELL markers on the chart.
+      void volMA[i];
+    }
   }
 
   result[DIQ_TABLE_OUTPUT_INDEX.FAST_EMA] = fast;
   result[DIQ_TABLE_OUTPUT_INDEX.SLOW_EMA] = slow;
   result[DIQ_TABLE_OUTPUT_INDEX.TREND_EMA] = seriesWithToggle(trend, showTrendEma);
   result[DIQ_TABLE_OUTPUT_INDEX.EMA_200] = seriesWithToggle(ema200, showEma200);
-  result[DIQ_TABLE_OUTPUT_INDEX.BUY_SIGNAL] = buy;
-  result[DIQ_TABLE_OUTPUT_INDEX.SELL_SIGNAL] = sell;
   result[DIQ_TABLE_OUTPUT_INDEX.BULL_SWEEP] = bullSweepMarkers;
   result[DIQ_TABLE_OUTPUT_INDEX.BEAR_SWEEP] = bearSweepMarkers;
 

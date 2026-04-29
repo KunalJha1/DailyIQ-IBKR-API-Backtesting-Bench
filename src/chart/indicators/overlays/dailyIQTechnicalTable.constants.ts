@@ -7,13 +7,11 @@ export const DIQ_TABLE_OUTPUT_INDEX = {
   SLOW_EMA: 1,
   TREND_EMA: 2,
   EMA_200: 3,
-  BUY_SIGNAL: 4,
-  SELL_SIGNAL: 5,
-  BULL_SWEEP: 6,
-  BEAR_SWEEP: 7,
+  BULL_SWEEP: 4,
+  BEAR_SWEEP: 5,
 } as const;
 
-export const DIQ_TABLE_TF_START = 8;
+export const DIQ_TABLE_TF_START = 6;
 
 export const DIQ_TABLE_TF_METRIC_INDEX = {
   TREND: 0,

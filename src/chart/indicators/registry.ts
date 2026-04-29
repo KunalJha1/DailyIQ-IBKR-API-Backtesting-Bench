@@ -132,8 +132,6 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
       { key: 'slow', label: 'EMA Slow', color: '#FF3D71', style: 'line', lineWidth: 1.8 },
       { key: 'trend', label: 'EMA Trend', color: '#FFFFFF', style: 'line', lineWidth: 1.4 },
       { key: 'ema200', label: 'EMA 200', color: '#1A56DB', style: 'line', lineWidth: 1.8 },
-      { key: 'buy', label: 'BUY', color: '#00C853', style: 'markers' },
-      { key: 'sell', label: 'SELL', color: '#FF3D71', style: 'markers' },
       { key: 'bullSweep', label: 'Bull Sweep', color: '#22C55E', style: 'dots' },
       { key: 'bearSweep', label: 'Bear Sweep', color: '#EF4444', style: 'dots' },
     ],

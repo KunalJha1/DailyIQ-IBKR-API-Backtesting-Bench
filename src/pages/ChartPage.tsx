@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo, memo, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, memo, type PointerEvent as ReactPointerEvent } from 'react';
 import { GripHorizontal, Lock, Unlock, LayoutGrid } from 'lucide-react';
 import type { Timeframe, ChartType, ActiveIndicator, ScriptResult, YScaleMode, ChartLayout, SubPaneStateSnapshot } from '../chart/types';
 import { ChartEngine } from '../chart/core/ChartEngine';
@@ -76,8 +76,6 @@ const TECH_TABLE_MIN_HEIGHT = 250;
 const TECH_TABLE_MAX_HEIGHT = 520;
 const LIQ_TABLE_MIN_WIDTH = 400;
 const LIQ_TABLE_MIN_HEIGHT = 270;
-const INDICATOR_DRAG_HANDLE_WIDTH = 30;
-const INDICATOR_DRAG_HANDLE_HEIGHT = 20;
 const DIQ_TABLE_FETCH_LIMITS = {
   oneMin: 2_500,
   fiveMin: 2_000,
@@ -2042,49 +2040,6 @@ function LayoutPicker({ current, onSelect, style }: { current: SplitLayout; onSe
   );
 }
 
-function IndicatorDragHandle({
-  title,
-  left,
-  top,
-  zIndex = 6,
-  disabled,
-  onMouseDown,
-}: {
-  title: string;
-  left: number;
-  top: number;
-  zIndex?: number;
-  disabled: boolean;
-  onMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
-}) {
-  return (
-    <div
-      onMouseDown={disabled ? undefined : onMouseDown}
-      title={title}
-      style={{
-        position: 'absolute',
-        left,
-        top,
-        width: INDICATOR_DRAG_HANDLE_WIDTH,
-        height: INDICATOR_DRAG_HANDLE_HEIGHT,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderRadius: 6,
-        border: '1px solid rgba(255,255,255,0.12)',
-        background: 'rgba(13,17,23,0.72)',
-        color: '#8B949E',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.24)',
-        cursor: disabled ? 'default' : 'grab',
-        pointerEvents: disabled ? 'none' : 'auto',
-        zIndex,
-      }}
-    >
-      <GripHorizontal size={14} strokeWidth={1.8} />
-    </div>
-  );
-}
-
 function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps) {
   const chartToolRailWidth = 56;
   const defaultIndicatorsRef = useRef<PersistedChartIndicator[]>(createDefaultPersistedChartIndicators());
@@ -2162,6 +2117,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
   const [chartLayout, setChartLayout] = useState<ChartLayout | null>(null);
   const [splitLayout, setSplitLayout] = useState<SplitLayout>(initialState.splitLayout ?? '1');
   const [splitPickerOpen, setSplitPickerOpen] = useState(false);
+  const [activeSplitPaneIndex, setActiveSplitPaneIndex] = useState(0);
   const [dragState, setDragState] = useState<{ indicatorId: string; sourcePaneId: string } | null>(null);
   const [draggingMouse, setDraggingMouse] = useState<{ x: number; y: number } | null>(null);
   const [dragHoverPaneId, setDragHoverPaneId] = useState<string | null>(null);
@@ -3435,17 +3391,6 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     document.addEventListener('mouseup', onMouseUp);
   }, []);
 
-  const beginIndicatorDrag = useCallback((indicatorId: string, sourcePaneId: string, clientX: number, clientY: number) => {
-    setDragState({ indicatorId, sourcePaneId });
-    const host = chartOverlayRef.current;
-    if (!host) return;
-    const rect = host.getBoundingClientRect();
-    setDraggingMouse({
-      x: clientX - rect.left,
-      y: clientY - rect.top,
-    });
-  }, []);
-
   useEffect(() => {
     if (!dragState || !chartLayout) return;
 
@@ -3978,24 +3923,6 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     document.body.style.cursor = '';
   }, []);
 
-  const draggableVolumePanes = chartLayout
-    ? chartLayout.subPanes.flatMap((pane) => {
-        const volumeIndicator = activeIndicators.find(
-          (indicator) => pane.indicatorIds.includes(indicator.id) && indicator.name === 'Volume',
-        );
-        return volumeIndicator ? [{ pane, indicatorId: volumeIndicator.id }] : [];
-      })
-    : [];
-
-  const draggableTechScorePanes = chartLayout
-    ? chartLayout.subPanes.flatMap((pane) => {
-        const tsIndicator = activeIndicators.find(
-          (indicator) => pane.indicatorIds.includes(indicator.id) && indicator.name === 'Technical Score',
-        );
-        return tsIndicator ? [{ pane, indicatorId: tsIndicator.id }] : [];
-      })
-    : [];
-
   const draggedIndicatorName = dragState
     ? (activeIndicators.find((ind) => ind.id === dragState.indicatorId)?.name ?? '')
     : '';
@@ -4016,7 +3943,19 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       <div style={{ position: 'relative', width: '100%', height: '100%' }}>
         <div style={gridStyle}>
           {Array.from({ length: paneCount }).map((_, i) => (
-            <div key={i} style={{ position: 'relative', overflow: 'hidden', borderRight: (i + 1) % cols !== 0 ? '1px solid rgba(255,255,255,0.06)' : undefined, borderBottom: Math.floor(i / cols) < rows - 1 ? '1px solid rgba(255,255,255,0.06)' : undefined }}>
+            <div
+              key={i}
+              onPointerDownCapture={() => setActiveSplitPaneIndex(i)}
+              style={{
+                position: 'relative',
+                overflow: 'visible',
+                zIndex: activeSplitPaneIndex === i ? 12 : 1,
+                minWidth: 0,
+                minHeight: 0,
+                borderRight: (i + 1) % cols !== 0 ? '1px solid rgba(255,255,255,0.06)' : undefined,
+                borderBottom: Math.floor(i / cols) < rows - 1 ? '1px solid rgba(255,255,255,0.06)' : undefined,
+              }}
+            >
               <ChartPage tabId={getSplitPaneTabId(tabId, i)} allowSplit={false} compact={true} />
             </div>
           ))}
@@ -4142,34 +4081,6 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           alerts={chartAlerts}
           onAddAlert={handleAddAlert}
         >
-          {draggableVolumePanes.map(({ pane, indicatorId }) => (
-            <IndicatorDragHandle
-              key={`${pane.paneId}-volume-drag`}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
-              }}
-              title="Drag volume onto chart"
-              left={chartToolRailWidth + 8}
-              top={pane.top + 8}
-              zIndex={6}
-              disabled={Boolean(dragState)}
-            />
-          ))}
-          {draggableTechScorePanes.map(({ pane, indicatorId }) => (
-            <IndicatorDragHandle
-              key={`${pane.paneId}-techscore-drag`}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
-              }}
-              title="Drag Tech Score onto chart"
-              left={chartToolRailWidth + 80}
-              top={pane.top + 8}
-              zIndex={6}
-              disabled={Boolean(dragState)}
-            />
-          ))}
           {dragState && chartLayout && (
             <>
               <div

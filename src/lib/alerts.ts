@@ -43,6 +43,7 @@ export type ChartAlert = PriceAlert | IndicatorAlert;
 export interface FiredAlertNotification {
   id: string;
   alertId: string;
+  alertType: ChartAlert['type'];
   label: string;
   triggeredValue: number;
   symbol: string;
@@ -121,6 +122,7 @@ function reducer(state: AlertsState, action: AlertsAction): AlertsState {
       const notif: FiredAlertNotification = {
         id: crypto.randomUUID(),
         alertId: alert.id,
+        alertType: alert.type,
         label: alert.label ?? (alert.type === 'price' ? `${alert.symbol} price ${alert.condition === 'crosses_above' ? '↑' : '↓'} ${alert.price.toFixed(2)}` : `${alert.symbol} ${alert.indicatorName} alert`),
         triggeredValue: action.triggeredValue,
         symbol: alert.symbol,
@@ -140,8 +142,11 @@ function reducer(state: AlertsState, action: AlertsAction): AlertsState {
     }
     case 'DISMISS':
       return {
-        ...state,
-        notifications: state.notifications.map(n => n.id === action.notifId ? { ...n, dismissed: true } : n),
+        alerts: state.alerts.filter((alert) => {
+          const notification = state.notifications.find((n) => n.id === action.notifId);
+          return notification ? alert.id !== notification.alertId : true;
+        }),
+        notifications: state.notifications.filter((notification) => notification.id !== action.notifId),
       };
     default:
       return state;
@@ -170,6 +175,21 @@ export function AlertProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     saveAlerts(state.alerts);
   }, [state.alerts]);
+
+  useEffect(() => {
+    const hasActivePriceNotifications = state.notifications.some(
+      (notification) => !notification.dismissed && notification.alertType === 'price',
+    );
+    if (!hasActivePriceNotifications) return;
+
+    const intervalId = window.setInterval(() => {
+      playAlertSound();
+    }, 1400);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [state.notifications]);
 
   const addAlert = useCallback((alert: ChartAlert) => dispatch({ type: 'ADD', alert }), []);
   const removeAlert = useCallback((id: string) => dispatch({ type: 'REMOVE', id }), []);
