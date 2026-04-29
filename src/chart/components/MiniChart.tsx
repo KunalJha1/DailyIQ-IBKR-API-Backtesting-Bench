@@ -19,8 +19,12 @@ import { useSidecarPort } from '../../lib/tws';
 import { linkBus } from '../../lib/link-bus';
 import { X, ChevronDown, ChevronUp, Search, TrendingUp, BrainCircuit, RotateCcw, Minus, Maximize2, ChevronsUpDown, GripHorizontal, Lock, Unlock } from 'lucide-react';
 import ComponentLinkMenu from '../../components/ComponentLinkMenu';
+import ScrollArea from '../../components/ScrollArea';
 import IndicatorLegend from './IndicatorLegend';
 import SymbolSearchModal from '../../components/SymbolSearchModal';
+import ChartContextMenu from '../../components/ChartContextMenu';
+import AlertDialog from '../../components/AlertDialog';
+import { useAlerts, useAlertEvaluator } from '../../lib/alerts';
 // DISABLED: import/export not yet functional
 // import {
 //   exportChartConfigToFile,
@@ -574,6 +578,9 @@ export default function MiniChart({
   const [highlightedIndicatorIndex, setHighlightedIndicatorIndex] = useState(-1);
   const [highlightedStrategyIndex, setHighlightedStrategyIndex] = useState(-1);
   const [activeIndicators, setActiveIndicators] = useState<ActiveIndicator[]>([]);
+  const [alertCtxMenu, setAlertCtxMenu] = useState<{ x: number; y: number; price: number } | null>(null);
+  const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  const [alertDialogPrice, setAlertDialogPrice] = useState(0);
   /** Bumps when ChartEngine is (re)created so indicator reconcile runs against the new instance. */
   const [engineVersion, setEngineVersion] = useState(0);
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
@@ -667,6 +674,14 @@ export default function MiniChart({
   const pctChange = prevBar ? (priceChange / prevBar.close) * 100 : 0;
   const isPositive = priceChange >= 0;
 
+  // Alert evaluation and creation
+  const { addAlert, alerts } = useAlerts();
+  const chartAlerts = useMemo(
+    () => alerts.filter((alert) => alert.symbol === symbol),
+    [alerts, symbol],
+  );
+  useAlertEvaluator(bars, symbol, activeIndicators);
+
   // Initialize ChartEngine
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -679,6 +694,16 @@ export default function MiniChart({
       engineRef.current = null;
     };
   }, []);
+
+  // Wire chart-level right-click → alert context menu
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setOnChartContextMenu((info) => {
+      setAlertCtxMenu({ x: info.screenX, y: info.screenY, price: info.price });
+    });
+    return () => { engine.setOnChartContextMenu(null); };
+  }, [engineVersion]);
 
   // Suspend ChartEngine RAF when scrolled off-screen (many dashboard tiles).
   useEffect(() => {
@@ -838,6 +863,10 @@ export default function MiniChart({
       engine.setData(bars);
     }
   }, [bars, datasetKey, updateMode, tailChangeOffset]);
+
+  useEffect(() => {
+    engineRef.current?.setAlerts(chartAlerts);
+  }, [chartAlerts]);
 
   // Wire viewport change notifications so intraday pan backfill stays anchored
   useEffect(() => {
@@ -1993,7 +2022,7 @@ export default function MiniChart({
                 </div>
 
                 {/* Indicator list */}
-                <div className="scrollbar-panel" style={{ maxHeight: 260, overflowY: 'auto' }}>
+                <ScrollArea viewportClassName="max-h-[260px] pr-2">
                   {INDICATOR_CATEGORIES.map((cat) => {
                     const items = standardIndicators.filter((ind) => ind.category === cat.key);
                     if (items.length === 0) return null;
@@ -2050,7 +2079,7 @@ export default function MiniChart({
                       No indicators found
                     </div>
                   )}
-                </div>
+                </ScrollArea>
                 {/* Custom script button */}
                 <div style={{ borderTop: '1px solid #21262D', padding: '4px 6px 4px' }}>
                   <button
@@ -2143,7 +2172,7 @@ export default function MiniChart({
                   />
                 </div>
 
-                <div className="scrollbar-panel" style={{ maxHeight: 220, overflowY: 'auto' }}>
+                <ScrollArea viewportClassName="max-h-[220px] pr-2">
                   {strategyIndicators.map((ind) => {
                     const optionIndex = strategyIndicators.findIndex((item) => item.key === ind.key);
                     const isHighlighted = optionIndex === highlightedStrategyIndex;
@@ -2180,7 +2209,7 @@ export default function MiniChart({
                       No strategies found
                     </div>
                   )}
-                </div>
+                </ScrollArea>
               </div>
             )}
           </div>
@@ -2409,7 +2438,35 @@ export default function MiniChart({
           className="absolute inset-0"
           onMouseMove={handleCanvasPointerMove}
           onMouseLeave={handleCanvasPointerLeave}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            const engine = engineRef.current;
+            if (!engine) return;
+            const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            const canvasY = (e.clientY - rect.top) * dpr;
+            setAlertCtxMenu({ x: e.clientX, y: e.clientY, price: engine.getPriceAtCanvasY(canvasY) });
+          }}
           style={{ cursor: yAxisHovered ? 'ns-resize' : 'crosshair' }}
+        />
+        {alertCtxMenu && (
+          <ChartContextMenu
+            x={alertCtxMenu.x}
+            y={alertCtxMenu.y}
+            onAddAlert={() => {
+              setAlertDialogPrice(alertCtxMenu.price);
+              setAlertDialogOpen(true);
+            }}
+            onClose={() => setAlertCtxMenu(null)}
+          />
+        )}
+        <AlertDialog
+          open={alertDialogOpen}
+          symbol={symbol}
+          initialPrice={alertDialogPrice}
+          activeIndicators={activeIndicators}
+          onClose={() => setAlertDialogOpen(false)}
+          onSave={(alert) => { addAlert(alert); setAlertDialogOpen(false); }}
         />
 
         {chartLayout && mainVolumeIndicator && (

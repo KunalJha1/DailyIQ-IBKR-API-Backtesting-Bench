@@ -6,7 +6,8 @@ import {
 import type { YScaleMode } from '../types';
 
 // Default blank space when the chart snaps to the latest bar.
-const DEFAULT_FRONT_MARGIN_BARS = 25;
+const DEFAULT_FRONT_MARGIN_RATIO = 0.1;
+const MIN_FRONT_MARGIN_BARS = 6;
 // Maximum blank space the user can manually drag into on the right.
 const MAX_FRONT_MARGIN_BARS = 80;
 
@@ -128,7 +129,7 @@ export class Viewport {
       this.pendingScrollToEnd = false;
       // Auto-fit: if data is too sparse to fill the default window, shrink barsVisible
       // so bars occupy most of the chart rather than a thin sliver on the left.
-      const naturalFit = total + DEFAULT_FRONT_MARGIN_BARS;
+      const naturalFit = total + this.getDefaultRightExtraBars();
       if (naturalFit < this.barsVisible) {
         this.barsVisible = Math.max(MIN_BARS_VISIBLE, naturalFit);
       }
@@ -153,7 +154,7 @@ export class Viewport {
   }
 
   setBarsVisibleAround(bars: number, anchorPixelX: number) {
-    if (this.chartWidth <= 0) return;
+    if (this.chartWidth <= 0 || !Number.isFinite(bars) || !Number.isFinite(anchorPixelX)) return;
     const next = Math.max(MIN_BARS_VISIBLE, Math.min(MAX_BARS_VISIBLE, Math.round(bars)));
     if (next === this.barsVisible) return;
     const anchorRatio = (anchorPixelX - this.chartLeft) / this.chartWidth;
@@ -173,6 +174,16 @@ export class Viewport {
 
   isLastBarVisible(): boolean {
     return this.startIndex + this.barsVisible > this.totalBars - 1;
+  }
+
+  isLatestBarInViewport(): boolean {
+    if (this.totalBars <= 0) return false;
+    const latestIndex = this.totalBars - 1;
+    return this.startIndex <= latestIndex && this.endIndex > latestIndex;
+  }
+
+  getVisibleRightBlankBars(): number {
+    return Math.max(0, this.startIndex + this.barsVisible - this.totalBars);
   }
 
   /** True if the viewport is currently at the live end OR a scroll animation is already targeting it. */
@@ -195,12 +206,21 @@ export class Viewport {
     this.inertiaVx = 0;
   }
 
+  scrollToLatestWithRightBlank(blankBars: number) {
+    const targetBlank = Math.max(this.getDefaultRightExtraBars(), Math.ceil(blankBars));
+    this.animTargetStart = this.clampStart(this.totalBars + targetBlank - this.barsVisible);
+    this.animScrollElapsed = 0;
+    this.inertiaVx = 0;
+  }
+
   beginZoomTo(factor: number, anchorPixelX: number) {
-    if (this.chartWidth <= 0) return;
+    if (this.chartWidth <= 0 || !Number.isFinite(factor) || !Number.isFinite(anchorPixelX)) return;
     const anchorRatio = (anchorPixelX - this.chartLeft) / this.chartWidth;
     const anchorBar = this.pixelXToBar(anchorPixelX);
+    if (!Number.isFinite(anchorRatio) || !Number.isFinite(anchorBar)) return;
     const rawTarget = this.barsVisible * factor;
     const clamped = Math.max(MIN_BARS_VISIBLE, Math.min(MAX_BARS_VISIBLE, rawTarget));
+    if (!Number.isFinite(clamped)) return;
     if (Math.abs(clamped - this.barsVisible) < 0.001) return;
     this.animTargetBarsVisible = clamped;
     this.animAnchorBar = anchorBar;
@@ -211,6 +231,10 @@ export class Viewport {
   }
 
   beginInertia(vx: number) {
+    if (!Number.isFinite(vx)) {
+      this.inertiaVx = 0;
+      return;
+    }
     this.inertiaVx = vx;
     this.animTargetStart = null;
     this.animScrollElapsed = 0;
@@ -227,6 +251,7 @@ export class Viewport {
   }
 
   tickAnimation(dt: number) {
+    if (!Number.isFinite(dt) || dt <= 0) return;
     // 1. Zoom (runs first — barWidth changes affect scroll math)
     if (this.animTargetBarsVisible !== null) {
       this.animZoomElapsed += dt;
@@ -271,7 +296,8 @@ export class Viewport {
   }
 
   private getDefaultRightExtraBars(): number {
-    return Math.max(DEFAULT_FRONT_MARGIN_BARS, Math.ceil(this.rightOffsetBars));
+    const ratioBars = Math.ceil(this.barsVisible * DEFAULT_FRONT_MARGIN_RATIO);
+    return Math.max(MIN_FRONT_MARGIN_BARS, ratioBars, Math.ceil(this.rightOffsetBars));
   }
 
   private getMaxRightExtraBars(): number {

@@ -23,7 +23,7 @@ export const COLORS = {
   areaStroke: '#1A56DB',
   premarket: 'rgba(245, 158, 11, 0.06)',
   aftermarket: 'rgba(26, 86, 219, 0.06)',
-  syntheticBar: 'rgba(139, 92, 246, 0.10)',
+  overnight: 'rgba(139, 92, 246, 0.08)',
 } as const;
 
 // Indicator palette for multiple overlays

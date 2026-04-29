@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo, memo, type PointerEvent as ReactPointerEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, memo, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { GripHorizontal, Lock, Unlock, LayoutGrid } from 'lucide-react';
 import type { Timeframe, ChartType, ActiveIndicator, ScriptResult, YScaleMode, ChartLayout, SubPaneStateSnapshot } from '../chart/types';
 import { ChartEngine } from '../chart/core/ChartEngine';
@@ -16,6 +16,7 @@ import {
   createDefaultTechnicalTableWidgetState,
   loadChartState,
   saveChartState,
+  type ChartSplitLayout,
   type PersistedChartIndicator,
   type PersistedChartScript,
   type ChartState,
@@ -27,8 +28,10 @@ import {
 //   exportChartConfigToFile,
 //   importChartConfigFromFile,
 // } from '../lib/chart-config-storage';
-import { VOLUME_PANE_RATIO, getTimeframeMs } from '../chart/constants';
+import { getTimeframeMs } from '../chart/constants';
 import CustomStrategyModal from '../chart/components/CustomStrategyModal';
+import AlertDialog from '../components/AlertDialog';
+import { useAlerts, useAlertEvaluator } from '../lib/alerts';
 import {
   createDefaultCustomStrategy,
   evaluateCustomStrategy,
@@ -49,7 +52,7 @@ import {
   DIQ_TABLE_TIMEFRAMES,
 } from '../chart/indicators/overlays/dailyIQTechnicalTable.constants';
 
-type SplitLayout = '1' | '2h' | '2v' | '4' | '3h' | '3v' | '9';
+type SplitLayout = ChartSplitLayout;
 
 interface ChartPageProps {
   tabId?: string;
@@ -62,13 +65,24 @@ const PROBENG_WIDGET_WIDTH_DETAILED = 230;
 const PROBENG_WIDGET_HEADER_HEIGHT = 24;
 const PROBENG_WIDGET_EDGE_PADDING = 10;
 const PROBENG_WIDGET_DRAG_THRESHOLD = 4;
-const TECH_TABLE_HEADER_HEIGHT = 28;
+const TECH_TABLE_HEADER_HEIGHT = 24;
 const TECH_TABLE_EDGE_PADDING = 10;
 const TECH_TABLE_DRAG_THRESHOLD = 4;
 const TECH_TABLE_RESIZE_THRESHOLD = 3;
-const TECH_TABLE_MIN_WIDTH = 460;
+const TECH_TABLE_MIN_WIDTH = 360;
 const TECH_TABLE_MAX_WIDTH = 680;
-const TECH_TABLE_APPROX_HEIGHT = 286;
+const TECH_TABLE_MIN_HEIGHT = 250;
+const TECH_TABLE_MAX_HEIGHT = 520;
+const INDICATOR_DRAG_HANDLE_WIDTH = 30;
+const INDICATOR_DRAG_HANDLE_HEIGHT = 20;
+const DIQ_TABLE_FETCH_LIMITS = {
+  oneMin: 2_500,
+  fiveMin: 2_000,
+  fifteenMin: 3_000,
+  daily: 1_500,
+};
+
+type TechnicalTableResizeCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
 function getChartProbEngDragBounds(
   detailed: boolean,
@@ -131,10 +145,11 @@ function getTechnicalTableDragBounds(
   chartToolRailWidth: number,
 ): { minX: number; maxX: number; minY: number; maxY: number } {
   const width = Math.max(TECH_TABLE_MIN_WIDTH, Math.min(TECH_TABLE_MAX_WIDTH, widget.width));
+  const height = Math.max(TECH_TABLE_MIN_HEIGHT, Math.min(TECH_TABLE_MAX_HEIGHT, widget.height));
   const minX = chartToolRailWidth + TECH_TABLE_EDGE_PADDING;
   const maxX = Math.max(minX, hostWidth - chartLayout.priceAxisWidth - width - TECH_TABLE_EDGE_PADDING);
   const minY = chartLayout.mainTop + TECH_TABLE_EDGE_PADDING;
-  const maxY = Math.max(minY, hostHeight - chartLayout.timeAxisHeight - TECH_TABLE_APPROX_HEIGHT - TECH_TABLE_EDGE_PADDING);
+  const maxY = Math.max(minY, hostHeight - chartLayout.timeAxisHeight - height - TECH_TABLE_EDGE_PADDING);
   return { minX, maxX, minY, maxY };
 }
 
@@ -147,10 +162,12 @@ function clampTechnicalTableWidgetPosition(
 ): TechnicalTableWidgetState {
   if (!chartLayout) return widget;
   const width = Math.max(TECH_TABLE_MIN_WIDTH, Math.min(TECH_TABLE_MAX_WIDTH, widget.width));
-  const b = getTechnicalTableDragBounds({ ...widget, width }, chartLayout, hostWidth, hostHeight, chartToolRailWidth);
+  const height = Math.max(TECH_TABLE_MIN_HEIGHT, Math.min(TECH_TABLE_MAX_HEIGHT, widget.height));
+  const b = getTechnicalTableDragBounds({ ...widget, width, height }, chartLayout, hostWidth, hostHeight, chartToolRailWidth);
   return {
     ...widget,
     width,
+    height,
     x: Math.round(Math.min(Math.max(widget.x, b.minX), b.maxX)),
     y: Math.round(Math.min(Math.max(widget.y, b.minY), b.maxY)),
   };
@@ -167,6 +184,60 @@ function chartTechnicalTableClampWithNorm(
   const b = getTechnicalTableDragBounds(next, chartLayout, hostWidth, hostHeight, chartToolRailWidth);
   const { normX, normY } = probEngNormFromPixel(next.x, next.y, b.minX, b.maxX, b.minY, b.maxY);
   return { ...next, normX, normY };
+}
+
+function resizeTechnicalTableWidget(
+  widget: TechnicalTableWidgetState,
+  corner: TechnicalTableResizeCorner,
+  deltaX: number,
+  deltaY: number,
+  chartLayout: ChartLayout,
+  hostWidth: number,
+  hostHeight: number,
+  chartToolRailWidth: number,
+): TechnicalTableWidgetState {
+  const leftLimit = chartToolRailWidth + TECH_TABLE_EDGE_PADDING;
+  const topLimit = chartLayout.mainTop + TECH_TABLE_EDGE_PADDING;
+  const rightLimit = hostWidth - chartLayout.priceAxisWidth - TECH_TABLE_EDGE_PADDING;
+  const bottomLimit = hostHeight - chartLayout.timeAxisHeight - TECH_TABLE_EDGE_PADDING;
+
+  const startRight = widget.x + widget.width;
+  const startBottom = widget.y + widget.height;
+  const resizeLeft = corner === 'top-left' || corner === 'bottom-left';
+  const resizeTop = corner === 'top-left' || corner === 'top-right';
+  const aspectRatio = widget.width / widget.height;
+  const widthDelta = resizeLeft ? -deltaX : deltaX;
+  const heightDelta = resizeTop ? -deltaY : deltaY;
+  const widthScale = (widget.width + widthDelta) / widget.width;
+  const heightScale = (widget.height + heightDelta) / widget.height;
+  const requestedScale = Math.min(widthScale, heightScale);
+
+  const maxWidthFromBounds = resizeLeft ? startRight - leftLimit : rightLimit - widget.x;
+  const maxHeightFromBounds = resizeTop ? startBottom - topLimit : bottomLimit - widget.y;
+  const maxScale = Math.min(
+    TECH_TABLE_MAX_WIDTH / widget.width,
+    TECH_TABLE_MAX_HEIGHT / widget.height,
+    maxWidthFromBounds / widget.width,
+    maxHeightFromBounds / widget.height,
+  );
+  const minScale = Math.max(
+    TECH_TABLE_MIN_WIDTH / widget.width,
+    TECH_TABLE_MIN_HEIGHT / widget.height,
+  );
+  const safeScale = Math.min(maxScale, Math.max(minScale, requestedScale));
+
+  const width = Math.round(widget.width * safeScale);
+  const height = Math.round(width / aspectRatio);
+  const x = resizeLeft ? startRight - width : widget.x;
+  const y = resizeTop ? startBottom - height : widget.y;
+
+  return chartTechnicalTableClampWithNorm(
+    { ...widget, x, y, width, height },
+    chartLayout,
+    hostWidth,
+    hostHeight,
+    chartToolRailWidth,
+  );
 }
 
 function getDefaultTechnicalTableWidgetPosition(
@@ -425,6 +496,12 @@ function diqStrengthColor(score: number): string {
   return '#FB923C';
 }
 
+function diqStrengthTextColor(score: number): string {
+  if (!Number.isFinite(score)) return '#FFFFFF';
+  if (score >= 0.6) return '#FFFFFF';
+  return '#111827';
+}
+
 function diqChopText(angle: number): string {
   if (!Number.isFinite(angle)) return '--';
   if (angle >= 5) return 'Strong Up';
@@ -449,6 +526,14 @@ function diqChopColor(angle: number): string {
   if (angle <= -2.14) return '#FF6D00';
   if (angle <= -0.71) return '#FFB74D';
   return '#FDD835';
+}
+
+function diqChopTextColor(angle: number): string {
+  if (!Number.isFinite(angle)) return '#FFFFFF';
+  if (angle >= 3.57) return '#FFFFFF';
+  if (angle <= -5) return '#FFFFFF';
+  if (angle <= -3.57) return '#FFFFFF';
+  return '#111827';
 }
 
 function diqRsiText(now: number, prev: number): string {
@@ -513,6 +598,12 @@ interface TechnicalTableSnapshot {
   overallChop: number;
   overallRsi: number;
   overallMacdState: number;
+}
+
+function yieldTechnicalTableWork(): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
 }
 
 function tableBucketFor(tsMs: number, timeframe: string): number {
@@ -811,11 +902,13 @@ async function fetchTableBars(
   symbol: string,
   barSize: '1 min' | '5 mins' | '15 mins' | '1 day',
   duration: string,
+  limit?: number,
 ): Promise<Array<{ time: number; open: number; high: number; low: number; close: number; volume: number; synthetic?: boolean }>> {
   const url = new URL(`http://127.0.0.1:${sidecarPort}/historical`);
   url.searchParams.set('symbol', symbol);
   url.searchParams.set('bar_size', barSize);
   url.searchParams.set('duration', duration);
+  if (limit != null) url.searchParams.set('limit', String(limit));
   const res = await fetch(url.toString());
   if (!res.ok) return [];
   const payload = await res.json() as { bars?: Array<Record<string, number | boolean>> };
@@ -879,12 +972,13 @@ function DailyIQTechnicalTableOverlay({
   onHeaderPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onHeaderPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onHeaderPointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (corner: TechnicalTableResizeCorner, event: ReactPointerEvent<HTMLDivElement>) => void;
   onResizePointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onResizePointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onResizePointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onToggleLock: () => void;
 }) {
+  const [headerHovered, setHeaderHovered] = useState(false);
   const rows = snapshot?.rows ?? DIQ_TABLE_TIMEFRAMES.map((tf) => ({
     tf,
     trend: NaN,
@@ -905,9 +999,37 @@ function DailyIQTechnicalTableOverlay({
   const overallMacdState = snapshot?.overallMacdState ?? NaN;
   const overallMacdText = overallMacdState === 1 ? 'Bull' : overallMacdState === -1 ? 'Bear' : 'Flat';
   const overallMacdColor = overallMacdState === 1 ? '#00C853' : overallMacdState === -1 ? '#FF3D71' : '#6B7280';
+  const showHeader = !widget.locked || headerHovered;
+  const widthScale = (widget.width - TECH_TABLE_MIN_WIDTH) / (TECH_TABLE_MAX_WIDTH - TECH_TABLE_MIN_WIDTH);
+  const heightScale = (widget.height - TECH_TABLE_MIN_HEIGHT) / (TECH_TABLE_MAX_HEIGHT - TECH_TABLE_MIN_HEIGHT);
+  const tableScale = Math.max(0, Math.min(1, (widthScale + heightScale) / 2));
+  const titleFontSize = 10 + (tableScale * 4);
+  const headerFontSize = 10 + (tableScale * 5);
+  const bodyFontSize = 10 + (tableScale * 5);
+  const headerPadY = 5 + (tableScale * 5);
+  const headerPadX = 7 + (tableScale * 7);
+  const bodyPadY = 4 + (tableScale * 5);
+  const bodyPadX = 7 + (tableScale * 6);
+  const overallPadY = 5 + (tableScale * 5);
+  const overallPadX = 7 + (tableScale * 7);
+  const headerCellPadding = `${headerPadY}px ${headerPadX}px`;
+  const bodyCellPadding = `${bodyPadY}px ${bodyPadX}px`;
+  const overallCellPadding = `${overallPadY}px ${overallPadX}px`;
+  const lockButtonSize = 16 + (tableScale * 8);
+  const gripSize = 12 + (tableScale * 6);
+  const handleSize = 14 + (tableScale * 8);
+  const resizeHandleInset = 3 + (tableScale * 2);
+  const cornerHandles: Array<{ corner: TechnicalTableResizeCorner; cursor: string; style: { left?: number; right?: number; top?: number; bottom?: number } }> = [
+    { corner: 'top-left', cursor: 'nwse-resize', style: { left: 0, top: 0 } },
+    { corner: 'top-right', cursor: 'nesw-resize', style: { right: 0, top: 0 } },
+    { corner: 'bottom-left', cursor: 'nesw-resize', style: { left: 0, bottom: 0 } },
+    { corner: 'bottom-right', cursor: 'nwse-resize', style: { right: 0, bottom: 0 } },
+  ];
 
   return (
     <div
+      onPointerEnter={() => setHeaderHovered(true)}
+      onPointerLeave={() => setHeaderHovered(false)}
       style={{
         position: 'absolute',
         left: widget.x,
@@ -920,8 +1042,10 @@ function DailyIQTechnicalTableOverlay({
         overflow: 'hidden',
         boxShadow: dragging || resizing ? '0 16px 36px rgba(0,0,0,0.52)' : '0 10px 24px rgba(0,0,0,0.42)',
         width: widget.width,
-        transform: dragging || resizing ? 'scale(1.01)' : 'scale(1)',
-        transition: dragging || resizing ? 'none' : 'box-shadow 120ms ease-out, transform 120ms ease-out',
+        height: widget.height,
+        display: 'flex',
+        flexDirection: 'column',
+        transition: dragging || resizing ? 'none' : 'box-shadow 120ms ease-out',
       }}
     >
       <div
@@ -930,13 +1054,18 @@ function DailyIQTechnicalTableOverlay({
         onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
         onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
         style={{
-          minHeight: TECH_TABLE_HEADER_HEIGHT,
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: TECH_TABLE_HEADER_HEIGHT,
+          zIndex: 2,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          padding: widget.locked ? '0 6px 0 8px' : '0 8px 0 6px',
+          padding: '0 8px 0 6px',
           borderBottom: '1px solid rgba(255,255,255,0.12)',
-          fontSize: 10,
+          fontSize: titleFontSize,
           fontFamily: '"JetBrains Mono", monospace',
           color: '#E6EDF3',
           userSelect: 'none',
@@ -948,6 +1077,10 @@ function DailyIQTechnicalTableOverlay({
               : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
           cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
           touchAction: widget.locked ? undefined : 'none',
+          opacity: showHeader ? 1 : 0,
+          pointerEvents: showHeader ? 'auto' : 'none',
+          transform: showHeader ? 'translateY(0)' : 'translateY(-100%)',
+          transition: 'opacity 120ms ease-out, transform 120ms ease-out',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
@@ -957,8 +1090,8 @@ function DailyIQTechnicalTableOverlay({
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                width: 16,
-                height: 16,
+                width: gripSize,
+                height: gripSize,
                 borderRadius: 4,
                 color: dragging ? '#C7D2FE' : '#8B949E',
                 background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
@@ -966,7 +1099,7 @@ function DailyIQTechnicalTableOverlay({
                 flexShrink: 0,
               }}
             >
-              <GripHorizontal size={10} strokeWidth={1.7} />
+              <GripHorizontal size={Math.max(8, gripSize - 6)} strokeWidth={1.7} />
             </span>
           )}
           <span style={{ color: '#8B949E' }}>Technical Table</span>
@@ -984,13 +1117,13 @@ function DailyIQTechnicalTableOverlay({
               borderRadius: 4,
               background: 'transparent',
               color: '#E6EDF3',
-              width: 20,
-              height: 20,
+              width: lockButtonSize,
+              height: lockButtonSize,
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
               lineHeight: 1,
-              fontSize: 11,
+              fontSize: 11 + tableScale,
               fontFamily: '"JetBrains Mono", monospace',
               padding: 0,
               cursor: 'pointer',
@@ -1003,74 +1136,121 @@ function DailyIQTechnicalTableOverlay({
         </div>
       </div>
 
-      <table
+      <div
         style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          fontSize: 10,
-          fontFamily: '"JetBrains Mono", monospace',
-          color: '#E6EDF3',
+          flex: 1,
+          minHeight: 0,
+          overflow: 'hidden',
+          position: 'relative',
+          backgroundColor: '#1E2232',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
         }}
       >
-        <thead>
-          <tr>
-            {['Timeframe', 'Trend', 'Strength', 'Chop', 'RSI', 'MACD'].map((head) => (
-              <th
-                key={head}
-                style={{
-                  padding: '6px 8px',
-                  borderBottom: '1px solid rgba(255,255,255,0.14)',
-                  backgroundColor: '#1E2232',
-                  color: '#FFFFFF',
-                  textAlign: head === 'Timeframe' ? 'left' : 'center',
-                  fontWeight: 600,
-                }}
-              >
-                {head}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.tf}>
-              <td style={{ padding: '5px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', backgroundColor: '#141821' }}>{row.tf}</td>
-              <td style={{ padding: '5px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', backgroundColor: diqTrendColor(row.trend), color: '#FFFFFF', textAlign: 'center' }}>{diqTrendText(row.trend)}</td>
-              <td style={{ padding: '5px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', backgroundColor: diqStrengthColor(row.strength), color: '#111827', textAlign: 'center' }}>{diqStrengthText(row.strength)}</td>
-              <td style={{ padding: '5px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', backgroundColor: diqChopColor(row.chop), color: '#111827', textAlign: 'center' }}>{diqChopText(row.chop)}</td>
-              <td style={{ padding: '5px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', backgroundColor: diqRsiColor(row.rsiNow, row.rsiPrev), color: '#FFFFFF', textAlign: 'center' }}>{diqRsiText(row.rsiNow, row.rsiPrev)}</td>
-              <td style={{ padding: '5px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', backgroundColor: diqMacdColor(row.macdNow, row.macdSignal, row.macdPrev, row.macdSignalPrev), color: '#FFFFFF', textAlign: 'center' }}>{diqMacdText(row.macdNow, row.macdSignal, row.macdPrev, row.macdSignalPrev)}</td>
+          <table
+            style={{
+              width: '100%',
+              height: '100%',
+              borderCollapse: 'separate',
+              borderSpacing: 0,
+              fontSize: bodyFontSize,
+              fontFamily: '"JetBrains Mono", monospace',
+              color: '#E6EDF3',
+              backgroundColor: '#1E2232',
+              tableLayout: 'fixed',
+              userSelect: 'none',
+              WebkitUserSelect: 'none',
+            }}
+          >
+          <colgroup>
+            <col style={{ width: '18%' }} />
+            <col style={{ width: '16%' }} />
+            <col style={{ width: '16%' }} />
+            <col style={{ width: '20%' }} />
+            <col style={{ width: '15%' }} />
+            <col style={{ width: '15%' }} />
+          </colgroup>
+          <thead>
+            <tr>
+              {['Timeframe', 'Trend', 'Strength', 'Chop', 'RSI', 'MACD'].map((head) => (
+                <th
+                  key={head}
+                  style={{
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 1,
+                    padding: headerCellPadding,
+                    borderBottom: '1px solid rgba(255,255,255,0.14)',
+                    backgroundColor: '#1E2232',
+                    color: '#FFFFFF',
+                    textAlign: head === 'Timeframe' ? 'left' : 'center',
+                    fontWeight: 600,
+                    fontSize: headerFontSize,
+                    whiteSpace: 'nowrap',
+                    verticalAlign: 'middle',
+                  }}
+                >
+                  {head}
+                </th>
+              ))}
             </tr>
-          ))}
-          <tr>
-            <td style={{ padding: '6px 8px', backgroundColor: '#1E2232', color: '#FFFFFF', fontWeight: 600 }}>Overall</td>
-            <td style={{ padding: '6px 8px', backgroundColor: diqTrendColor(overallTrend), color: '#FFFFFF', textAlign: 'center', fontWeight: 600 }}>{diqTrendText(overallTrend)}</td>
-            <td style={{ padding: '6px 8px', backgroundColor: diqStrengthColor(overallStrength), color: '#111827', textAlign: 'center', fontWeight: 600 }}>{diqStrengthText(overallStrength)}</td>
-            <td style={{ padding: '6px 8px', backgroundColor: diqChopColor(overallChop), color: '#111827', textAlign: 'center', fontWeight: 600 }}>{diqChopText(overallChop)}</td>
-            <td style={{ padding: '6px 8px', backgroundColor: diqRsiColor(overallRsi, overallRsi), color: '#FFFFFF', textAlign: 'center', fontWeight: 600 }}>{Number.isFinite(overallRsi) ? overallRsi.toFixed(1) : '--'}</td>
-            <td style={{ padding: '6px 8px', backgroundColor: overallMacdColor, color: '#FFFFFF', textAlign: 'center', fontWeight: 600 }}>{overallMacdText}</td>
-          </tr>
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.tf}>
+                <td style={{ padding: bodyCellPadding, backgroundColor: '#141821', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{row.tf}</td>
+                <td style={{ padding: bodyCellPadding, backgroundColor: diqTrendColor(row.trend), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqTrendText(row.trend)}</td>
+                <td style={{ padding: bodyCellPadding, backgroundColor: diqStrengthColor(row.strength), color: diqStrengthTextColor(row.strength), textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqStrengthText(row.strength)}</td>
+                <td style={{ padding: bodyCellPadding, backgroundColor: diqChopColor(row.chop), color: diqChopTextColor(row.chop), textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqChopText(row.chop)}</td>
+                <td style={{ padding: bodyCellPadding, backgroundColor: diqRsiColor(row.rsiNow, row.rsiPrev), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqRsiText(row.rsiNow, row.rsiPrev)}</td>
+                <td style={{ padding: bodyCellPadding, backgroundColor: diqMacdColor(row.macdNow, row.macdSignal, row.macdPrev, row.macdSignalPrev), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqMacdText(row.macdNow, row.macdSignal, row.macdPrev, row.macdSignalPrev)}</td>
+              </tr>
+            ))}
+            <tr>
+              <td style={{ padding: overallCellPadding, backgroundColor: '#1E2232', color: '#FFFFFF', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>Overall</td>
+              <td style={{ padding: overallCellPadding, backgroundColor: diqTrendColor(overallTrend), color: '#FFFFFF', textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqTrendText(overallTrend)}</td>
+              <td style={{ padding: overallCellPadding, backgroundColor: diqStrengthColor(overallStrength), color: diqStrengthTextColor(overallStrength), textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqStrengthText(overallStrength)}</td>
+              <td style={{ padding: overallCellPadding, backgroundColor: diqChopColor(overallChop), color: diqChopTextColor(overallChop), textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqChopText(overallChop)}</td>
+              <td style={{ padding: overallCellPadding, backgroundColor: diqRsiColor(overallRsi, overallRsi), color: '#FFFFFF', textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{Number.isFinite(overallRsi) ? overallRsi.toFixed(1) : '--'}</td>
+              <td style={{ padding: overallCellPadding, backgroundColor: overallMacdColor, color: '#FFFFFF', textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{overallMacdText}</td>
+            </tr>
+          </tbody>
+          </table>
+      </div>
 
       {!widget.locked && (
-        <div
-          onPointerDown={onResizePointerDown}
-          onPointerMove={onResizePointerMove}
-          onPointerUp={onResizePointerUp}
-          onPointerCancel={onResizePointerCancel}
-          title="Resize table"
-          style={{
-            position: 'absolute',
-            right: 0,
-            bottom: 0,
-            width: 16,
-            height: 16,
-            cursor: 'nwse-resize',
-            background: 'linear-gradient(135deg, transparent 0%, transparent 50%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,0.5) 100%)',
-            touchAction: 'none',
-          }}
-        />
+        <>
+          {cornerHandles.map(({ corner, cursor, style }) => (
+            <div
+              key={corner}
+              onPointerDown={(event) => onResizePointerDown(corner, event)}
+              onPointerMove={onResizePointerMove}
+              onPointerUp={onResizePointerUp}
+              onPointerCancel={onResizePointerCancel}
+              title={`Resize table from ${corner}`}
+              style={{
+                position: 'absolute',
+                width: handleSize,
+                height: handleSize,
+                cursor,
+                touchAction: 'none',
+                ...style,
+              }}
+            >
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 4,
+                  insetInline: resizeHandleInset,
+                  insetBlock: resizeHandleInset,
+                  borderRadius: 4,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(255,255,255,0.08)',
+                }}
+              />
+            </div>
+          ))}
+        </>
       )}
     </div>
   );
@@ -1085,6 +1265,14 @@ const LAYOUT_OPTIONS: { id: SplitLayout; label: string; cols: number; rows: numb
   { id: '3v', label: '3 × 1',  cols: 1, rows: 3 },
   { id: '9',  label: '3 × 3',  cols: 3, rows: 3 },
 ];
+
+function getSplitLayoutDimensions(layout: SplitLayout): { cols: number; rows: number } {
+  return LAYOUT_OPTIONS.find((option) => option.id === layout) ?? LAYOUT_OPTIONS[0];
+}
+
+function getSplitPaneTabId(tabId: string | undefined, paneIndex: number): string {
+  return paneIndex === 0 ? (tabId ?? 'chart') : `${tabId ?? 'chart'}-pane${paneIndex}`;
+}
 
 function LayoutPicker({ current, onSelect, style }: { current: SplitLayout; onSelect: (l: SplitLayout) => void; style?: React.CSSProperties }) {
   return (
@@ -1104,6 +1292,49 @@ function LayoutPicker({ current, onSelect, style }: { current: SplitLayout; onSe
           <span style={{ color: current === id ? '#E6EDF3' : '#8B949E', fontSize: 11, fontFamily: 'monospace' }}>{label}</span>
         </button>
       ))}
+    </div>
+  );
+}
+
+function IndicatorDragHandle({
+  title,
+  left,
+  top,
+  zIndex = 6,
+  disabled,
+  onMouseDown,
+}: {
+  title: string;
+  left: number;
+  top: number;
+  zIndex?: number;
+  disabled: boolean;
+  onMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      onMouseDown={disabled ? undefined : onMouseDown}
+      title={title}
+      style={{
+        position: 'absolute',
+        left,
+        top,
+        width: INDICATOR_DRAG_HANDLE_WIDTH,
+        height: INDICATOR_DRAG_HANDLE_HEIGHT,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 6,
+        border: '1px solid rgba(255,255,255,0.12)',
+        background: 'rgba(13,17,23,0.72)',
+        color: '#8B949E',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.24)',
+        cursor: disabled ? 'default' : 'grab',
+        pointerEvents: disabled ? 'none' : 'auto',
+        zIndex,
+      }}
+    >
+      <GripHorizontal size={14} strokeWidth={1.8} />
     </div>
   );
 }
@@ -1128,6 +1359,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     probEngWidget: createDefaultProbEngWidgetState(),
     technicalTableWidget: createDefaultTechnicalTableWidgetState(),
     tooltipFields: { O: true, H: true, L: true, C: true, V: true, Δ: true },
+    splitLayout: '1',
   };
   const [persisted, setPersisted] = useState<ChartState | null>(() => (tabId ? loadChartState(tabId) : null));
   const initialState = persisted ?? defaultChartState;
@@ -1177,7 +1409,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
   const [technicalTableSnapshot, setTechnicalTableSnapshot] = useState<TechnicalTableSnapshot | null>(null);
   const [chartNotice, setChartNotice] = useState<string | null>(null);
   const [chartLayout, setChartLayout] = useState<ChartLayout | null>(null);
-  const [splitLayout, setSplitLayout] = useState<SplitLayout>('1');
+  const [splitLayout, setSplitLayout] = useState<SplitLayout>(initialState.splitLayout ?? '1');
   const [splitPickerOpen, setSplitPickerOpen] = useState(false);
   const [dragState, setDragState] = useState<{ indicatorId: string; sourcePaneId: string } | null>(null);
   const [draggingMouse, setDraggingMouse] = useState<{ x: number; y: number } | null>(null);
@@ -1199,6 +1431,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
   } | null>(null);
   const technicalTableDragRef = useRef<{
     pointerId: number;
+    target: HTMLDivElement;
     offsetX: number;
     offsetY: number;
     startClientX: number;
@@ -1207,12 +1440,19 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
   } | null>(null);
   const technicalTableResizeRef = useRef<{
     pointerId: number;
+    target: HTMLDivElement;
     startClientX: number;
+    startClientY: number;
+    startX: number;
+    startY: number;
     startWidth: number;
+    startHeight: number;
+    corner: TechnicalTableResizeCorner;
     moved: boolean;
   } | null>(null);
 
   const engineRef = useRef<ChartEngine | null>(null);
+  const technicalTableSnapshotCacheRef = useRef<{ key: string; snapshot: TechnicalTableSnapshot } | null>(null);
   const [engineVersion, setEngineVersion] = useState(0);
 
   useEffect(() => {
@@ -1248,6 +1488,22 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     timeframe,
     sidecarPort,
   });
+  // Alert system
+  const { addAlert, alerts } = useAlerts();
+  const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  const [alertDialogPrice, setAlertDialogPrice] = useState(0);
+  const [alertDialogSymbol, setAlertDialogSymbol] = useState('');
+  const handleAddAlert = useCallback((price: number, sym: string) => {
+    setAlertDialogPrice(price);
+    setAlertDialogSymbol(sym);
+    setAlertDialogOpen(true);
+  }, []);
+  const chartAlerts = useMemo(
+    () => alerts.filter((alert) => alert.symbol === symbol),
+    [alerts, symbol],
+  );
+  useAlertEvaluator(bars, symbol, activeIndicators);
+
   const customStrategyResults = useMemo(() => {
     const next = new Map<string, CustomStrategyEvaluation>();
     for (const strategy of customStrategies) {
@@ -1474,6 +1730,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     setIndicatorPanelOpen(nextState.indicatorPanelOpen ?? false);
     setStrategyPanelOpen(nextState.strategyPanelOpen ?? false);
     setLegendCollapsed(nextState.legendCollapsed ?? false);
+    setSplitLayout(nextState.splitLayout ?? '1');
     setChartLayout(null);
     setDragState(null);
     setDraggingMouse(null);
@@ -1541,8 +1798,110 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       strategyPanelOpen,
       legendCollapsed,
       subPaneState,
+      splitLayout,
     });
-  }, [tabId, symbol, timeframe, chartType, yScaleMode, linkChannel, activeIndicators, stopperPx, indicatorColorDefaults, activeScriptSources, activeScriptIds, customStrategies, activeCustomStrategyIds, probEngWidget, technicalTableWidget, tooltipFields, indicatorPanelOpen, strategyPanelOpen, legendCollapsed, serializeIndicators, getEngineSubPaneState, persisted?.subPaneState, chartSubPaneLayoutKey]);
+  }, [tabId, symbol, timeframe, chartType, yScaleMode, linkChannel, activeIndicators, stopperPx, indicatorColorDefaults, activeScriptSources, activeScriptIds, customStrategies, activeCustomStrategyIds, probEngWidget, technicalTableWidget, tooltipFields, indicatorPanelOpen, strategyPanelOpen, legendCollapsed, splitLayout, serializeIndicators, getEngineSubPaneState, persisted?.subPaneState, chartSubPaneLayoutKey]);
+
+  const getCurrentChartState = useCallback((closePanels = false): ChartState => {
+    const engineIndicators = engineRef.current?.getActiveIndicators();
+    const indicators = engineIndicators
+      ? serializeIndicators(engineIndicators)
+      : serializeIndicators(activeIndicators);
+
+    return {
+      symbol,
+      timeframe,
+      chartType,
+      yScaleMode,
+      linkChannel,
+      indicators,
+      stopperPx,
+      indicatorColorDefaults,
+      scripts: activeScriptSources,
+      activeScriptIds,
+      customStrategies,
+      activeCustomStrategyIds,
+      probEngWidget,
+      technicalTableWidget,
+      tooltipFields,
+      indicatorPanelOpen: closePanels ? false : indicatorPanelOpen,
+      strategyPanelOpen: closePanels ? false : strategyPanelOpen,
+      legendCollapsed,
+      subPaneState: getEngineSubPaneState() ?? persisted?.subPaneState,
+      splitLayout,
+    };
+  }, [
+    activeCustomStrategyIds,
+    activeIndicators,
+    activeScriptIds,
+    activeScriptSources,
+    chartType,
+    customStrategies,
+    getEngineSubPaneState,
+    indicatorColorDefaults,
+    indicatorPanelOpen,
+    legendCollapsed,
+    linkChannel,
+    persisted?.subPaneState,
+    probEngWidget,
+    serializeIndicators,
+    stopperPx,
+    strategyPanelOpen,
+    splitLayout,
+    symbol,
+    technicalTableWidget,
+    timeframe,
+    tooltipFields,
+    yScaleMode,
+  ]);
+
+  const seedSplitPaneStates = useCallback((nextLayout: SplitLayout) => {
+    if (!tabId || nextLayout === '1') return;
+
+    const { cols, rows } = getSplitLayoutDimensions(nextLayout);
+    const paneCount = cols * rows;
+    if (paneCount <= 1) return;
+
+    saveChartState(tabId, getCurrentChartState(false));
+    const clonedState = getCurrentChartState(true);
+    for (let paneIndex = 1; paneIndex < paneCount; paneIndex += 1) {
+      saveChartState(getSplitPaneTabId(tabId, paneIndex), clonedState);
+    }
+  }, [getCurrentChartState, tabId]);
+
+  const handleSplitLayoutSelect = useCallback((nextLayout: SplitLayout) => {
+    if (splitLayout === '1' && nextLayout !== '1') {
+      seedSplitPaneStates(nextLayout);
+    } else if (splitLayout !== '1' && nextLayout === '1' && tabId) {
+      const nextState = loadChartState(tabId);
+      if (nextState) {
+        setPersisted(nextState);
+        setSymbol(nextState.symbol);
+        setTimeframe(nextState.timeframe);
+        setChartType(nextState.chartType);
+        setYScaleMode(nextState.yScaleMode ?? 'auto');
+        setLinkChannel(nextState.linkChannel);
+        setStopperPx(nextState.stopperPx);
+        setTooltipFields(nextState.tooltipFields ?? { O: true, H: true, L: true, C: true, V: true, Δ: true });
+        setIndicatorColorDefaults(nextState.indicatorColorDefaults);
+        setActiveIndicators([]);
+        setActiveScripts(new Map());
+        setActiveScriptSources(nextState.scripts ?? []);
+        setActiveScriptIds(nextState.activeScriptIds ?? []);
+        setActiveCustomStrategyIds(nextState.activeCustomStrategyIds ?? []);
+        setProbEngWidget(nextState.probEngWidget ?? createDefaultProbEngWidgetState());
+        setTechnicalTableWidget(nextState.technicalTableWidget ?? createDefaultTechnicalTableWidgetState());
+        setIndicatorPanelOpen(false);
+        setStrategyPanelOpen(false);
+        setLegendCollapsed(nextState.legendCollapsed ?? false);
+        setSplitLayout(nextState.splitLayout ?? '1');
+        setChartLayout(null);
+        restoredIndicatorsRef.current = false;
+      }
+    }
+    setSplitLayout(nextLayout);
+    setSplitPickerOpen(false);
+  }, [seedSplitPaneStates, splitLayout, tabId]);
 
   // Re-add persisted indicators once engine is ready
   useEffect(() => {
@@ -1615,6 +1974,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
   useEffect(() => {
     if (!sidecarPort || !symbol.trim()) {
       setTechnicalTableSnapshot(null);
+      technicalTableSnapshotCacheRef.current = null;
       return;
     }
     if (!activeTechnicalTableIndicator) return;
@@ -1625,11 +1985,35 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       try {
         const normalizedSymbol = symbol.trim().toUpperCase();
         const [rawBars1m, rawBars5m, rawBars15m, rawBars1d] = await Promise.all([
-          fetchTableBars(sidecarPort, normalizedSymbol, '1 min', '29 D'),
-          fetchTableBars(sidecarPort, normalizedSymbol, '5 mins', '365 D'),
-          fetchTableBars(sidecarPort, normalizedSymbol, '15 mins', '730 D'),
-          fetchTableBars(sidecarPort, normalizedSymbol, '1 day', '30 Y'),
+          fetchTableBars(sidecarPort, normalizedSymbol, '1 min', '5 D', DIQ_TABLE_FETCH_LIMITS.oneMin),
+          fetchTableBars(sidecarPort, normalizedSymbol, '5 mins', '90 D', DIQ_TABLE_FETCH_LIMITS.fiveMin),
+          fetchTableBars(sidecarPort, normalizedSymbol, '15 mins', '270 D', DIQ_TABLE_FETCH_LIMITS.fifteenMin),
+          fetchTableBars(sidecarPort, normalizedSymbol, '1 day', '5 Y', DIQ_TABLE_FETCH_LIMITS.daily),
         ]);
+        if (cancelled) return;
+
+        const latestTime = (items: Array<{ time: number }>) => items.length > 0 ? items[items.length - 1].time : 0;
+        const snapshotKey = [
+          normalizedSymbol,
+          technicalTableFastLen,
+          technicalTableSlowLen,
+          technicalTableTrendLen,
+          rawBars1m.length,
+          latestTime(rawBars1m),
+          rawBars5m.length,
+          latestTime(rawBars5m),
+          rawBars15m.length,
+          latestTime(rawBars15m),
+          rawBars1d.length,
+          latestTime(rawBars1d),
+        ].join('|');
+        const cachedSnapshot = technicalTableSnapshotCacheRef.current;
+        if (cachedSnapshot?.key === snapshotKey) {
+          setTechnicalTableSnapshot(cachedSnapshot.snapshot);
+          return;
+        }
+
+        await yieldTechnicalTableWork();
         if (cancelled) return;
 
         const bars1m = rawBars1m;
@@ -1640,6 +2024,9 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         const bars1h = tableResampleBars(bars15m, '1H');
         const bars4h = tableResampleBars(bars15m, '4H');
         const bars1w = tableResampleBars(bars1d, '1W');
+
+        await yieldTechnicalTableWork();
+        if (cancelled) return;
 
         const rows = [
           computeTechnicalTableRowFromBars('1m', bars1m, technicalTableFastLen, technicalTableSlowLen, technicalTableTrendLen),
@@ -1693,7 +2080,10 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           overallMacdState: macdBull > macdBear ? 1 : macdBear > macdBull ? -1 : 0,
         };
 
-        if (!cancelled) setTechnicalTableSnapshot(snapshot);
+        if (!cancelled) {
+          technicalTableSnapshotCacheRef.current = { key: snapshotKey, snapshot };
+          setTechnicalTableSnapshot(snapshot);
+        }
       } catch {
         if (!cancelled) setTechnicalTableSnapshot(null);
       }
@@ -2296,8 +2686,9 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
 
   const clearTechnicalTableDrag = useCallback((target?: HTMLDivElement | null) => {
     const drag = technicalTableDragRef.current;
-    if (drag && target?.hasPointerCapture?.(drag.pointerId)) {
-      target.releasePointerCapture(drag.pointerId);
+    const captureTarget = target ?? drag?.target;
+    if (drag && captureTarget?.hasPointerCapture?.(drag.pointerId)) {
+      captureTarget.releasePointerCapture(drag.pointerId);
     }
     technicalTableDragRef.current = null;
     setTechnicalTableDragging(false);
@@ -2309,8 +2700,9 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
 
   const clearTechnicalTableResize = useCallback((target?: HTMLDivElement | null) => {
     const resize = technicalTableResizeRef.current;
-    if (resize && target?.hasPointerCapture?.(resize.pointerId)) {
-      target.releasePointerCapture(resize.pointerId);
+    const captureTarget = target ?? resize?.target;
+    if (resize && captureTarget?.hasPointerCapture?.(resize.pointerId)) {
+      captureTarget.releasePointerCapture(resize.pointerId);
     }
     technicalTableResizeRef.current = null;
     setTechnicalTableResizing(false);
@@ -2329,6 +2721,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     const widgetRect = widgetEl.getBoundingClientRect();
     technicalTableDragRef.current = {
       pointerId: event.pointerId,
+      target: event.currentTarget,
       offsetX: event.clientX - widgetRect.left,
       offsetY: event.clientY - widgetRect.top,
       startClientX: event.clientX,
@@ -2378,7 +2771,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     clearTechnicalTableDrag(event.currentTarget);
   }, [clearTechnicalTableDrag]);
 
-  const handleTechnicalTableResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+  const handleTechnicalTableResizePointerDown = useCallback((corner: TechnicalTableResizeCorner, event: ReactPointerEvent<HTMLDivElement>) => {
     if (technicalTableWidget.locked || event.button !== 0) return;
     const host = chartOverlayRef.current;
     const widgetEl = event.currentTarget.parentElement as HTMLDivElement | null;
@@ -2387,19 +2780,26 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     const widgetRect = widgetEl.getBoundingClientRect();
     technicalTableResizeRef.current = {
       pointerId: event.pointerId,
+      target: event.currentTarget,
       startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: widgetRect.left - hostRect.left,
+      startY: widgetRect.top - hostRect.top,
       startWidth: widgetRect.width,
+      startHeight: widgetRect.height,
+      corner,
       moved: false,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
     event.stopPropagation();
     document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'nwse-resize';
+    document.body.style.cursor = corner === 'top-right' || corner === 'bottom-left' ? 'nesw-resize' : 'nwse-resize';
     const unclamped = {
       ...technicalTableWidget,
       x: widgetRect.left - hostRect.left,
       y: widgetRect.top - hostRect.top,
       width: widgetRect.width,
+      height: widgetRect.height,
     };
     setTechnicalTableWidget(chartTechnicalTableClampWithNorm(unclamped, chartLayout, hostRect.width, hostRect.height, chartToolRailWidth));
   }, [technicalTableWidget, chartLayout, chartToolRailWidth]);
@@ -2409,19 +2809,32 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     const host = chartOverlayRef.current;
     if (!resize || resize.pointerId !== event.pointerId || !host || !chartLayout) return;
     const deltaX = event.clientX - resize.startClientX;
-    if (!resize.moved && Math.abs(deltaX) < TECH_TABLE_RESIZE_THRESHOLD) return;
+    const deltaY = event.clientY - resize.startClientY;
+    if (!resize.moved && Math.max(Math.abs(deltaX), Math.abs(deltaY)) < TECH_TABLE_RESIZE_THRESHOLD) return;
     if (!resize.moved) {
       resize.moved = true;
       setTechnicalTableResizing(true);
-      document.body.style.cursor = 'nwse-resize';
+      document.body.style.cursor = resize.corner === 'top-right' || resize.corner === 'bottom-left' ? 'nesw-resize' : 'nwse-resize';
     }
     const rect = host.getBoundingClientRect();
-    const nextWidth = Math.max(TECH_TABLE_MIN_WIDTH, Math.min(TECH_TABLE_MAX_WIDTH, resize.startWidth + deltaX));
-    const unclamped = {
-      ...technicalTableWidget,
-      width: nextWidth,
-    };
-    setTechnicalTableWidget(chartTechnicalTableClampWithNorm(unclamped, chartLayout, rect.width, rect.height, chartToolRailWidth));
+    setTechnicalTableWidget(
+      resizeTechnicalTableWidget(
+        {
+          ...technicalTableWidget,
+          x: resize.startX,
+          y: resize.startY,
+          width: resize.startWidth,
+          height: resize.startHeight,
+        },
+        resize.corner,
+        deltaX,
+        deltaY,
+        chartLayout,
+        rect.width,
+        rect.height,
+        chartToolRailWidth,
+      ),
+    );
   }, [technicalTableWidget, chartLayout, chartToolRailWidth]);
 
   const handleTechnicalTableResizePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2435,6 +2848,31 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     if (!resize || resize.pointerId !== event.pointerId) return;
     clearTechnicalTableResize(event.currentTarget);
   }, [clearTechnicalTableResize]);
+
+  useEffect(() => {
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (technicalTableDragRef.current?.pointerId === event.pointerId) {
+        clearTechnicalTableDrag();
+      }
+      if (technicalTableResizeRef.current?.pointerId === event.pointerId) {
+        clearTechnicalTableResize();
+      }
+    };
+
+    const handleBlur = () => {
+      clearTechnicalTableDrag();
+      clearTechnicalTableResize();
+    };
+
+    window.addEventListener('pointerup', handlePointerEnd, true);
+    window.addEventListener('pointercancel', handlePointerEnd, true);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('pointerup', handlePointerEnd, true);
+      window.removeEventListener('pointercancel', handlePointerEnd, true);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [clearTechnicalTableDrag, clearTechnicalTableResize]);
 
   useEffect(() => () => {
     probEngDragRef.current = null;
@@ -2452,9 +2890,6 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         return volumeIndicator ? [{ pane, indicatorId: volumeIndicator.id }] : [];
       })
     : [];
-  const mainVolumeIndicator = activeIndicators.find(
-    (indicator) => indicator.name === 'Volume' && indicator.visible && indicator.paneId === 'main',
-  );
 
   const draggableMACDPanes = chartLayout
     ? chartLayout.subPanes.flatMap((pane) => {
@@ -2464,9 +2899,6 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         return macdIndicator ? [{ pane, indicatorId: macdIndicator.id }] : [];
       })
     : [];
-  const mainMACDIndicator = activeIndicators.find(
-    (indicator) => indicator.name === 'MACD' && indicator.visible && indicator.paneId === 'main',
-  );
 
   const draggableTechScorePanes = chartLayout
     ? chartLayout.subPanes.flatMap((pane) => {
@@ -2476,9 +2908,6 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         return tsIndicator ? [{ pane, indicatorId: tsIndicator.id }] : [];
       })
     : [];
-  const mainTechScoreIndicator = activeIndicators.find(
-    (indicator) => indicator.name === 'Technical Score' && indicator.visible && indicator.paneId === 'main',
-  );
 
   const draggedIndicatorName = dragState
     ? (activeIndicators.find((ind) => ind.id === dragState.indicatorId)?.name ?? '')
@@ -2494,15 +2923,14 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       : splitLayout === '3v' ? { display: 'grid', gridTemplateColumns: '1fr', gridTemplateRows: '1fr 1fr 1fr', width: '100%', height: '100%' }
       : splitLayout === '9' ? { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gridTemplateRows: '1fr 1fr 1fr', width: '100%', height: '100%' }
       : { display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', width: '100%', height: '100%' };
-    const cols = splitLayout === '3h' || splitLayout === '9' ? 3 : splitLayout === '2h' || splitLayout === '4' ? 2 : 1;
-    const rows = splitLayout === '3v' || splitLayout === '9' ? 3 : splitLayout === '2v' ? 2 : splitLayout === '4' ? 2 : 1;
+    const { cols, rows } = getSplitLayoutDimensions(splitLayout);
     const paneCount = cols * rows;
     return (
       <div style={{ position: 'relative', width: '100%', height: '100%' }}>
         <div style={gridStyle}>
           {Array.from({ length: paneCount }).map((_, i) => (
             <div key={i} style={{ position: 'relative', overflow: 'hidden', borderRight: (i + 1) % cols !== 0 ? '1px solid rgba(255,255,255,0.06)' : undefined, borderBottom: Math.floor(i / cols) < rows - 1 ? '1px solid rgba(255,255,255,0.06)' : undefined }}>
-              <ChartPage tabId={i === 0 ? tabId : `${tabId ?? 'chart'}-pane${i}`} allowSplit={false} compact={true} />
+              <ChartPage tabId={getSplitPaneTabId(tabId, i)} allowSplit={false} compact={true} />
             </div>
           ))}
         </div>
@@ -2514,7 +2942,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           <LayoutGrid size={12} />
           <span style={{ fontFamily: 'monospace' }}>{splitLayout === '2h' ? '1×2' : splitLayout === '2v' ? '2×1' : splitLayout === '3h' ? '1×3' : splitLayout === '3v' ? '3×1' : splitLayout === '9' ? '3×3' : '2×2'}</span>
         </button>
-        {splitPickerOpen && <LayoutPicker current={splitLayout} onSelect={(l) => { setSplitLayout(l); setSplitPickerOpen(false); }} style={{ position: 'absolute', top: 34, right: 10, zIndex: 40 }} />}
+        {splitPickerOpen && <LayoutPicker current={splitLayout} onSelect={handleSplitLayoutSelect} style={{ position: 'absolute', top: 34, right: 10, zIndex: 40 }} />}
       </div>
     );
   }
@@ -2588,7 +3016,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       {allowSplit && splitPickerOpen && (
         <LayoutPicker
           current={splitLayout}
-          onSelect={(l) => { setSplitLayout(l); setSplitPickerOpen(false); }}
+          onSelect={handleSplitLayoutSelect}
           style={{ position: 'absolute', top: 38, right: 10, zIndex: 50 }}
         />
       )}
@@ -2623,128 +3051,50 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           onViewportShiftApplied={onViewportShiftApplied}
           updateMode={updateMode}
           tailChangeOffset={tailChangeOffset}
+          activeIndicators={activeIndicators}
+          alerts={chartAlerts}
+          onAddAlert={handleAddAlert}
         >
-          {chartLayout && mainVolumeIndicator && (
-            <div
-              onMouseDown={(e) => {
-                e.preventDefault();
-                beginIndicatorDrag(mainVolumeIndicator.id, 'main', e.clientX, e.clientY);
-              }}
-              title="Drag volume out to its own pane"
-              style={{
-                position: 'absolute',
-                left: chartToolRailWidth,
-                right: chartLayout.priceAxisWidth,
-                top: chartLayout.mainTop + chartLayout.mainHeight * (1 - VOLUME_PANE_RATIO),
-                height: Math.max(48, chartLayout.mainHeight * VOLUME_PANE_RATIO),
-                cursor: 'grab',
-                pointerEvents: dragState ? 'none' : 'auto',
-                background: 'transparent',
-                zIndex: 4,
-              }}
-            />
-          )}
           {draggableVolumePanes.map(({ pane, indicatorId }) => (
-            <div
+            <IndicatorDragHandle
               key={`${pane.paneId}-volume-drag`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
               }}
               title="Drag volume onto chart"
-              style={{
-                position: 'absolute',
-                left: chartToolRailWidth,
-                right: chartLayout?.priceAxisWidth ?? 70,
-                top: pane.top,
-                height: pane.height,
-                cursor: 'grab',
-                pointerEvents: dragState ? 'none' : 'auto',
-                background: 'transparent',
-                zIndex: 4,
-              }}
+              left={chartToolRailWidth + 8}
+              top={pane.top + 8}
+              zIndex={6}
+              disabled={Boolean(dragState)}
             />
           ))}
-          {chartLayout && mainMACDIndicator && (
-            <div
-              onMouseDown={(e) => {
-                e.preventDefault();
-                beginIndicatorDrag(mainMACDIndicator.id, 'main', e.clientX, e.clientY);
-              }}
-              title="Drag MACD out to its own pane"
-              style={{
-                position: 'absolute',
-                left: chartToolRailWidth,
-                right: chartLayout.priceAxisWidth,
-                top: chartLayout.mainTop + chartLayout.mainHeight * (1 - VOLUME_PANE_RATIO),
-                height: Math.max(48, chartLayout.mainHeight * VOLUME_PANE_RATIO),
-                cursor: 'grab',
-                pointerEvents: dragState ? 'none' : 'auto',
-                background: 'transparent',
-                zIndex: 5,
-              }}
-            />
-          )}
           {draggableMACDPanes.map(({ pane, indicatorId }) => (
-            <div
+            <IndicatorDragHandle
               key={`${pane.paneId}-macd-drag`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
               }}
               title="Drag MACD onto chart"
-              style={{
-                position: 'absolute',
-                left: chartToolRailWidth,
-                right: chartLayout?.priceAxisWidth ?? 70,
-                top: pane.top,
-                height: pane.height,
-                cursor: 'grab',
-                pointerEvents: dragState ? 'none' : 'auto',
-                background: 'transparent',
-                zIndex: 4,
-              }}
+              left={chartToolRailWidth + 44}
+              top={pane.top + 8}
+              zIndex={6}
+              disabled={Boolean(dragState)}
             />
           ))}
-          {chartLayout && mainTechScoreIndicator && (
-            <div
-              onMouseDown={(e) => {
-                e.preventDefault();
-                beginIndicatorDrag(mainTechScoreIndicator.id, 'main', e.clientX, e.clientY);
-              }}
-              title="Drag Tech Score out to its own pane"
-              style={{
-                position: 'absolute',
-                left: chartToolRailWidth,
-                right: chartLayout.priceAxisWidth,
-                top: chartLayout.mainTop + chartLayout.mainHeight * 0.67,
-                height: Math.max(48, chartLayout.mainHeight * 0.3),
-                cursor: 'grab',
-                pointerEvents: dragState ? 'none' : 'auto',
-                background: 'transparent',
-                zIndex: 5,
-              }}
-            />
-          )}
           {draggableTechScorePanes.map(({ pane, indicatorId }) => (
-            <div
+            <IndicatorDragHandle
               key={`${pane.paneId}-techscore-drag`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 beginIndicatorDrag(indicatorId, pane.paneId, e.clientX, e.clientY);
               }}
               title="Drag Tech Score onto chart"
-              style={{
-                position: 'absolute',
-                left: chartToolRailWidth,
-                right: chartLayout?.priceAxisWidth ?? 70,
-                top: pane.top,
-                height: pane.height,
-                cursor: 'grab',
-                pointerEvents: dragState ? 'none' : 'auto',
-                background: 'transparent',
-                zIndex: 4,
-              }}
+              left={chartToolRailWidth + 80}
+              top={pane.top + 8}
+              zIndex={6}
+              disabled={Boolean(dragState)}
             />
           ))}
           {dragState && chartLayout && (
@@ -3017,6 +3367,14 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         onSave={handleSaveCustomStrategy}
         onSaveScript={handleSaveScript}
         onClose={() => { setCustomStrategyEditor(null); setCodeModalOpen(false); setScriptEditorDraft(null); }}
+      />
+      <AlertDialog
+        open={alertDialogOpen}
+        symbol={alertDialogSymbol}
+        initialPrice={alertDialogPrice}
+        activeIndicators={activeIndicators}
+        onClose={() => setAlertDialogOpen(false)}
+        onSave={(alert) => { addAlert(alert); setAlertDialogOpen(false); }}
       />
       </div>
     </div>

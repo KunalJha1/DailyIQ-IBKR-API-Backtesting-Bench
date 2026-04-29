@@ -38,6 +38,10 @@ async def connect_with_client_id_fallback(
 
     ib.errorEvent += on_error
     try:
+        # ib_insync asks the event loop policy for a loop instead of using the
+        # currently running one. Keep the policy aligned with this request task
+        # so its socket Future is created on the same loop we await from.
+        asyncio.set_event_loop(asyncio.get_running_loop())
         await ib.connectAsync(host, port, clientId=client_id, readonly=readonly)
         if settle_delay_s > 0:
             await asyncio.sleep(settle_delay_s)

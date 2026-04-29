@@ -7,6 +7,7 @@ import { useHeatmapData } from "../lib/use-sp500-heatmap";
 import {
   fetchHeatmapGroups,
   createHeatmapGroup,
+  isSymbolListHeatmapGroup,
   resolveHeatmapUrl,
   type HeatmapGroup,
   type HeatmapGroupPayload,
@@ -58,6 +59,10 @@ function MiniHeatmapCard({
 
   const activeGroup = activeGroupId !== null ? (groups.find((g) => g.id === activeGroupId) ?? null) : null;
   const activeLabel = activeGroup ? activeGroup.name : "S&P 500";
+  const activeCustomSymbols = useMemo(
+    () => (isSymbolListHeatmapGroup(activeGroup) ? (activeGroup?.symbols ?? []) : []),
+    [activeGroup],
+  );
 
   // Load groups
   useEffect(() => {
@@ -85,6 +90,15 @@ function MiniHeatmapCard({
   }, [sidecarPort, activeGroup, watchlistSymbols]);
 
   const tiles = useHeatmapData(heatmapUrl).tiles;
+
+  useEffect(() => {
+    if (!sidecarPort || activeCustomSymbols.length === 0) return;
+    fetch(`http://127.0.0.1:${sidecarPort}/active-symbols`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: activeCustomSymbols }),
+    }).catch(() => {});
+  }, [sidecarPort, activeCustomSymbols]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });

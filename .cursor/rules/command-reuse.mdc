@@ -1,0 +1,10 @@
+---
+description: Reuse running dev and build commands
+alwaysApply: true
+---
+
+# Command Reuse
+
+- Before running `npm`, dev server, build, watcher, or test commands, check whether the same process is already running in the available terminal state.
+- If the relevant command is already running, reuse its output or ask before starting another copy.
+- Do not rerun `npm run build` or similar verification commands after every small change unless the user asks for it or no equivalent result is available.

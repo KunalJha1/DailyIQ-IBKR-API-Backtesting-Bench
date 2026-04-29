@@ -611,20 +611,22 @@ function LiquiditySweepDetectorCard({
                     </p>
                     {sweep.direction ? (
                       <>
-                        <p className="mt-0.5 font-mono text-[10px] text-white/40">
-                          {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
-                        </p>
                         {showExpandedInstructions ? (
-                          <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
-                            {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
-                          </p>
+                          <>
+                            <p className="mt-0.5 font-mono text-[10px] text-white/40">
+                              {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
+                            </p>
+                            <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
+                              {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
+                            </p>
+                          </>
                         ) : null}
                       </>
-                    ) : (
+                    ) : showExpandedInstructions ? (
                       <p className="mt-1 font-mono text-[10px] leading-[1.35] text-white/28">
                         No active sweep in lookback window
                       </p>
-                    )}
+                    ) : null}
                   </button>
 
                   {/* Ago column */}

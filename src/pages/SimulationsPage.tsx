@@ -9,6 +9,8 @@ import type { CustomStrategyDefinition } from "../chart/customStrategies";
 import { PRESET_STRATEGIES } from "../chart/presetStrategies";
 import { useSidecarPort } from "../lib/tws";
 import SymbolSearchModal from "../components/SymbolSearchModal";
+import ScrollArea from "../components/ScrollArea";
+import CustomSelect from "../components/CustomSelect";
 import { SEARCHABLE_SYMBOLS } from "../lib/market-data";
 import SimScriptPanel from "../chart/components/SimScriptPanel";
 
@@ -326,7 +328,7 @@ function SimulationsPage() {
           </button>
         )}
       </div>
-      <div className="max-h-52 overflow-y-auto py-1">
+      <ScrollArea viewportClassName="max-h-52 py-1 pr-2">
         {strategies.map((s) => {
           const checked = combineSelected.has(s.id);
           return (
@@ -350,7 +352,7 @@ function SimulationsPage() {
             </button>
           );
         })}
-      </div>
+      </ScrollArea>
       {combineSelected.size >= 2 ? (
         <div className="px-3 py-2 border-t border-white/[0.06]">
           <div className="text-[9px] font-mono text-white/30 mb-1.5 truncate">
@@ -381,28 +383,23 @@ function SimulationsPage() {
         {(() => {
           const presets = strategies.filter((s) => s.id.startsWith("preset_"));
           const userStrats = strategies.filter((s) => !s.id.startsWith("preset_") && !s.id.startsWith("combined_"));
+          const strategyOptions = [
+            ...(strategy?.id.startsWith("combined_")
+              ? [{ value: strategy.id, label: strategy.name, description: "Combined" }]
+              : []),
+            ...presets.map((s) => ({ value: s.id, label: s.name, description: "Built-in" })),
+            ...userStrats.map((s) => ({ value: s.id, label: s.name, description: "My Strategies" })),
+          ];
           return (
-            <select
+            <CustomSelect
               value={strategy?.id ?? ""}
-              onChange={(e) => setStrategy(strategies.find((s) => s.id === e.target.value) ?? null)}
-              className="h-6 px-2 text-[11px] font-mono bg-[#161B22] border border-white/[0.08] rounded text-white/70 outline-none focus:border-white/20"
-            >
-              {strategy?.id.startsWith("combined_") && (
-                <option value={strategy.id}>{strategy.name}</option>
-              )}
-              <optgroup label="── Built-in ──">
-                {presets.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </optgroup>
-              {userStrats.length > 0 && (
-                <optgroup label="── My Strategies ──">
-                  {userStrats.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
+              onChange={(next) => setStrategy(strategies.find((s) => s.id === next) ?? null)}
+              options={strategyOptions}
+              size="sm"
+              className="w-48 shrink-0"
+              triggerClassName="bg-[#161B22] border-white/[0.08] font-mono text-white/70 focus:border-white/20"
+              panelWidth={260}
+            />
           );
         })()}
         <CtrlBtn onClick={refreshStrategies} title="Refresh strategy list from Chart tab">↻</CtrlBtn>
@@ -433,15 +430,14 @@ function SimulationsPage() {
         <BarSeparator />
 
         {/* Timeframe */}
-        <select
+        <CustomSelect
           value={timeframe}
-          onChange={(e) => setTimeframe(e.target.value)}
-          className="h-6 px-2 text-[11px] font-mono bg-[#161B22] border border-white/[0.08] rounded text-white/70 outline-none focus:border-white/20"
-        >
-          {TIMEFRAMES.map((tf) => (
-            <option key={tf} value={tf}>{tf}</option>
-          ))}
-        </select>
+          onChange={setTimeframe}
+          options={TIMEFRAMES.map((tf) => ({ value: tf, label: tf }))}
+          size="sm"
+          className="w-20 shrink-0"
+          triggerClassName="bg-[#161B22] border-white/[0.08] font-mono text-white/70 focus:border-white/20"
+        />
 
         {/* Days — no hard cap */}
         <div className="flex items-center gap-1">
@@ -456,15 +452,18 @@ function SimulationsPage() {
         </div>
 
         {/* Hours */}
-        <select
+        <CustomSelect
           value={hours}
-          onChange={(e) => setHours(e.target.value as SessionFilter)}
-          className="h-6 px-2 text-[11px] font-mono bg-[#161B22] border border-white/[0.08] rounded text-white/70 outline-none focus:border-white/20"
-        >
-          <option value="regular">Regular</option>
-          <option value="extended">Extended</option>
-          <option value="all">All Hours</option>
-        </select>
+          onChange={(next) => setHours(next as SessionFilter)}
+          options={[
+            { value: "regular", label: "Regular" },
+            { value: "extended", label: "Extended" },
+            { value: "all", label: "All Hours" },
+          ]}
+          size="sm"
+          className="w-28 shrink-0"
+          triggerClassName="bg-[#161B22] border-white/[0.08] font-mono text-white/70 focus:border-white/20"
+        />
 
         {/* Day handling */}
         <div className="flex items-center rounded border border-white/[0.08] overflow-hidden h-6">

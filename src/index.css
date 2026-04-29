@@ -2,6 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --app-scrollbar-track: #0d1117;
+  --app-scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --app-scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar-thumb) var(--app-scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--app-scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid var(--app-scrollbar-track);
+  border-radius: 999px;
+  background: var(--app-scrollbar-thumb);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--app-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--app-scrollbar-track);
+}
+
 /* Hide scrollbar but keep scrollable */
 .scrollbar-none {
   -ms-overflow-style: none;
@@ -21,7 +55,16 @@
   height: 10px;
 }
 
+.scrollbar-dark::-webkit-scrollbar:horizontal {
+  height: 10px;
+  background: #0d1117;
+}
+
 .scrollbar-dark::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+.scrollbar-dark::-webkit-scrollbar-track:horizontal {
   background: #0d1117;
 }
 
@@ -29,10 +72,20 @@
   border: 2px solid #0d1117;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.14);
+  background-clip: padding-box;
+}
+
+.scrollbar-dark::-webkit-scrollbar-thumb:horizontal {
+  min-width: 36px;
+  border: 2px solid #0d1117;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: padding-box;
 }
 
 .scrollbar-dark::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
 }
 
 .scrollbar-dark::-webkit-scrollbar-corner {
@@ -75,21 +128,41 @@
 }
 
 .scrollbar-watchlist::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-watchlist::-webkit-scrollbar:horizontal {
+  height: 8px;
+  background: #161B22;
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-track {
   background: #161B22;
 }
 
+.scrollbar-watchlist::-webkit-scrollbar-track:horizontal {
+  background: #161B22;
+}
+
 .scrollbar-watchlist::-webkit-scrollbar-thumb {
+  border: 2px solid #161B22;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.2);
+  background-clip: padding-box;
+}
+
+.scrollbar-watchlist::-webkit-scrollbar-thumb:horizontal {
+  min-width: 36px;
+  border: 2px solid #161B22;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.24);
+  background-clip: padding-box;
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.35);
+  background-clip: padding-box;
 }
 
 .scrollbar-watchlist::-webkit-scrollbar-corner {

@@ -1,6 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, GripVertical, Search, X } from "lucide-react";
 import ComponentLinkMenu from "./ComponentLinkMenu";
+import ScrollArea from "./ScrollArea";
 import SymbolSearchModal from "./SymbolSearchModal";
 import { linkBus } from "../lib/link-bus";
 import {
@@ -48,6 +50,10 @@ function mid(side: OptionSide | null): number | null {
   return side.bid ?? side.ask ?? null;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
 // ── Props ──────────────────────────────────────────────────────────────────────
 
 interface OptionsSnapshotCardProps {
@@ -69,24 +75,30 @@ interface StatTileProps {
   wide?: boolean;
 }
 
-function StatTile({ label, value, sub, color = "text-white/90", accentBorder }: StatTileProps) {
+function StatTile({ label, value, sub, color = "text-white/90", accentBorder, wide = false }: StatTileProps) {
+  const tileBackground = accentBorder
+    ? `linear-gradient(180deg, ${accentBorder}24, ${accentBorder}10)`
+    : "linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012))";
+
   return (
     <div
-      className="flex min-w-0 flex-col justify-between border border-white/[0.06] px-2.5 py-2"
+      className={`group flex min-w-0 flex-col justify-between border border-white/[0.06] px-2 py-1.5 transition-colors duration-100 hover:border-white/[0.12] hover:bg-white/[0.035] ${
+        wide ? "sm:col-span-2" : ""
+      }`}
       style={{
-        backgroundColor: "#161B22",
-        borderRadius: 4,
-        borderLeft: accentBorder ? `2px solid ${accentBorder}` : undefined,
+        background: tileBackground,
+        borderRadius: 5,
+        borderColor: accentBorder ? `${accentBorder}40` : undefined,
       }}
     >
-      <span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-white">
+      <span className="truncate text-[8px] font-semibold uppercase tracking-[0.14em] text-white/46">
         {label}
       </span>
-      <span className={`mt-1 font-mono text-[13px] font-semibold tabular-nums ${color}`}>
+      <span className={`mt-0.5 truncate font-mono text-[clamp(11px,2.5vw,13px)] font-semibold tabular-nums ${color}`}>
         {value}
       </span>
       {sub && (
-        <span className="mt-0.5 font-mono text-[9px] text-white/35 tabular-nums">{sub}</span>
+        <span className="truncate font-mono text-[8px] text-white/35 tabular-nums">{sub}</span>
       )}
     </div>
   );
@@ -107,58 +119,114 @@ function ExpiryPicker({ months, selected, onSelect }: ExpiryPickerProps) {
   );
 
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const updatePosition = () => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+
+    const rect = trigger.getBoundingClientRect();
+    const width = 224;
+    const left = clamp(rect.left, 8, Math.max(8, window.innerWidth - width - 8));
+    const availableBelow = window.innerHeight - rect.bottom - 12;
+
+    setPanelStyle({
+      left,
+      top: rect.bottom + 6,
+      width,
+      maxHeight: Math.min(280, Math.max(160, availableBelow)),
+    });
+  };
+
+  const toggleOpen = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    updatePosition();
+    setOpen(true);
+  };
 
   useEffect(() => {
     if (!open) return;
+
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (triggerRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
     };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
   }, [open]);
 
   const selectedLabel =
     allExps.find((e) => e.expiration === selected)?.label ?? "Select expiry";
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative min-w-0">
       <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex h-5 items-center gap-1 border border-white/[0.10] bg-[#1C2128] px-2 text-[10px] text-white/70 transition-colors duration-75 hover:border-white/20 hover:text-white/90"
+        ref={triggerRef}
+        type="button"
+        onClick={toggleOpen}
+        className="flex h-6 max-w-full items-center gap-1 border border-white/[0.10] bg-[#1C2128] px-2 text-[10px] text-white/70 transition-colors duration-75 hover:border-white/20 hover:text-white/90"
         style={{ borderRadius: 4 }}
       >
-        <span className="font-mono">{selectedLabel}</span>
+        <span className="truncate font-mono">{selectedLabel}</span>
         <ChevronDown className="h-2.5 w-2.5 shrink-0 text-white/40" strokeWidth={2} />
       </button>
 
-      {open && (
+      {open ? createPortal(
         <div
-          className="absolute left-0 top-full z-[200] mt-1 max-h-52 w-56 overflow-y-auto border border-white/[0.10] bg-[#1C2128] py-1 shadow-xl shadow-black/40 [&::-webkit-scrollbar]:hidden"
-          style={{ borderRadius: 4, scrollbarWidth: "none" }}
+          ref={panelRef}
+          className="fixed z-[1000] border border-white/[0.10] bg-[#1C2128] py-1 shadow-xl shadow-black/40"
+          style={{ ...panelStyle, borderRadius: 5 }}
         >
-          {months.map((month) => (
-            <div key={month.monthLabel}>
-              <div className="px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-white/35">
-                {month.monthLabel}
+          <ScrollArea
+            viewportClassName="max-h-52 pr-2"
+            viewportStyle={{ maxHeight: panelStyle.maxHeight }}
+            trackClassName="right-1 bg-[#0D1117]"
+            thumbClassName="bg-white/[0.18]"
+          >
+            {months.map((month) => (
+              <div key={month.monthLabel}>
+                <div className="px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-white/35">
+                  {month.monthLabel}
+                </div>
+                {month.expirations.map((exp) => (
+                  <button
+                    key={exp.expiration}
+                    onClick={() => { onSelect(exp.expiration); setOpen(false); }}
+                    className={`flex w-full items-center px-2.5 py-1 text-left font-mono text-[10px] transition-colors duration-75 ${
+                      exp.expiration === selected
+                        ? "bg-[#1A56DB]/20 text-[#1A56DB]"
+                        : "text-white/70 hover:bg-white/[0.04] hover:text-white/90"
+                    }`}
+                  >
+                    {exp.label}
+                  </button>
+                ))}
               </div>
-              {month.expirations.map((exp) => (
-                <button
-                  key={exp.expiration}
-                  onClick={() => { onSelect(exp.expiration); setOpen(false); }}
-                  className={`flex w-full items-center px-2.5 py-1 text-left font-mono text-[10px] transition-colors duration-75 ${
-                    exp.expiration === selected
-                      ? "bg-[#1A56DB]/20 text-[#1A56DB]"
-                      : "text-white/70 hover:bg-white/[0.04] hover:text-white/90"
-                  }`}
-                >
-                  {exp.label}
-                </button>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </ScrollArea>
+        </div>,
+        document.body,
+      ) : null}
     </div>
   );
 }
@@ -271,10 +339,10 @@ function OptionsSnapshotCard({
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full flex-col overflow-hidden border border-white/[0.06] bg-[#161B22]">
+    <div className="flex h-full flex-col overflow-hidden border border-white/[0.06] bg-panel">
       {/* Header */}
       <div
-        className="flex h-8 shrink-0 items-center justify-between gap-1 border-b border-white/[0.06] bg-[#0D1117] px-2"
+        className="flex h-8 shrink-0 items-center justify-between gap-1.5 border-b border-white/[0.10] bg-base px-2"
         data-drag-handle
       >
         <div className="flex min-w-0 items-center gap-1.5">
@@ -284,15 +352,15 @@ function OptionsSnapshotCard({
           />
           <button
             onClick={() => setSearchOpen((v) => !v)}
-            className="flex h-5 min-w-0 items-center gap-1 border border-white/[0.08] bg-[#1C2128] px-1.5 text-left transition-colors duration-75 hover:border-white/15"
+            className="flex h-5 min-w-0 items-center gap-1 border border-white/[0.08] bg-[#1C2128] px-1.5 text-left transition-colors duration-75 hover:border-white/15 hover:bg-white/[0.06]"
             style={{ borderRadius: 4 }}
           >
             <Search className="h-2.5 w-2.5 shrink-0 text-white/35" strokeWidth={2} />
-            <span className="truncate font-mono text-[10px] font-semibold tracking-wide text-white/80">
+            <span className="truncate font-mono text-[10px] font-semibold tracking-wide text-white/85">
               {symbol || "Symbol…"}
             </span>
           </button>
-          <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/25">
+          <span className="hidden truncate font-mono text-[9px] uppercase tracking-[0.16em] text-white/25 min-[360px]:inline">
             Options Snapshot
           </span>
         </div>
@@ -310,11 +378,17 @@ function OptionsSnapshotCard({
 
       {/* No symbol empty state */}
       {!symbol && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2">
-          <span className="text-[10px] text-white/20">No symbol selected</span>
+        <div className="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 text-center">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03]">
+            <Search className="h-3.5 w-3.5 text-white/24" strokeWidth={1.7} />
+          </div>
+          <div>
+            <p className="font-mono text-[11px] text-white/46">No symbol selected</p>
+            <p className="mt-0.5 text-[10px] text-white/24">Choose a ticker for options metrics.</p>
+          </div>
           <button
             onClick={() => setSearchOpen(true)}
-            className="border border-white/[0.10] bg-[#1C2128] px-3 py-1.5 text-[10px] text-white/50 transition-colors duration-75 hover:text-white/80"
+            className="mt-0.5 border border-white/[0.10] bg-[#1C2128] px-2.5 py-1 text-[10px] text-white/60 transition-colors duration-75 hover:border-white/20 hover:text-white/90"
             style={{ borderRadius: 4 }}
           >
             Search symbol
@@ -324,45 +398,51 @@ function OptionsSnapshotCard({
 
       {/* Body */}
       {symbol && (
-        <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2 [&::-webkit-scrollbar]:hidden" style={{ scrollbarWidth: "none" }}>
+        <ScrollArea
+          ref={bodyRef}
+          className="min-h-0 flex-1"
+          viewportClassName="h-full"
+          contentClassName="flex min-h-full flex-col gap-2 p-2 pr-3"
+          trackClassName="inset-y-1 right-1 w-1.5 bg-[#0D1117]"
+          thumbClassName="bg-white/[0.18]"
+        >
           {/* Expiry selector + spot */}
-          <div className="flex items-center justify-between gap-2">
-            {allExps.length > 0 ? (
-              <ExpiryPicker
-                months={summary?.months ?? []}
-                selected={selectedExpiry}
-                onSelect={commitExpiry}
-              />
-            ) : (
-              <span className="font-mono text-[10px] text-white/25">No expirations</span>
-            )}
-            <span className="font-mono text-[11px] tabular-nums text-[#00C853]/90">
-              {spot != null ? `$${fp(spot)}` : "—"}
-            </span>
-          </div>
-
-          {/* Implied move — hero stat */}
-          {analytics.impliedMoveToExpiry != null && (
-            <div
-              className="flex items-center justify-between border border-[#8B5CF6]/20 bg-[#8B5CF6]/[0.06] px-3 py-2.5"
-              style={{ borderRadius: 4 }}
-            >
-              <div className="flex flex-col gap-0.5">
-                <span className="text-[9px] font-semibold uppercase tracking-[0.16em] text-white">
-                  Impl. Move to Exp
-                </span>
-                {dte != null && (
-                  <span className="text-[9px] text-white/30 font-mono">{fDte(dte)}d remaining</span>
-                )}
-              </div>
-              <span className="font-mono text-[20px] font-semibold tabular-nums text-[#8B5CF6]">
-                {fSign(analytics.impliedMoveToExpiry)}
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded border border-white/[0.06] bg-base/70 px-2 py-1.5">
+            <div className="min-w-0">
+              <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-white/30">Expiry</p>
+              {allExps.length > 0 ? (
+                <div className="mt-1">
+                  <ExpiryPicker
+                    months={summary?.months ?? []}
+                    selected={selectedExpiry}
+                    onSelect={commitExpiry}
+                  />
+                </div>
+              ) : (
+                <span className="mt-1 block font-mono text-[10px] text-white/25">No expirations</span>
+              )}
+            </div>
+            <div className="text-right">
+              <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-white/30">Spot</p>
+              <span className="mt-0.5 block font-mono text-[13px] font-semibold tabular-nums text-[#00C853]/90">
+                {spot != null ? `$${fp(spot)}` : "—"}
               </span>
             </div>
-          )}
+          </div>
 
-          {/* 2-col stat grid */}
-          <div className="grid grid-cols-2 gap-1.5">
+          {/* Stat grid */}
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(98px,1fr))] gap-1.5">
+            {/* Implied move */}
+            {analytics.impliedMoveToExpiry != null && (
+              <StatTile
+                label="Impl. Move"
+                value={fSign(analytics.impliedMoveToExpiry)}
+                sub={dte != null ? `${fDte(dte)}d to expiry` : undefined}
+                color="text-[#A78BFA]"
+                accentBorder="#8B5CF6"
+              />
+            )}
+
             {/* Support */}
             <StatTile
               label="Support"
@@ -476,7 +556,7 @@ function OptionsSnapshotCard({
               <span className="text-[10px] text-white/20">Fetching options data…</span>
             </div>
           )}
-        </div>
+        </ScrollArea>
       )}
 
       {/* Symbol search modal */}

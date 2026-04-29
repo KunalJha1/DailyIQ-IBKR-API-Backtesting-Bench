@@ -1,7 +1,14 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { ETF_LIST, type HeatmapGroupPayload, type HeatmapGroupType, type HeatmapGroup } from "../lib/heatmap-groups";
+import CustomSelect from "./CustomSelect";
+import ScrollArea from "./ScrollArea";
+import {
+  getHeatmapCategoryOptions,
+  inferHeatmapCategoryValue,
+  type HeatmapCategoryType,
+} from "../lib/heatmap-category-universes";
 
 interface HeatmapGroupEditorProps {
   /** If provided, we're editing an existing group. Null = creating new. */
@@ -14,8 +21,13 @@ const TYPE_LABELS: { type: HeatmapGroupType; label: string; desc: string }[] = [
   { type: "sp500", label: "S&P 500", desc: "All 500 companies, sized by index weight" },
   { type: "watchlist", label: "Watchlist", desc: "Your current watchlist symbols" },
   { type: "etf", label: "ETF Holdings", desc: "Top holdings of a specific ETF" },
+  { type: "sector", label: "Sector", desc: "Pick a tickers.json sector universe" },
   { type: "custom", label: "Custom", desc: "Pick any symbols you want to track" },
 ];
+
+function isCategoryGroupType(value: HeatmapGroupType): value is HeatmapCategoryType {
+  return value === "sector" || value === "industry";
+}
 
 export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGroupEditorProps) {
   const [name, setName] = useState(group?.name ?? "");
@@ -23,6 +35,11 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
   const [etfSearch, setEtfSearch] = useState(group?.etfSymbol ?? "");
   const [etfSelected, setEtfSelected] = useState(group?.etfSymbol ?? "");
   const [etfDropdownOpen, setEtfDropdownOpen] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState(() =>
+    group && isCategoryGroupType(group.type)
+      ? inferHeatmapCategoryValue(group.type, group.symbols)
+      : "",
+  );
   const [customInput, setCustomInput] = useState("");
   const [customSymbols, setCustomSymbols] = useState<string[]>(group?.symbols ?? []);
   const [saving, setSaving] = useState(false);
@@ -51,6 +68,17 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
       e.name.toLowerCase().includes(etfSearch.toLowerCase()),
   ).slice(0, 60);
 
+  const categoryOptions = useMemo(
+    () => (isCategoryGroupType(type) ? getHeatmapCategoryOptions(type) : []),
+    [type],
+  );
+  const selectedCategoryOption = categoryOptions.find((option) => option.value === selectedCategory) ?? null;
+
+  useEffect(() => {
+    if (!isCategoryGroupType(type) || selectedCategoryOption) return;
+    setSelectedCategory(categoryOptions[0]?.value ?? "");
+  }, [categoryOptions, selectedCategoryOption, type]);
+
   const addCustomSymbol = useCallback(() => {
     const sym = customInput.trim().toUpperCase();
     if (!sym || customSymbols.includes(sym) || customSymbols.length >= 100) return;
@@ -77,12 +105,22 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
       setError("Add at least one symbol.");
       return;
     }
+    if (isCategoryGroupType(type) && !selectedCategoryOption) {
+      setError(`Select a ${type}.`);
+      return;
+    }
+
+    const categorySymbols = isCategoryGroupType(type) ? selectedCategoryOption?.symbols : null;
 
     const payload: HeatmapGroupPayload = {
       name: trimmedName,
       type,
       etf_symbol: type === "etf" ? etfSelected : null,
-      symbols: type === "custom" ? customSymbols : null,
+      symbols: type === "custom"
+        ? customSymbols
+        : isCategoryGroupType(type)
+          ? categorySymbols
+          : null,
     };
 
     setSaving(true);
@@ -181,7 +219,10 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
                   </div>
                 )}
                 {etfDropdownOpen && filteredEtfs.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full z-20 max-h-48 overflow-y-auto border border-white/[0.10] bg-[#131720] shadow-lg">
+                  <ScrollArea
+                    className="absolute left-0 right-0 top-full z-20 border border-white/[0.10] bg-[#131720] shadow-lg"
+                    viewportClassName="max-h-48 pr-2"
+                  >
                     {filteredEtfs.map((e) => (
                       <button
                         key={e.symbol}
@@ -198,9 +239,57 @@ export default function HeatmapGroupEditor({ group, onSave, onClose }: HeatmapGr
                         <span className="truncate font-sans text-[10px] text-white/45">{e.name}</span>
                       </button>
                     ))}
-                  </div>
+                  </ScrollArea>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Sector / industry selector */}
+          {isCategoryGroupType(type) && (
+            <div className="flex flex-col gap-1.5">
+              <label className="font-mono text-[9px] uppercase tracking-[0.14em] text-white/40">
+                {type === "sector" ? "Sector" : "Industry"} Universe
+              </label>
+              <CustomSelect
+                value={selectedCategory}
+                onChange={(next) => {
+                  setSelectedCategory(next);
+                  if (!name.trim()) setName(next);
+                }}
+                options={categoryOptions.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                  description: `${Math.min(option.symbols.length, option.count)} of ${option.count} symbols${option.limited ? " (top 100 by index weight)" : ""}`,
+                }))}
+                placeholder={`Select ${type}`}
+                panelWidth={360}
+                triggerClassName="border-white/[0.10] bg-[#0d0f13] font-sans text-[12px]"
+                panelClassName="bg-[#131720]"
+              />
+              {selectedCategoryOption && (
+                <div className="border border-white/[0.06] bg-[#0d0f13] px-3 py-2">
+                  <p className="font-sans text-[11px] text-white/45">
+                    {selectedCategoryOption.symbols.length} symbols from <span className="text-white/65">{selectedCategoryOption.label}</span>
+                    {selectedCategoryOption.limited ? " (capped to the top 100 by tickers.json weight)." : "."}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {selectedCategoryOption.symbols.slice(0, 24).map((symbol) => (
+                      <span
+                        key={symbol}
+                        className="border border-white/[0.08] bg-black/20 px-1.5 py-0.5 font-mono text-[9px] text-white/62"
+                      >
+                        {symbol}
+                      </span>
+                    ))}
+                    {selectedCategoryOption.symbols.length > 24 && (
+                      <span className="px-1.5 py-0.5 font-mono text-[9px] text-white/35">
+                        +{selectedCategoryOption.symbols.length - 24} more
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

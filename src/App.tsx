@@ -18,6 +18,8 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { exit } from "@tauri-apps/api/process";
 import { WatchlistProvider, useWatchlist } from "./lib/watchlist";
 import { isTauriRuntime } from "./lib/platform";
+import { AlertProvider } from "./lib/alerts";
+import AlertBanner from "./components/AlertBanner";
 import { initPerfDiagnostics } from "./lib/perf-diagnostics";
 import { initSupabase } from "./lib/supabase";
 import { isDetachedWindow, isTestWindowLabel, setMainWindowClosing } from "./lib/detached";
@@ -185,9 +187,12 @@ function App() {
   return (
     <ErrorBoundary>
       <AuthProvider>
-        <BrowserRouter>
-          <AppRoutes />
-        </BrowserRouter>
+        <AlertProvider>
+          <AlertBanner />
+          <BrowserRouter>
+            <AppRoutes />
+          </BrowserRouter>
+        </AlertProvider>
       </AuthProvider>
     </ErrorBoundary>
   );

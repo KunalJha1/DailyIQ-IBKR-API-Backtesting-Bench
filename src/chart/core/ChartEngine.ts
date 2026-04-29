@@ -33,6 +33,7 @@ import { computeIndicator, recomputeIndicatorTail } from '../indicators/compute'
 import { detectActiveFvgZones } from '../indicators/shared/ictSmc';
 import type { ScriptResult } from '../types';
 import type { Timeframe } from '../types';
+import type { ChartAlert, IndicatorAlert, PriceAlert } from '../../lib/alerts';
 
 const BRANDING_ASSETS: Record<Exclude<ChartBrandingMode, 'none'>, { src: string; opacity: number }> = {
   fullLogo: {
@@ -47,6 +48,10 @@ const BRANDING_ASSETS: Record<Exclude<ChartBrandingMode, 'none'>, { src: string;
 
 const brandingImageCache = new Map<string, HTMLImageElement>();
 const brandingImageFailures = new Set<string>();
+const ALERT_YELLOW = '#FACC15';
+const ALERT_YELLOW_MUTED = 'rgba(250, 204, 21, 0.58)';
+const ALERT_LABEL_FILL = 'rgba(49, 38, 12, 0.92)';
+type ExtendedSession = 'pre' | 'post' | 'overnight';
 
 function isProbEngWidgetIndicator(indicator: ActiveIndicator): boolean {
   return indicator.name === 'Probability Engine';
@@ -120,11 +125,17 @@ export class ChartEngine {
   private chartType: ChartType = 'candlestick';
   private activeIndicators: ActiveIndicator[] = [];
   private scriptResults: Map<string, ScriptResult> = new Map();
-  private dirty = true;
+  private chartAlerts: ChartAlert[] = [];
+  private contentDirty = true;
+  private crosshairDirty = false;
   private rafId = 0;
   private dpr = 1;
   private width = 0;
   private height = 0;
+  private baseCanvas: HTMLCanvasElement;
+  private baseCtx: CanvasRenderingContext2D;
+  private baseCacheValid = false;
+  private cachedCanvasRect: DOMRect | null = null;
   private destroyed = false;
   private liveMode = false;
   private stopperPx = 0;
@@ -151,16 +162,13 @@ export class ChartEngine {
   private dragDrawingOriginEnd: DrawingAnchor | null = null;
   private dragEndpoint: 'start' | 'end' | 'whole' = 'whole';
   private hoveredDrawingId: string | null = null;
-  private volumeProfileOffsetsPx: Map<string, number> = new Map();
   private volumeProfileHitAreas: Map<string, { left: number; right: number; top: number; bottom: number }> = new Map();
   private hoveredVolumeProfileId: string | null = null;
-  private draggedVolumeProfileId: string | null = null;
-  private dragVolumeProfileOriginMouseX = 0;
-  private dragVolumeProfileOriginOffsetPx = 0;
   private selectedDrawingId: string | null = null;
   private _onTextPlacementRequest: ((anchor: DrawingAnchor) => void) | null = null;
   private _onDrawingSelectionChange: ((selection: DrawingSelection | null) => void) | null = null;
   private _onDrawingContextMenu: ((info: { drawingId: string; color: string; screenX: number; screenY: number }) => void) | null = null;
+  private _onChartContextMenu: ((info: { price: number; screenX: number; screenY: number }) => void) | null = null;
   private _onDrawingHoverChange: ((hoveredId: string | null) => void) | null = null;
   onYScaleModeChange: ((mode: YScaleMode) => void) | null = null;
   private lastNotifiedViewportStart: number | null = null;
@@ -170,10 +178,15 @@ export class ChartEngine {
   private suspended = false;
   /** True while a frame callback is queued (idle loop stops when false and no work pending). */
   private renderLoopScheduled = false;
+  private invalidateCanvasRect = () => {
+    this.cachedCanvasRect = null;
+  };
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
+    this.baseCanvas = document.createElement('canvas');
+    this.baseCtx = this.baseCanvas.getContext('2d')!;
     this.renderer = new Renderer(this.ctx);
     this.viewport = new Viewport();
     this.scaleY = new ScaleY();
@@ -214,7 +227,7 @@ export class ChartEngine {
   resume() {
     if (this.destroyed || !this.suspended) return;
     this.suspended = false;
-    this.dirty = true;
+    this.contentDirty = true;
     this.scheduleFrame();
   }
 
@@ -227,7 +240,8 @@ export class ChartEngine {
 
   setData(bars: OHLCVBar[]) {
     const prevLength = this.bars.length;
-    const wasNearEnd = this.viewport.isLastBarVisible();
+    const wasLatestVisible = this.viewport.isLatestBarInViewport();
+    const preservedRightBlankBars = wasLatestVisible ? this.viewport.getVisibleRightBlankBars() : 0;
     this.bars = bars;
     this.lastNotifiedViewportStart = null;
     this.lastNotifiedViewportEnd = null;
@@ -235,10 +249,10 @@ export class ChartEngine {
     this.viewport.setTotalBars(bars.length);
     this.recomputeIndicators(false);
     if (bars.length > prevLength) {
-      const shouldFollow = wasNearEnd ||
+      const shouldFollow = wasLatestVisible ||
         (this.liveMode && this.viewport.isAtOrAnimatingToEnd());
       if (shouldFollow) {
-        this.viewport.scrollToEnd();
+        this.viewport.scrollToLatestWithRightBlank(preservedRightBlankBars);
       }
     }
     this.markDirty();
@@ -254,7 +268,8 @@ export class ChartEngine {
       return;
     }
     const prevLength = this.bars.length;
-    const wasNearEnd = this.viewport.isLastBarVisible();
+    const wasLatestVisible = this.viewport.isLatestBarInViewport();
+    const preservedRightBlankBars = wasLatestVisible ? this.viewport.getVisibleRightBlankBars() : 0;
     this.bars = bars;
 
     this.viewport.setRightOffsetBars(this.computeRightOffsetBars());
@@ -265,14 +280,15 @@ export class ChartEngine {
     this.recomputeIndicators(true, changeOffset);
 
     if (bars.length > prevLength) {
-      const shouldFollow = wasNearEnd ||
+      const shouldFollow = wasLatestVisible ||
         (this.liveMode && this.viewport.isAtOrAnimatingToEnd());
       if (shouldFollow) {
-        this.viewport.scrollToEnd();
+        this.viewport.scrollToLatestWithRightBlank(preservedRightBlankBars);
       }
     }
 
-    this.dirty = true;
+    this.contentDirty = true;
+    this.baseCacheValid = false;
     this.scheduleFrame();
   }
 
@@ -470,6 +486,14 @@ export class ChartEngine {
     this._onDrawingContextMenu = cb;
   }
 
+  setOnChartContextMenu(cb: ((info: { price: number; screenX: number; screenY: number }) => void) | null) {
+    this._onChartContextMenu = cb;
+  }
+
+  getPriceAtCanvasY(canvasY: number): number {
+    return this.viewport.pixelYToPrice(canvasY);
+  }
+
   setOnDrawingHoverChange(cb: ((hoveredId: string | null) => void) | null) {
     this._onDrawingHoverChange = cb;
   }
@@ -607,10 +631,8 @@ export class ChartEngine {
 
   removeIndicator(id: string) {
     this.activeIndicators = this.activeIndicators.filter(ind => ind.id !== id);
-    this.volumeProfileOffsetsPx.delete(id);
     this.volumeProfileHitAreas.delete(id);
     if (this.hoveredVolumeProfileId === id) this.hoveredVolumeProfileId = null;
-    if (this.draggedVolumeProfileId === id) this.draggedVolumeProfileId = null;
     this.markDirty();
   }
 
@@ -822,15 +844,24 @@ export class ChartEngine {
     this.markDirty();
   }
 
+  setAlerts(alerts: ChartAlert[]) {
+    this.chartAlerts = alerts;
+    this.markDirty();
+  }
+
   resize(width: number, height: number) {
     this.dpr = window.devicePixelRatio || 1;
     this.width = width;
     this.height = height;
     this.canvas.width = width * this.dpr;
     this.canvas.height = height * this.dpr;
+    this.baseCanvas.width = this.canvas.width;
+    this.baseCanvas.height = this.canvas.height;
     this.canvas.style.width = width + 'px';
     this.canvas.style.height = height + 'px';
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.baseCacheValid = false;
+    this.cachedCanvasRect = null;
     this.panZoom.setCanvasWidth(width);
     this.panZoom.setCanvasHeight(height);
     this.markDirty();
@@ -1020,14 +1051,19 @@ export class ChartEngine {
   // --- Render ---
 
   private markDirty() {
-    this.dirty = true;
+    this.contentDirty = true;
+    this.baseCacheValid = false;
     this.notifyViewportChange();
     this.scheduleFrame();
   }
 
-  // Lightweight dirty flag for crosshair-only updates — skips viewport change notification
+  // Crosshair-only updates reuse the cached chart frame and skip viewport change notification.
   private markCrosshairDirty() {
-    this.dirty = true;
+    if (this.contentDirty || !this.baseCacheValid) {
+      this.contentDirty = true;
+    } else {
+      this.crosshairDirty = true;
+    }
     this.scheduleFrame();
   }
 
@@ -1060,18 +1096,23 @@ export class ChartEngine {
     this.lastFrameTime = now;
 
     this.viewport.tickAnimation(dt);
-    if (this.viewport.isAnimating) this.dirty = true;
+    if (this.viewport.isAnimating) this.contentDirty = true;
 
     if (this.pendingMouseEvent) {
       this.processMouseMove(this.pendingMouseEvent);
       this.pendingMouseEvent = null;
     }
-    if (this.dirty) {
-      this.dirty = false;
+    if (this.contentDirty) {
+      this.contentDirty = false;
+      this.crosshairDirty = false;
       this.render();
+    } else if (this.crosshairDirty) {
+      this.crosshairDirty = false;
+      this.renderCrosshairOverlay();
     }
     const needsAnotherFrame =
-      this.dirty ||
+      this.contentDirty ||
+      this.crosshairDirty ||
       this.viewport.isAnimating ||
       this.pendingMouseEvent !== null ||
       this.drawingPointerActive ||
@@ -1107,10 +1148,8 @@ export class ChartEngine {
       this.scaleY.renderGrid(this.renderer, this.viewport, this.width);
       this.scaleX.renderGrid(this.renderer, this.viewport, this.bars, this.height, this.width);
 
-      // Pre/post-market session background tints (intraday only)
+      // Extended-hours session background tints (intraday only)
       this.renderSessionHighlights();
-      // Purple tint behind off-hours synthetic bars built from quote ticks
-      this.renderSyntheticHighlights();
 
       // Main-chart volume overlays render behind price action
       this.renderMainVolumeOverlays();
@@ -1144,6 +1183,10 @@ export class ChartEngine {
 
       // User drawings
       this.renderDrawings();
+
+      // Alert overlays
+      this.renderPriceAlerts(chartAreaWidth);
+      this.renderMainIndicatorAlertCallouts(chartAreaWidth);
 
       // Branding watermark
       this.renderBranding(chartAreaWidth, layout.mainHeight);
@@ -1179,7 +1222,11 @@ export class ChartEngine {
     this.renderVisibleRangeExtremeMarkers();
     this.renderLastPriceLabel();
 
-    // Crosshair & tooltip (with indicator labels)
+    this.cacheBaseFrame();
+    this.renderHoverOverlay(layout, chartAreaWidth);
+  }
+
+  private renderHoverOverlay(layout: ChartLayout, chartAreaWidth: number) {
     this.crosshair.render(this.renderer, this.viewport, this.scaleX, this.width, this.height);
     this.tooltip.render(this.renderer, this.viewport, this.crosshair.hit);
 
@@ -1187,6 +1234,37 @@ export class ChartEngine {
     for (const pane of layout.subPanes) {
       this.renderSubPaneHeaderOverlay(pane, chartAreaWidth);
     }
+  }
+
+  private renderCrosshairOverlay() {
+    if (!this.restoreBaseFrame()) {
+      this.render();
+      return;
+    }
+
+    const layout = this.computeLayout();
+    const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
+    this.renderHoverOverlay(layout, chartAreaWidth);
+  }
+
+  private cacheBaseFrame() {
+    if (this.canvas.width === 0 || this.canvas.height === 0) return;
+    this.baseCtx.save();
+    this.baseCtx.setTransform(1, 0, 0, 1, 0, 0);
+    this.baseCtx.clearRect(0, 0, this.baseCanvas.width, this.baseCanvas.height);
+    this.baseCtx.drawImage(this.canvas, 0, 0);
+    this.baseCtx.restore();
+    this.baseCacheValid = true;
+  }
+
+  private restoreBaseFrame(): boolean {
+    if (!this.baseCacheValid || this.baseCanvas.width === 0 || this.baseCanvas.height === 0) return false;
+    this.ctx.save();
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.ctx.drawImage(this.baseCanvas, 0, 0);
+    this.ctx.restore();
+    return true;
   }
 
   private renderLastPriceLabel() {
@@ -1351,6 +1429,119 @@ export class ChartEngine {
     return price.toFixed(2);
   }
 
+  private renderPriceAlerts(chartAreaWidth: number) {
+    const priceAlerts = this.chartAlerts.filter((alert): alert is PriceAlert => alert.type === 'price');
+    if (priceAlerts.length === 0) return;
+
+    for (const alert of priceAlerts) {
+      if (!Number.isFinite(alert.price)) continue;
+      const y = this.viewport.priceToPixelY(alert.price);
+      if (y < this.viewport.chartTop || y > this.viewport.chartTop + this.viewport.chartHeight) continue;
+
+      this.renderer.dashedLine(this.viewport.chartLeft, y, chartAreaWidth, y, ALERT_YELLOW_MUTED, 1.25, [6, 4]);
+
+      const priceText = this.formatAxisPrice(alert.price);
+      const label = alert.label?.trim() || `Alert ${priceText}`;
+      const text = `${label} @ ${priceText}`;
+      const textWidth = Math.ceil(this.renderer.measureText(text, FONT_MONO_SMALL).width);
+      const boxWidth = Math.min(Math.max(textWidth + 12, 76), Math.max(76, chartAreaWidth - this.viewport.chartLeft - 12));
+      const boxHeight = 18;
+      const boxX = Math.max(this.viewport.chartLeft + 6, chartAreaWidth - boxWidth - 8);
+      const boxY = Math.min(
+        Math.max(y - boxHeight / 2, this.viewport.chartTop + 4),
+        this.viewport.chartTop + this.viewport.chartHeight - PRICE_AXIS_CONTROL_HEIGHT - boxHeight - 4,
+      );
+
+      this.renderer.rect(boxX, boxY, boxWidth, boxHeight, ALERT_LABEL_FILL);
+      this.renderer.rectStroke(boxX, boxY, boxWidth, boxHeight, ALERT_YELLOW, 1);
+      this.renderer.textSmall(text, boxX + 6, boxY + boxHeight / 2, ALERT_YELLOW, 'left');
+    }
+  }
+
+  private renderMainIndicatorAlertCallouts(chartAreaWidth: number) {
+    for (const ind of this.activeIndicators) {
+      if (!ind.visible || ind.paneId !== 'main') continue;
+      this.renderIndicatorAlertCalloutsForIndicator(
+        ind,
+        (value) => this.viewport.priceToPixelY(value),
+        chartAreaWidth,
+        this.viewport.chartTop,
+        this.viewport.chartTop + this.viewport.chartHeight,
+      );
+    }
+  }
+
+  private renderIndicatorAlertCalloutsForIndicator(
+    indicator: ActiveIndicator,
+    valueToY: (value: number) => number,
+    chartAreaWidth: number,
+    clipTop: number,
+    clipBottom: number,
+  ) {
+    const alerts = this.chartAlerts.filter((alert): alert is IndicatorAlert => (
+      alert.type === 'indicator' &&
+      alert.status === 'fired' &&
+      alert.indicatorId === indicator.id &&
+      Number.isFinite(alert.triggeredBarTime) &&
+      Number.isFinite(alert.triggeredValue)
+    ));
+    if (alerts.length === 0) return;
+
+    const start = Math.floor(this.viewport.startIndex);
+    const end = Math.ceil(this.viewport.endIndex);
+    const meta = indicatorRegistry[indicator.name];
+
+    for (const alert of alerts) {
+      const barIndex = this.findBarIndexByTime(alert.triggeredBarTime!);
+      if (barIndex < start || barIndex > end) continue;
+
+      const x = this.viewport.barToPixelX(barIndex);
+      const y = valueToY(alert.triggeredValue!);
+      if (x < this.viewport.chartLeft - 40 || x > chartAreaWidth + 40 || y < clipTop - 24 || y > clipBottom + 24) continue;
+
+      const outputLabel = meta?.outputs.find((output) => output.key === alert.outputKey)?.label ?? alert.outputKey;
+      const label = alert.label?.trim() || `${indicator.name} ${outputLabel}`;
+      this.renderAlertCallout(x, y, label, chartAreaWidth, clipTop, clipBottom);
+    }
+  }
+
+  private renderAlertCallout(
+    x: number,
+    y: number,
+    label: string,
+    chartAreaWidth: number,
+    clipTop: number,
+    clipBottom: number,
+  ) {
+    const boxHeight = 18;
+    const stemLen = 12;
+    const textWidth = Math.ceil(this.renderer.measureText(label, FONT_MONO_SMALL).width);
+    const boxWidth = Math.min(Math.max(textWidth + 12, 52), Math.max(52, chartAreaWidth - this.viewport.chartLeft - 12));
+    const preferAbove = y - stemLen - boxHeight - 6 >= clipTop;
+    const stemEndY = preferAbove ? y - stemLen : y + stemLen;
+    const rawBoxY = preferAbove ? stemEndY - boxHeight - 3 : stemEndY + 3;
+    const boxX = Math.min(Math.max(x - boxWidth / 2, this.viewport.chartLeft + 4), chartAreaWidth - boxWidth - 4);
+    const boxY = Math.min(Math.max(rawBoxY, clipTop + 4), clipBottom - boxHeight - 4);
+
+    this.renderer.line(x, y, x, stemEndY, ALERT_YELLOW, 1.25);
+    this.renderer.rect(boxX, boxY, boxWidth, boxHeight, ALERT_LABEL_FILL);
+    this.renderer.rectStroke(boxX, boxY, boxWidth, boxHeight, ALERT_YELLOW, 1);
+    this.renderer.textSmall(label, boxX + boxWidth / 2, boxY + boxHeight / 2, '#FEF3C7', 'center');
+  }
+
+  private findBarIndexByTime(time: number): number {
+    let low = 0;
+    let high = this.bars.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const value = this.bars[mid].time;
+      if (value === time) return mid;
+      if (value < time) low = mid + 1;
+      else high = mid - 1;
+    }
+    return -1;
+  }
+
   private renderSessionHighlights() {
     const tf = this.scaleX.timeframe;
     if (tf === '1D' || tf === '1W' || tf === '1M') return;
@@ -1362,91 +1553,91 @@ export class ChartEngine {
 
     const chartTop = this.viewport.chartTop;
     const chartHeight = this.viewport.chartHeight;
-    const halfBar = this.viewport.barWidth / 2;
+    const barWidth = this.viewport.barWidth;
+    const halfBar = barWidth / 2;
     const barDurationMs = getTimeframeMs(tf);
-
-    type Session = 'pre' | 'post' | null;
-    let runSession: Session = null;
-    let runLeft = 0;
-
-    const flush = (rightX: number) => {
-      if (!runSession) return;
-      const color = runSession === 'pre' ? COLORS.premarket : COLORS.aftermarket;
-      this.renderer.rect(runLeft, chartTop, rightX - runLeft, chartHeight, color);
-      runSession = null;
-    };
+    const intervals: Array<{ session: ExtendedSession; left: number; right: number }> = [];
 
     for (let i = start; i < end; i++) {
       const bar = this.bars[i];
-      const session = this.getExtendedSessionForBar(bar.time, barDurationMs);
-
+      const segments = this.getExtendedSessionSegmentsForBar(bar.time, barDurationMs);
+      if (segments.length === 0) continue;
       const cx = this.viewport.barToPixelX(i);
-
-      if (session !== runSession) {
-        flush(cx - halfBar);
-        if (session) {
-          runLeft = cx - halfBar;
-        }
-        runSession = session;
+      const left = cx - halfBar;
+      for (const segment of segments) {
+        intervals.push({
+          session: segment.session,
+          left: left + barWidth * segment.startRatio,
+          right: left + barWidth * segment.endRatio,
+        });
       }
     }
 
-    if (runSession) {
-      const lastCx = this.viewport.barToPixelX(end - 1);
-      flush(lastCx + halfBar);
-    }
-  }
-
-  private renderSyntheticHighlights() {
-    if (this.bars.length === 0) return;
-    const start = Math.max(0, Math.floor(this.viewport.startIndex));
-    const end = Math.min(this.bars.length, Math.ceil(this.viewport.endIndex));
-    if (start >= end) return;
-
-    const chartTop = this.viewport.chartTop;
-    const chartHeight = this.viewport.chartHeight;
-    const halfBar = this.viewport.barWidth / 2;
-
-    let runLeft = 0;
-    let inRun = false;
-
-    const flush = (rightX: number) => {
-      if (!inRun) return;
-      this.renderer.rect(runLeft, chartTop, rightX - runLeft, chartHeight, COLORS.syntheticBar);
-      inRun = false;
-    };
-
-    for (let i = start; i < end; i++) {
-      const bar = this.bars[i];
-      const cx = this.viewport.barToPixelX(i);
-      if (bar.synthetic) {
-        if (!inRun) {
-          runLeft = cx - halfBar;
-          inRun = true;
-        }
+    intervals.sort((a, b) => a.left - b.left);
+    const merged: Array<{ session: ExtendedSession; left: number; right: number }> = [];
+    for (const interval of intervals) {
+      if (interval.right <= interval.left) continue;
+      const current = merged[merged.length - 1];
+      if (current && current.session === interval.session && interval.left <= current.right + 0.75) {
+        current.right = Math.max(current.right, interval.right);
       } else {
-        flush(cx - halfBar);
+        merged.push({ ...interval });
       }
     }
 
-    if (inRun) {
-      const lastCx = this.viewport.barToPixelX(end - 1);
-      flush(lastCx + halfBar);
+    for (const interval of merged) {
+      this.renderer.rect(
+        interval.left,
+        chartTop,
+        interval.right - interval.left,
+        chartHeight,
+        this.getExtendedSessionColor(interval.session),
+      );
     }
   }
 
-  private getExtendedSessionForBar(startTimeMs: number, durationMs: number): 'pre' | 'post' | null {
+  private getExtendedSessionColor(session: ExtendedSession): string {
+    if (session === 'pre') return COLORS.premarket;
+    if (session === 'post') return COLORS.aftermarket;
+    return COLORS.overnight;
+  }
+
+  private getExtendedSessionSegmentsForBar(
+    startTimeMs: number,
+    durationMs: number,
+  ): Array<{ session: ExtendedSession; startRatio: number; endRatio: number }> {
     const startEt = etDatePartsFromMs(startTimeMs);
-    const endEt = etDatePartsFromMs(Math.max(startTimeMs, startTimeMs + Math.max(1, durationMs) - 1));
-    if (startEt.year !== endEt.year || startEt.month !== endEt.month || startEt.day !== endEt.day) {
-      return null;
+    const endEt = etDatePartsFromMs(startTimeMs + Math.max(1, durationMs));
+    const startMinute = startEt.hour * 60 + startEt.minute;
+    let endMinuteExclusive = endEt.hour * 60 + endEt.minute;
+    const sameDay = startEt.year === endEt.year && startEt.month === endEt.month && startEt.day === endEt.day;
+    if (!sameDay || endMinuteExclusive <= startMinute) endMinuteExclusive += 1440;
+
+    const span = Math.max(1, endMinuteExclusive - startMinute);
+    const segments: Array<{ session: ExtendedSession; startRatio: number; endRatio: number }> = [];
+    const dayCount = Math.ceil(endMinuteExclusive / 1440);
+    const windows: Array<{ session: ExtendedSession; start: number; end: number }> = [
+      { session: 'overnight', start: 0, end: 240 },
+      { session: 'pre', start: 240, end: 570 },
+      { session: 'post', start: 960, end: 1200 },
+      { session: 'overnight', start: 1200, end: 1440 },
+    ];
+
+    for (let day = 0; day <= dayCount; day++) {
+      const offset = day * 1440;
+      for (const window of windows) {
+        const overlapStart = Math.max(startMinute, offset + window.start);
+        const overlapEnd = Math.min(endMinuteExclusive, offset + window.end);
+        if (overlapStart >= overlapEnd) continue;
+        segments.push({
+          session: window.session,
+          startRatio: (overlapStart - startMinute) / span,
+          endRatio: (overlapEnd - startMinute) / span,
+        });
+      }
     }
 
-    const startMinute = startEt.hour * 60 + startEt.minute;
-    const endMinuteExclusive = endEt.hour * 60 + endEt.minute + 1;
-    if (startMinute < 570 && endMinuteExclusive > 240) return 'pre';
-    if (startMinute < 1200 && endMinuteExclusive > 960) return 'post';
-    return null;
+    return segments;
   }
 
   private renderMainVolumeOverlays() {
@@ -1822,7 +2013,8 @@ export class ChartEngine {
   }
 
   private getCanvasPoint(e: MouseEvent): { mx: number; my: number; rect: DOMRect } {
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.cachedCanvasRect ?? this.canvas.getBoundingClientRect();
+    this.cachedCanvasRect = rect;
     const scaleX = rect.width / this.width;
     const scaleY = rect.height / this.height;
     return {
@@ -2107,6 +2299,13 @@ export class ChartEngine {
           effectiveMin,
           effectiveMax,
         );
+      }
+
+      for (const { ind, min, max } of ranges) {
+        const effectiveMin = panePresentation.min ?? min;
+        const effectiveMax = panePresentation.max ?? max;
+        const valueToY = makeValueToY(effectiveMin, effectiveMax);
+        this.renderIndicatorAlertCalloutsForIndicator(ind, valueToY, chartAreaWidth, pane.top, pane.top + pane.height);
       }
     });
 
@@ -2397,23 +2596,6 @@ export class ChartEngine {
     }
   }
 
-  private clampVolumeProfileOffsetPx(
-    indicatorId: string,
-    chartAreaWidth: number,
-    maxProfileWidth: number,
-  ): number {
-    const baseRightX = chartAreaWidth - 8;
-    const rawOffset = this.volumeProfileOffsetsPx.get(indicatorId) ?? 0;
-    const minRightX = maxProfileWidth + 6;
-    const maxRightX = chartAreaWidth - 4;
-    const clampedRightX = Math.min(maxRightX, Math.max(minRightX, baseRightX + rawOffset));
-    const clampedOffset = clampedRightX - baseRightX;
-    if (Math.abs(clampedOffset - rawOffset) > 0.5) {
-      this.volumeProfileOffsetsPx.set(indicatorId, clampedOffset);
-    }
-    return clampedOffset;
-  }
-
   private hitTestVolumeProfile(mx: number, my: number): string | null {
     let hitId: string | null = null;
     for (const [id, area] of this.volumeProfileHitAreas.entries()) {
@@ -2440,75 +2622,104 @@ export class ChartEngine {
     const downVolumes = ind.data[3] ?? [];
     const bins = Math.min(prices.length, totalVolumes.length);
     if (bins === 0) return;
+    const profileBars = this.getVolumeProfileBars();
+    if (profileBars.length === 0) return;
 
     let maxVolume = 0;
+    let pocIndex = -1;
     for (let i = 0; i < bins; i++) {
-      if (!isNaN(totalVolumes[i]) && totalVolumes[i] > maxVolume) maxVolume = totalVolumes[i];
+      if (!isNaN(totalVolumes[i]) && totalVolumes[i] > maxVolume) {
+        maxVolume = totalVolumes[i];
+        pocIndex = i;
+      }
     }
     if (!(maxVolume > 0)) return;
 
+    let minPrice = Infinity;
+    let maxPrice = -Infinity;
+    for (let i = 0; i < profileBars.length; i++) {
+      if (profileBars[i].low < minPrice) minPrice = profileBars[i].low;
+      if (profileBars[i].high > maxPrice) maxPrice = profileBars[i].high;
+    }
+    if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice)) return;
+
     const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
-    const maxProfileWidth = Math.max(24, Math.min(chartAreaWidth * 0.28, 140));
-    const baseRightX = chartAreaWidth - 8;
-    const rightX = baseRightX + this.clampVolumeProfileOffsetPx(ind.id, chartAreaWidth, maxProfileWidth);
+    const maxProfileWidth = Math.max(30, Math.min(chartAreaWidth * 0.26, 156));
+    const anchorX = 8;
     const drawColor = ind.colors?.volumes ?? indicatorRegistry[ind.name].outputs[1]?.color ?? COLORS.blue;
     const upColor = ind.colors?.upVolume ?? '#00C853';
     const downColor = ind.colors?.downVolume ?? '#FF3D71';
-    const rowHeight = (clipBottom - clipTop) / Math.max(bins, 1);
-    const binHeight = Math.max(1, Math.floor(rowHeight * 0.84));
-    const barDividerColor = this.withAlpha('#000000', 0.82);
-    const solidFillColor = this.withAlpha(drawColor, 0.9);
+    const barDividerColor = this.withAlpha('#08111F', 0.88);
+    const solidFillColor = this.withAlpha(drawColor, 0.88);
     const upFillColor = this.withAlpha(upColor, 0.9);
-    const downFillColor = this.withAlpha(downColor, 0.9);
+    const downFillColor = this.withAlpha(downColor, 0.88);
+    const pocStrokeColor = this.withAlpha('#F8FAFC', 0.95);
+    const profileRange = maxPrice - minPrice;
+    const binSize = profileRange > 0 ? profileRange / bins : 0;
+    const gutterPx = 1;
 
     let maxDrawnWidth = 0;
     let minDrawnY = Infinity;
     let maxDrawnY = -Infinity;
 
     for (let i = 0; i < bins; i++) {
-      const price = prices[i];
       const total = totalVolumes[i];
-      if (isNaN(price) || isNaN(total) || total <= 0) continue;
+      if (isNaN(total) || total <= 0) continue;
 
-      const y = toY(price);
-      if (y < clipTop - binHeight || y > clipBottom + binHeight) continue;
+      const binLow = profileRange > 0 ? minPrice + (i * binSize) : minPrice;
+      const binHigh = profileRange > 0 ? minPrice + ((i + 1) * binSize) : maxPrice;
+      const yLow = toY(binLow);
+      const yHigh = toY(binHigh);
+      const rawTopY = Math.min(yLow, yHigh);
+      const rawBottomY = Math.max(yLow, yHigh);
+      if (rawBottomY < clipTop || rawTopY > clipBottom) continue;
 
-      const width = Math.max(1, (total / maxVolume) * maxProfileWidth);
-      const leftX = rightX - width;
-      const topY = y - binHeight / 2;
+      const cellTop = Math.max(clipTop, Math.round(rawTopY));
+      const cellBottom = Math.min(clipBottom, Math.round(rawBottomY));
+      let topY = cellTop + gutterPx;
+      let bottomY = cellBottom - gutterPx;
+      if (bottomY <= topY) {
+        topY = cellTop;
+        bottomY = Math.max(cellTop + 1, cellBottom);
+      }
+      const binHeight = Math.max(1, bottomY - topY);
+      const width = Math.max(1, Math.round((total / maxVolume) * maxProfileWidth));
+      const leftX = anchorX;
       const up = Number.isFinite(upVolumes[i]) ? upVolumes[i] : NaN;
       const down = Number.isFinite(downVolumes[i]) ? downVolumes[i] : NaN;
       const splitSum = (Number.isFinite(up) ? up : 0) + (Number.isFinite(down) ? down : 0);
 
       if (splitSum > 0) {
-        const downWidth = width * ((Number.isFinite(down) ? down : 0) / splitSum);
+        const downWidth = Math.round(width * ((Number.isFinite(down) ? down : 0) / splitSum));
         const upWidth = width - downWidth;
-        if (downWidth > 0.5) this.renderer.rect(leftX, topY, downWidth, binHeight, downFillColor);
-        if (upWidth > 0.5) this.renderer.rect(leftX + downWidth, topY, upWidth, binHeight, upFillColor);
+        if (downWidth > 0) this.renderer.rect(leftX, topY, downWidth, binHeight, downFillColor);
+        if (upWidth > 0) this.renderer.rect(leftX + downWidth, topY, upWidth, binHeight, upFillColor);
       } else {
         this.renderer.rect(leftX, topY, width, binHeight, solidFillColor);
       }
       if (binHeight >= 2 && width >= 2) {
         this.renderer.rectStroke(leftX, topY, width, binHeight, barDividerColor, 1);
       }
+      if (i === pocIndex && binHeight >= 2) {
+        this.renderer.rectStroke(leftX, topY, width, binHeight, pocStrokeColor, 1);
+      }
 
       maxDrawnWidth = Math.max(maxDrawnWidth, width);
       minDrawnY = Math.min(minDrawnY, topY);
-      maxDrawnY = Math.max(maxDrawnY, topY + binHeight);
+      maxDrawnY = Math.max(maxDrawnY, bottomY);
     }
 
     if (maxDrawnWidth > 0 && Number.isFinite(minDrawnY) && Number.isFinite(maxDrawnY)) {
+      this.renderer.line(anchorX, clipTop, anchorX, clipBottom, this.withAlpha('#94A3B8', 0.35), 1);
       const hitArea = {
-        left: Math.max(0, rightX - Math.max(maxDrawnWidth, 8) - 6),
-        right: Math.min(chartAreaWidth, rightX + 4),
+        left: Math.max(0, anchorX - 4),
+        right: Math.min(chartAreaWidth, anchorX + maxDrawnWidth + 6),
         top: Math.max(clipTop, minDrawnY - 4),
         bottom: Math.min(clipBottom, maxDrawnY + 4),
       };
       this.volumeProfileHitAreas.set(ind.id, hitArea);
-      if (this.hoveredVolumeProfileId === ind.id || this.draggedVolumeProfileId === ind.id) {
-        const strokeColor = this.draggedVolumeProfileId === ind.id
-          ? this.withAlpha('#93C5FD', 0.85)
-          : this.withAlpha('#93C5FD', 0.55);
+      if (this.hoveredVolumeProfileId === ind.id) {
+        const strokeColor = this.withAlpha('#93C5FD', 0.55);
         this.renderer.rectStroke(
           hitArea.left,
           hitArea.top,
@@ -3190,24 +3401,15 @@ export class ChartEngine {
         this.markDirty();
         return;
       }
-      const volumeProfileHitId = this.hitTestVolumeProfile(mx, my);
-      if (volumeProfileHitId) {
-        this.draggedVolumeProfileId = volumeProfileHitId;
-        this.dragVolumeProfileOriginMouseX = mx;
-        this.dragVolumeProfileOriginOffsetPx = this.volumeProfileOffsetsPx.get(volumeProfileHitId) ?? 0;
-        this.hoveredVolumeProfileId = volumeProfileHitId;
-        this.markDirty();
-        return;
-      }
       this.setSelectedDrawingId(null);
     }
     this.panZoom.onMouseDown(e);
   };
 
-  // Coalesced into RAF loop for crosshair — drawing/drag paths still run per-event for responsiveness
+  // Coalesced into RAF loop for crosshair; active drag paths still run per-event for responsiveness.
   private onMouseMove = (e: MouseEvent) => {
-    // Drawing and drag operations need immediate response — bypass the RAF coalescing
-    if (this.drawingPointerActive || this.draggedDrawingId || this.draggedVolumeProfileId) {
+    // Drawing and pan/zoom drag operations need immediate response, so bypass RAF coalescing.
+    if (this.drawingPointerActive || this.draggedDrawingId || this.panZoom.isDragging) {
       this.processMouseMove(e);
       return;
     }
@@ -3273,32 +3475,18 @@ export class ChartEngine {
       return;
     }
 
-    if (this.draggedVolumeProfileId) {
-      const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
-      const maxProfileWidth = Math.max(24, Math.min(chartAreaWidth * 0.28, 140));
-      const baseRightX = chartAreaWidth - 8;
-      const minRightX = maxProfileWidth + 6;
-      const maxRightX = chartAreaWidth - 4;
-      const wantedRightX = baseRightX + this.dragVolumeProfileOriginOffsetPx + (mx - this.dragVolumeProfileOriginMouseX);
-      const clampedRightX = Math.min(maxRightX, Math.max(minRightX, wantedRightX));
-      this.volumeProfileOffsetsPx.set(this.draggedVolumeProfileId, clampedRightX - baseRightX);
-      this.hoveredVolumeProfileId = this.draggedVolumeProfileId;
-      this.markDirty();
-      return;
-    }
-
     this.panZoom.onMouseMove(e, rect);
 
     // Update hover state for drawings (when no tool active and not dragging)
     if (this.activeDrawingTool === 'none') {
-      const hovered = this.hitTestDrawing(mx, my);
+      const hovered = this.drawings.length > 0 ? this.hitTestDrawing(mx, my) : null;
       const newHoveredId = hovered?.id ?? null;
       if (newHoveredId !== this.hoveredDrawingId) {
         this.hoveredDrawingId = newHoveredId;
         this._onDrawingHoverChange?.(newHoveredId);
         this.markDirty();
       }
-      const hoveredVolumeProfileId = this.hitTestVolumeProfile(mx, my);
+      const hoveredVolumeProfileId = this.volumeProfileHitAreas.size > 0 ? this.hitTestVolumeProfile(mx, my) : null;
       if (hoveredVolumeProfileId !== this.hoveredVolumeProfileId) {
         this.hoveredVolumeProfileId = hoveredVolumeProfileId;
         this.markDirty();
@@ -3313,7 +3501,13 @@ export class ChartEngine {
     const prev = this.crosshair.hit;
     this.crosshair.visible = hit.inChart;
     this.crosshair.hit = hit;
-    if (!prev || hit.barIndex !== prev.barIndex || hit.inChart !== prev.inChart || Math.abs(hit.pixelY - prev.pixelY) > 0.5) {
+    if (
+      !prev ||
+      hit.barIndex !== prev.barIndex ||
+      hit.inChart !== prev.inChart ||
+      Math.abs(hit.pixelX - prev.pixelX) > 0.5 ||
+      Math.abs(hit.pixelY - prev.pixelY) > 0.5
+    ) {
       this.markCrosshairDirty();
     }
   };
@@ -3371,10 +3565,6 @@ export class ChartEngine {
       this.dragEndpoint = 'whole';
       return;
     }
-    if (this.draggedVolumeProfileId) {
-      this.draggedVolumeProfileId = null;
-      return;
-    }
     this.panZoom.onMouseUp(e);
   };
 
@@ -3393,6 +3583,9 @@ export class ChartEngine {
           screenY: e.clientY,
         });
       }
+    } else if (this._onChartContextMenu) {
+      const price = this.viewport.pixelYToPrice(my);
+      this._onChartContextMenu({ price, screenX: e.clientX, screenY: e.clientY });
     }
   };
 
@@ -3427,25 +3620,46 @@ export class ChartEngine {
     }
   };
 
+  private resetDragState() {
+    this.panZoom.reset();
+    this.viewport.endYScaleDrag();
+    this.draggedDrawingId = null;
+    this.dragMouseOrigin = null;
+    this.dragDrawingOriginStart = null;
+    this.dragDrawingOriginEnd = null;
+    this.dragEndpoint = 'whole';
+    this.drawingPointerActive = false;
+    this.markDirty();
+  }
+
+  private onWindowBlur = () => { this.resetDragState(); };
+  private onVisibilityChange = () => { if (document.hidden) this.resetDragState(); };
+
   private bindEvents() {
     this.canvas.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mousemove', this.onMouseMove);
     window.addEventListener('mouseup', this.onMouseUp);
+    window.addEventListener('scroll', this.invalidateCanvasRect, true);
     this.canvas.addEventListener('mouseleave', this.onMouseLeave);
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     this.canvas.addEventListener('dblclick', this.onDoubleClick);
     this.canvas.addEventListener('contextmenu', this.onContextMenu);
     window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('blur', this.onWindowBlur);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
   }
 
   private unbindEvents() {
     this.canvas.removeEventListener('mousedown', this.onMouseDown);
     window.removeEventListener('mousemove', this.onMouseMove);
     window.removeEventListener('mouseup', this.onMouseUp);
+    window.removeEventListener('scroll', this.invalidateCanvasRect, true);
     this.canvas.removeEventListener('mouseleave', this.onMouseLeave);
     this.canvas.removeEventListener('wheel', this.onWheel);
     this.canvas.removeEventListener('dblclick', this.onDoubleClick);
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('blur', this.onWindowBlur);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
   }
 }

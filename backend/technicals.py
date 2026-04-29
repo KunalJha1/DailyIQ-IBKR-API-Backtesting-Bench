@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -46,42 +47,52 @@ _TF_RESAMPLE_MINUTES: dict[str, int] = {
 # ─── DB helpers ──────────────────────────────────────────────────────
 
 _OHLCV_COLS = ["ts", "open", "high", "low", "close", "volume"]
+_NATIVE_INTRADAY_TABLES = {
+    "5m": "ohlcv_5m",
+    "15m": "ohlcv_15m",
+    "1h": "ohlcv_1h",
+    "4h": "ohlcv_4h",
+}
+_SHORT_INTRADAY_TIMEFRAMES = {"1m", "2m", "5m", "10m", "15m"}
+_NATIVE_FIRST_TIMEFRAMES = {"1h", "4h"}
+
+
+@dataclass
+class SymbolOhlcvBundle:
+    symbol: str
+    one_minute: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=_OHLCV_COLS))
+    daily: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=_OHLCV_COLS))
+    native: dict[str, pd.DataFrame] = field(default_factory=dict)
+
+
+def _get_table(conn, symbol: str, table: str, limit: int) -> pd.DataFrame:
+    rows = conn.execute(
+        "SELECT ts, open, high, low, close, volume "
+        f"FROM {table} WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
+        [symbol.upper(), limit],
+    ).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=_OHLCV_COLS)
+    df = pd.DataFrame(rows, columns=_OHLCV_COLS)
+    return df.sort_values("ts").reset_index(drop=True)
 
 
 def _get_1m(conn, symbol: str, limit: int) -> pd.DataFrame:
-    rows = conn.execute(
-        "SELECT ts, open, high, low, close, volume "
-        "FROM ohlcv_1m WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
-        [symbol.upper(), limit],
-    ).fetchall()
-    if not rows:
-        return pd.DataFrame(columns=_OHLCV_COLS)
-    df = pd.DataFrame(rows, columns=_OHLCV_COLS)
-    return df.sort_values("ts").reset_index(drop=True)
+    return _get_table(conn, symbol, "ohlcv_1m", limit)
 
 
 def _get_5m(conn, symbol: str, limit: int) -> pd.DataFrame:
-    rows = conn.execute(
-        "SELECT ts, open, high, low, close, volume "
-        "FROM ohlcv_5m WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
-        [symbol.upper(), limit],
-    ).fetchall()
-    if not rows:
-        return pd.DataFrame(columns=_OHLCV_COLS)
-    df = pd.DataFrame(rows, columns=_OHLCV_COLS)
-    return df.sort_values("ts").reset_index(drop=True)
+    return _get_table(conn, symbol, "ohlcv_5m", limit)
 
 
 def _get_1d(conn, symbol: str, limit: int = 500) -> pd.DataFrame:
-    rows = conn.execute(
-        "SELECT ts, open, high, low, close, volume "
-        "FROM ohlcv_1d WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
-        [symbol.upper(), limit],
-    ).fetchall()
-    if not rows:
-        return pd.DataFrame(columns=_OHLCV_COLS)
-    df = pd.DataFrame(rows, columns=_OHLCV_COLS)
-    return df.sort_values("ts").reset_index(drop=True)
+    return _get_table(conn, symbol, "ohlcv_1d", limit)
+
+
+def _tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df.tail(limit).reset_index(drop=True)
 
 
 def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -360,9 +371,8 @@ def classify_technicals(technicals: dict, last_close: float) -> dict:
 def _load_df(conn, symbol: str, timeframe: str) -> pd.DataFrame:
     """Load and resample OHLCV for the given timeframe. Returns empty df on failure.
 
-    For intraday timeframes, tries 1m bars first. If the resampled result has
-    fewer than MIN_BARS (e.g. 4h needs 37+ trading days of 1m data), falls back
-    to 5m bars which have a longer backfill window.
+    For intraday timeframes, prefer native timeframe tables populated by the
+    background fetcher. If those are shallow, fall back to 1m/5m resampling.
     """
     if timeframe == "1m":
         return _get_1m(conn, symbol, 200)
@@ -375,6 +385,13 @@ def _load_df(conn, symbol: str, timeframe: str) -> pd.DataFrame:
     minutes = _TF_RESAMPLE_MINUTES.get(timeframe)
     if minutes is None:
         return pd.DataFrame()
+
+    native_table = _NATIVE_INTRADAY_TABLES.get(timeframe)
+    if native_table:
+        native_df = _get_table(conn, symbol, native_table, 200)
+        if len(native_df) >= MIN_BARS:
+            return native_df
+
     # Primary: resample from 1m bars
     limit_1m = min(_TF_1M_FETCH.get(timeframe, minutes * 200), 20_000)
     df = _resample(_get_1m(conn, symbol, limit_1m), minutes)
@@ -387,7 +404,73 @@ def _load_df(conn, symbol: str, timeframe: str) -> pd.DataFrame:
         # Prefer 5m result if it meets MIN_BARS threshold, or if it simply has more bars
         if len(df_5m) >= MIN_BARS or len(df_5m) > len(df):
             return df_5m
+    if native_table and len(native_df) > len(df):
+        return native_df
     return df
+
+
+def _load_symbol_bundle(conn, symbol: str, timeframes: list[str]) -> SymbolOhlcvBundle:
+    """Load base OHLCV data once per symbol for a scoring pass."""
+    requested = set(timeframes)
+    bundle = SymbolOhlcvBundle(symbol=symbol.upper())
+
+    for tf in sorted(requested & {"5m", "15m", "1h", "4h"}):
+        table = _NATIVE_INTRADAY_TABLES.get(tf)
+        if table:
+            bundle.native[tf] = _get_table(conn, symbol, table, 200)
+
+    derived_tfs = set(requested & _SHORT_INTRADAY_TIMEFRAMES)
+    for tf in requested & _NATIVE_FIRST_TIMEFRAMES:
+        if len(bundle.native.get(tf, pd.DataFrame())) < MIN_BARS:
+            derived_tfs.add(tf)
+    if derived_tfs:
+        max_1m_limit = max(_TF_1M_FETCH.get(tf, 200) if tf != "1m" else 200 for tf in derived_tfs)
+        bundle.one_minute = _get_1m(conn, symbol, min(max_1m_limit, 20_000))
+
+    if requested & {"1d", "1w", "1M"}:
+        daily_limit = 1200 if "1M" in requested else (600 if "1w" in requested else 200)
+        bundle.daily = _get_1d(conn, symbol, daily_limit)
+
+    return bundle
+
+
+def _load_df_from_bundle(bundle: SymbolOhlcvBundle, timeframe: str) -> pd.DataFrame:
+    """Resolve a timeframe DataFrame from a per-symbol bundle."""
+    if timeframe == "1m":
+        return _tail(bundle.one_minute, 200)
+    if timeframe == "1d":
+        return _tail(bundle.daily, 200)
+    if timeframe == "1w":
+        return _resample_weekly(bundle.daily)
+    if timeframe == "1M":
+        return _resample_monthly(bundle.daily)
+
+    native_df = bundle.native.get(timeframe)
+    if timeframe in _NATIVE_FIRST_TIMEFRAMES and native_df is not None and len(native_df) >= MIN_BARS:
+        return native_df
+
+    minutes = _TF_RESAMPLE_MINUTES.get(timeframe)
+    if minutes is None:
+        return pd.DataFrame(columns=_OHLCV_COLS)
+
+    derived_df = _resample(bundle.one_minute, minutes)
+    if len(derived_df) >= MIN_BARS:
+        return derived_df
+
+    if native_df is not None and (len(native_df) >= MIN_BARS or len(native_df) > len(derived_df)):
+        return native_df
+
+    return derived_df
+
+
+def _score_df(df: pd.DataFrame) -> int | None:
+    if df is None or len(df) < MIN_BARS:
+        return None
+    technicals = compute_all_technicals(df)
+    last_close = float(df["close"].iloc[-1])
+    classification = classify_technicals(technicals, last_close)
+    score = classification.get("score_0_100")
+    return int(score) if score is not None else None
 
 
 def inspect_symbol_timeframe(conn, symbol: str, timeframe: str) -> dict[str, int | str | None]:
@@ -399,7 +482,8 @@ def inspect_symbol_timeframe(conn, symbol: str, timeframe: str) -> dict[str, int
             "required_bars": MIN_BARS,
         }
     try:
-        df = _load_df(conn, symbol, timeframe)
+        bundle = _load_symbol_bundle(conn, symbol, [timeframe])
+        df = _load_df_from_bundle(bundle, timeframe)
     except Exception:
         logger.exception("inspect_symbol_timeframe(%s, %s) failed", symbol, timeframe)
         return {
@@ -430,16 +514,11 @@ def score_symbols(
         with sync_db_session() as conn:
             for sym in symbols:
                 result[sym] = {}
+                bundle = _load_symbol_bundle(conn, sym, timeframes)
                 for tf in timeframes:
                     try:
-                        df = _load_df(conn, sym, tf)
-                        if df is None or len(df) < MIN_BARS:
-                            result[sym][tf] = None
-                            continue
-                        technicals  = compute_all_technicals(df)
-                        last_close  = float(df["close"].iloc[-1])
-                        classification = classify_technicals(technicals, last_close)
-                        result[sym][tf] = classification.get("score_0_100")
+                        df = _load_df_from_bundle(bundle, tf)
+                        result[sym][tf] = _score_df(df)
                     except Exception as e:
                         logger.warning(f"score({sym}, {tf}): {e}")
                         result[sym][tf] = None

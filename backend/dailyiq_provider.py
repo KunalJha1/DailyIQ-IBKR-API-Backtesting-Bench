@@ -37,10 +37,17 @@ SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d", "1w"}
 HTTP_TIMEOUT_QUOTE = 5   # seconds — fast path for quotes
 HTTP_TIMEOUT = 15        # seconds — bars and other endpoints
 HTTP_TIMEOUT_BARS = 15   # alias for clarity
+SENTIMENT_REFRESH_BATCH_SIZE = 50
+SENTIMENT_REFRESH_WORKERS = 4
+TSM_STANDARD_MARKET_CAP_USD = 1_980_000_000_000
+TSM_MIN_PLAUSIBLE_MARKET_CAP_USD = 1_000_000_000_000
+TSM_MAX_PLAUSIBLE_MARKET_CAP_USD = 3_000_000_000_000
 
 # Per-cache-key locks to prevent concurrent duplicate fetches (single-flight).
 _inflight_lock = threading.Lock()           # guards the dict itself
 _inflight_keys: dict[str, threading.Lock] = {}
+_sentiment_refresh_lock = threading.Lock()
+_sentiment_refresh_inflight: set[str] = set()
 
 
 # ── API key ──────────────────────────────────────────────────────────
@@ -87,6 +94,24 @@ def _write_cache(cache_key: str, data: dict) -> None:
             """,
             (cache_key, json.dumps(data, default=str), now_ms),
         )
+
+
+def _write_sentiment_score_cache(symbol: str, score: int | None) -> None:
+    if score is None:
+        return
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return
+    _write_cache(f"sentiment/{sym}", {"sentimentScore": score})
+
+
+def _coerce_sentiment_score(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── HTTP helper ──────────────────────────────────────────────────────
@@ -195,6 +220,103 @@ def _dailyiq_get_json(
                 _inflight_keys.pop(cache_key, None)
 
 
+def _dailyiq_post_json(
+    endpoint: str,
+    json_body: dict | None = None,
+    ttl_s: float = CACHE_TTL_SNAPSHOT,
+    timeout: float = HTTP_TIMEOUT,
+) -> dict | None:
+    """POST a DailyIQ endpoint with local response cache."""
+    base = _base_url()
+    if not base:
+        emit_debug_event(
+            "dailyiq",
+            "missing_api_key",
+            "DailyIQ request skipped: API key missing",
+            {"endpoint": endpoint},
+        )
+        return None
+
+    parts = [f"POST:{endpoint}"]
+    if json_body:
+        parts.append(json.dumps(json_body, sort_keys=True, separators=(",", ":")))
+    cache_key = ":".join(parts)
+
+    cached = _read_cache(cache_key, ttl_s)
+    if cached is not None:
+        logger.debug("DailyIQ cache hit: %s", cache_key)
+        emit_debug_event(
+            "dailyiq",
+            "cache_hit",
+            f"DailyIQ cache hit: {endpoint}",
+            {"endpoint": endpoint, "cacheKey": cache_key},
+        )
+        return cached
+
+    with _inflight_lock:
+        if cache_key not in _inflight_keys:
+            _inflight_keys[cache_key] = threading.Lock()
+        key_lock = _inflight_keys[cache_key]
+
+    with key_lock:
+        cached = _read_cache(cache_key, ttl_s)
+        if cached is not None:
+            logger.debug("DailyIQ cache hit (post-lock): %s", cache_key)
+            emit_debug_event(
+                "dailyiq",
+                "cache_hit_post_lock",
+                f"DailyIQ cache hit post-lock: {endpoint}",
+                {"endpoint": endpoint, "cacheKey": cache_key},
+            )
+            return cached
+
+        url = f"{base}/{endpoint.lstrip('/')}"
+        emit_debug_event(
+            "dailyiq",
+            "http_request",
+            f"POST /v1/.../{endpoint}",
+            {"endpoint": endpoint, "json": json_body or {}, "timeout": timeout},
+        )
+        try:
+            r = requests.post(url, json=json_body or {}, timeout=timeout)
+            if r.status_code == 429:
+                logger.warning("DailyIQ rate limited on %s — backing off", endpoint)
+                return None
+            if r.status_code != 200:
+                logger.warning("DailyIQ %s returned %d", endpoint, r.status_code)
+                return None
+            data = r.json()
+            _write_cache(cache_key, data)
+            emit_debug_event(
+                "dailyiq",
+                "http_success",
+                f"DailyIQ success: {endpoint}",
+                {"endpoint": endpoint, "status": 200},
+            )
+            return data
+        except requests.RequestException as exc:
+            logger.warning("DailyIQ request failed for %s: %s", endpoint, exc)
+            emit_debug_event(
+                "dailyiq",
+                "http_exception",
+                f"DailyIQ request exception: {endpoint}",
+                {"endpoint": endpoint, "error": str(exc)},
+            )
+            return None
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("DailyIQ response not JSON for %s: %s", endpoint, exc)
+            emit_debug_event(
+                "dailyiq",
+                "json_error",
+                f"DailyIQ JSON decode failed: {endpoint}",
+                {"endpoint": endpoint, "error": str(exc)},
+            )
+            return None
+        finally:
+            with _inflight_lock:
+                _inflight_keys.pop(cache_key, None)
+
+
 # ── Date parsing ─────────────────────────────────────────────────────
 
 def _parse_date_to_ms(date_str: str) -> int | None:
@@ -215,6 +337,96 @@ def _parse_date_to_ms(date_str: str) -> int | None:
     except Exception:
         pass
     return None
+
+
+def _item_ts_to_ms(item: dict) -> int | None:
+    """Extract the canonical timestamp from a DailyIQ price-bars item.
+
+    Prefer ts_utc when available because upstream date_utc formatting has
+    historically regressed to date-only strings for intraday bars.
+    """
+    ts_raw = item.get("ts_utc")
+    if ts_raw is not None:
+        try:
+            ts_int = int(ts_raw)
+            # DailyIQ API currently returns ts_utc in Unix seconds.
+            return ts_int if ts_int > 10**12 else ts_int * 1000
+        except (TypeError, ValueError):
+            pass
+    return _parse_date_to_ms(item.get("date_utc", ""))
+
+
+def _items_to_bars(items: list[dict]) -> list[dict]:
+    bars: list[dict] = []
+    for item in items:
+        ts_ms = _item_ts_to_ms(item)
+        if ts_ms is None:
+            continue
+        bars.append({
+            "time": ts_ms,
+            "open": float(item.get("open", 0)),
+            "high": float(item.get("high", 0)),
+            "low": float(item.get("low", 0)),
+            "close": float(item.get("close", 0)),
+            "volume": float(item.get("volume", 0)),
+        })
+    bars.sort(key=lambda bar: bar["time"])
+    return bars
+
+
+def _aggregate_bars_from_lower_timeframe(
+    bars: list[dict],
+    bars_per_bucket: int,
+    source_step_ms: int,
+) -> list[dict]:
+    """Roll up sequential lower-timeframe bars into a larger intraday bar size.
+
+    The grouping resets on gaps so session boundaries do not get merged together.
+    """
+    if not bars or bars_per_bucket <= 1:
+        return bars
+
+    result: list[dict] = []
+    bucket: list[dict] = []
+    previous_ts: int | None = None
+    max_gap_ms = source_step_ms * 2
+
+    def flush() -> None:
+        if not bucket:
+            return
+        result.append({
+            "time": bucket[0]["time"],
+            "open": bucket[0]["open"],
+            "high": max(bar["high"] for bar in bucket),
+            "low": min(bar["low"] for bar in bucket),
+            "close": bucket[-1]["close"],
+            "volume": sum(bar["volume"] for bar in bucket),
+        })
+        bucket.clear()
+
+    for bar in bars:
+        if previous_ts is not None:
+            gap_ms = bar["time"] - previous_ts
+            if gap_ms <= 0 or gap_ms > max_gap_ms:
+                flush()
+        bucket.append(bar)
+        previous_ts = bar["time"]
+        if len(bucket) >= bars_per_bucket:
+            flush()
+
+    flush()
+    return result
+
+
+def _has_intraday_spacing(bars: list[dict], source_step_ms: int) -> bool:
+    if len(bars) < 2:
+        return False
+    max_gap_ms = source_step_ms * 3
+    for previous, current in zip(bars, bars[1:]):
+        gap_ms = current["time"] - previous["time"]
+        if 0 < gap_ms <= max_gap_ms:
+            return True
+    return False
 
 
 # ── Bars ─────────────────────────────────────────────────────────────
@@ -245,6 +457,51 @@ def fetch_bars_from_dailyiq(
         f"Request DailyIQ bars {symbol} {timeframe}",
         {"symbol": symbol, "timeframe": timeframe, "limit": limit},
     )
+
+    if timeframe in {"1h", "4h"}:
+        candidate_specs = (
+            ("15m", 4 if timeframe == "1h" else 16, 15 * 60_000),
+            ("5m", 12 if timeframe == "1h" else 48, 5 * 60_000),
+            ("1m", 60 if timeframe == "1h" else 240, 60_000),
+        )
+        for source_timeframe, bars_per_bucket, source_step_ms in candidate_specs:
+            raw_limit = max(50, min(5000, limit * bars_per_bucket + bars_per_bucket * 4))
+            raw_data = _dailyiq_get_json(
+                "price-bars",
+                params={"symbol": symbol, "timeframe": source_timeframe, "limit": raw_limit, "order": "asc"},
+                ttl_s=ttl_s if ttl_s is not None else default_ttl,
+            )
+            if not raw_data or "items" not in raw_data:
+                continue
+            source_bars = _items_to_bars(raw_data["items"])
+            if not _has_intraday_spacing(source_bars, source_step_ms):
+                continue
+            bars = _aggregate_bars_from_lower_timeframe(
+                source_bars,
+                bars_per_bucket=bars_per_bucket,
+                source_step_ms=source_step_ms,
+            )
+            if limit > 0:
+                bars = bars[-limit:]
+            if bars:
+                logger.info(
+                    "Fetched %d %s bars from DailyIQ for %s via %s rollup",
+                    len(bars), timeframe, symbol, source_timeframe
+                )
+            emit_debug_event(
+                "dailyiq",
+                "bars_result",
+                f"DailyIQ bars result {symbol} {timeframe}: {len(bars)}",
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "count": len(bars),
+                    "sourceTimeframe": source_timeframe,
+                },
+            )
+            return bars
+        return []
+
     data = _dailyiq_get_json(
         "price-bars",
         params={"symbol": symbol, "timeframe": timeframe, "limit": limit, "order": "asc"},
@@ -253,19 +510,7 @@ def fetch_bars_from_dailyiq(
     if not data or "items" not in data:
         return []
 
-    bars = []
-    for item in data["items"]:
-        ts_ms = _parse_date_to_ms(item.get("date_utc", ""))
-        if ts_ms is None:
-            continue
-        bars.append({
-            "time": ts_ms,
-            "open": float(item.get("open", 0)),
-            "high": float(item.get("high", 0)),
-            "low": float(item.get("low", 0)),
-            "close": float(item.get("close", 0)),
-            "volume": float(item.get("volume", 0)),
-        })
+    bars = _items_to_bars(data["items"])
 
     if bars:
         logger.info(
@@ -296,6 +541,43 @@ async def fetch_bars_from_dailyiq_async(
 
 # ── Quotes (snapshot) ────────────────────────────────────────────────
 
+def _quote_from_dailyiq_price_payload(symbol: str, data: dict) -> dict | None:
+    price_raw = data.get("currentPrice", data.get("price"))
+    price = float(price_raw or 0)
+    change = float(data.get("change", 0) or 0)
+    change_pct = float(data.get("changePct", 0) or 0)
+    prev_close = round(price - change, 4) if price_raw is not None else 0.0
+
+    session = str(data.get("session") or "")
+    session_map = {
+        "preMarket": data.get("preMarket"),
+        "regular": data.get("regular"),
+        "afterHours": data.get("afterHours"),
+    }
+    active_session = session_map.get(session) if session in session_map else None
+    regular_session = data.get("regular")
+    ohlc_session = active_session or regular_session or {}
+    sentiment_score = _coerce_sentiment_score(data.get("sentimentScore"))
+
+    return {
+        "symbol": symbol,
+        "last": price,
+        "bid": None,
+        "ask": None,
+        "mid": None,
+        "open": float(ohlc_session.get("open", 0) or 0) if ohlc_session else None,
+        "high": float(ohlc_session.get("high", 0) or 0) if ohlc_session else None,
+        "low": float(ohlc_session.get("low", 0) or 0) if ohlc_session else None,
+        "prev_close": prev_close,
+        "change": change,
+        "change_pct": change_pct,
+        "volume": None,
+        "spread": None,
+        "source": str(data.get("source") or "dailyiq"),
+        "sentimentScore": sentiment_score,
+    }
+
+
 def fetch_quote_from_dailyiq(symbol: str) -> dict | None:
     """Fetch a quote from DailyIQ /snapshot endpoint.
 
@@ -315,8 +597,8 @@ def fetch_quote_from_dailyiq(symbol: str) -> dict | None:
     # Derive prev_close from price and change
     prev_close = round(price - change, 4) if change else 0.0
 
-    sentiment_raw = data.get("sentimentScore")
-    sentiment_score = int(sentiment_raw) if sentiment_raw is not None else None
+    sentiment_score = _coerce_sentiment_score(data.get("sentimentScore"))
+    _write_sentiment_score_cache(symbol, sentiment_score)
 
     return {
         "symbol": symbol,
@@ -338,11 +620,28 @@ def fetch_quote_from_dailyiq(symbol: str) -> dict | None:
 
 
 def fetch_watchlist_quotes_from_dailyiq(symbols: list[str]) -> list[dict]:
-    """Fetch quotes for multiple symbols from DailyIQ (sequential)."""
-    quotes = []
-    for sym in symbols:
-        q = fetch_quote_from_dailyiq(sym)
+    """Fetch quotes for multiple symbols from DailyIQ using the bulk price endpoint."""
+    sanitized = [(sym or "").strip().upper() for sym in symbols if (sym or "").strip()]
+    if not sanitized:
+        return []
+
+    data = _dailyiq_post_json(
+        "price/batch",
+        json_body={"symbols": sanitized},
+        ttl_s=CACHE_TTL_SNAPSHOT,
+        timeout=HTTP_TIMEOUT_QUOTE,
+    )
+    if not isinstance(data, dict):
+        return []
+
+    quotes: list[dict] = []
+    for sym in sanitized:
+        item = data.get(sym)
+        if not isinstance(item, dict):
+            continue
+        q = _quote_from_dailyiq_price_payload(sym, item)
         if q and q.get("last"):
+            _write_sentiment_score_cache(sym, q.get("sentimentScore"))
             quotes.append(q)
     return quotes
 
@@ -351,24 +650,9 @@ def fetch_watchlist_quotes_from_dailyiq_concurrent(
     symbols: Sequence[str],
     max_workers: int = 10,
 ) -> list[dict]:
-    """Fetch quotes for multiple symbols from DailyIQ concurrently.
-
-    Uses a ThreadPoolExecutor so all symbols are fetched in parallel,
-    reducing wall-clock time from O(n * network_latency) to ~O(network_latency).
-    """
-    if not symbols:
-        return []
-    quotes: list[dict] = []
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(symbols))) as pool:
-        futures = {pool.submit(fetch_quote_from_dailyiq, sym): sym for sym in symbols}
-        for fut in as_completed(futures):
-            try:
-                q = fut.result()
-                if q and q.get("last"):
-                    quotes.append(q)
-            except Exception as exc:
-                logger.debug("DailyIQ concurrent quote failed for %s: %s", futures[fut], exc)
-    return quotes
+    """Backward-compatible wrapper around the bulk DailyIQ quote endpoint."""
+    _ = max_workers
+    return fetch_watchlist_quotes_from_dailyiq(list(symbols))
 
 
 def fetch_bars_batch_concurrent(
@@ -417,52 +701,170 @@ def fetch_sentiment_scores_from_cache(symbols: list[str]) -> dict[str, int | Non
     for sym in symbols:
         cache_key = f"snapshot/{sym}"
         cached = _read_cache(cache_key, ttl_s=float("inf"))
-        if cached and cached.get("sentimentScore") is not None:
-            try:
-                result[sym] = int(cached["sentimentScore"])
-            except (TypeError, ValueError):
-                result[sym] = None
-        else:
-            result[sym] = None
+        score = _coerce_sentiment_score(cached.get("sentimentScore") if cached else None)
+        if score is None:
+            cached = _read_cache(f"sentiment/{sym}", ttl_s=float("inf"))
+            score = _coerce_sentiment_score(cached.get("sentimentScore") if cached else None)
+        result[sym] = score
     return result
+
+
+def queue_sentiment_score_refresh(symbols: list[str], max_symbols: int = SENTIMENT_REFRESH_BATCH_SIZE) -> int:
+    """Best-effort background refresh for missing sentiment scores via snapshot/{symbol}."""
+    sanitized = []
+    seen: set[str] = set()
+    cached = fetch_sentiment_scores_from_cache(symbols)
+    for raw in symbols:
+        sym = (raw or "").strip().upper()
+        if not sym or sym in seen or cached.get(sym) is not None:
+            continue
+        seen.add(sym)
+        sanitized.append(sym)
+        if len(sanitized) >= max_symbols:
+            break
+    if not sanitized:
+        return 0
+
+    with _sentiment_refresh_lock:
+        queued = [sym for sym in sanitized if sym not in _sentiment_refresh_inflight]
+        _sentiment_refresh_inflight.update(queued)
+    if not queued:
+        return 0
+
+    def _worker() -> None:
+        try:
+            with ThreadPoolExecutor(max_workers=min(SENTIMENT_REFRESH_WORKERS, len(queued))) as pool:
+                futures = {pool.submit(fetch_quote_from_dailyiq, sym): sym for sym in queued}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        logger.debug("DailyIQ sentiment refresh failed for %s: %s", sym, exc)
+        finally:
+            with _sentiment_refresh_lock:
+                for sym in queued:
+                    _sentiment_refresh_inflight.discard(sym)
+
+    threading.Thread(target=_worker, daemon=True, name="dailyiq-sentiment-refresh").start()
+    return len(queued)
+
+
+def refresh_sentiment_scores_from_snapshots(symbols: list[str], max_workers: int = SENTIMENT_REFRESH_WORKERS) -> dict[str, int | None]:
+    """Synchronously refresh missing sentiment scores from documented snapshot responses."""
+    sanitized = []
+    seen: set[str] = set()
+    for raw in symbols:
+        sym = (raw or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        sanitized.append(sym)
+    if not sanitized:
+        return {}
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(sanitized))) as pool:
+        futures = {pool.submit(fetch_quote_from_dailyiq, sym): sym for sym in sanitized}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                fut.result()
+            except Exception as exc:
+                logger.debug("DailyIQ sentiment snapshot refresh failed for %s: %s", sym, exc)
+
+    return fetch_sentiment_scores_from_cache(sanitized)
 
 
 # ── Fundamentals ─────────────────────────────────────────────────────
 
+def _safe_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed else None
+
+
+def _parse_market_cap_display(value) -> float | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().replace(",", "").replace("$", "")
+    if not normalized:
+        return None
+
+    multiplier = 1.0
+    suffix = normalized[-1].upper()
+    if suffix in {"T", "B", "M"}:
+        normalized = normalized[:-1].strip()
+        multiplier = {"T": 1e12, "B": 1e9, "M": 1e6}[suffix]
+
+    parsed = _safe_float(normalized)
+    if parsed is None:
+        return None
+    return parsed * multiplier
+
+
+def _parse_dailyiq_market_cap_usd(data: dict) -> float | None:
+    """Parse DailyIQ market cap fields into raw USD dollars."""
+    mc = data.get("marketCap")
+    if isinstance(mc, dict):
+        parsed = _safe_float(mc.get("usd"))
+        if parsed is not None:
+            return parsed
+        parsed = _parse_market_cap_display(mc.get("display"))
+        if parsed is not None:
+            return parsed
+    elif isinstance(mc, (int, float)):
+        return _safe_float(mc)
+    elif isinstance(mc, str):
+        parsed = _parse_market_cap_display(mc)
+        if parsed is not None:
+            return parsed
+
+    return _parse_market_cap_display(data.get("marketCapDisplay"))
+
+
+def _normalize_market_cap_usd(symbol: str, market_cap: float | None) -> float | None:
+    if symbol.upper() != "TSM":
+        return market_cap
+
+    if market_cap is not None and market_cap > 0:
+        if TSM_MIN_PLAUSIBLE_MARKET_CAP_USD <= market_cap <= TSM_MAX_PLAUSIBLE_MARKET_CAP_USD:
+            return market_cap
+
+        if 1_000 <= market_cap <= 3_000:
+            scaled = market_cap * 1e9
+            if TSM_MIN_PLAUSIBLE_MARKET_CAP_USD <= scaled <= TSM_MAX_PLAUSIBLE_MARKET_CAP_USD:
+                return scaled
+
+        if 1 <= market_cap <= 3:
+            scaled = market_cap * 1e12
+            if TSM_MIN_PLAUSIBLE_MARKET_CAP_USD <= scaled <= TSM_MAX_PLAUSIBLE_MARKET_CAP_USD:
+                return scaled
+
+    return TSM_STANDARD_MARKET_CAP_USD
+
+
 def fetch_fundamentals_from_dailyiq(
     symbol: str,
 ) -> tuple[float | None, float | None, float | None]:
-    """Fetch PE ratio and market cap from DailyIQ /fundamentals.
+    """Fetch valuation fields from DailyIQ /fundamentals.
 
-    Returns (trailing_pe, forward_pe, market_cap) — forward_pe is None
-    since DailyIQ doesn't provide it.
+    Returns (trailing_pe, forward_pe, market_cap).
     """
-    data = _dailyiq_get_json(f"fundamentals/{symbol}", ttl_s=CACHE_TTL_FUNDAMENTALS)
+    data = _dailyiq_get_json(
+        f"fundamentals/{symbol}",
+        params={"units": "B"},
+        ttl_s=CACHE_TTL_FUNDAMENTALS,
+    )
     if not data:
         return None, None, None
 
-    pe_ratio = data.get("peRatio")
-    trailing_pe = float(pe_ratio) if pe_ratio is not None else None
+    trailing_pe = _safe_float(data.get("peRatio"))
+    forward_pe = _safe_float(data.get("forwardPe"))
 
-    # Extract market cap — DailyIQ returns nested object or display string
-    market_cap = None
-    mc = data.get("marketCap")
-    if isinstance(mc, dict):
-        market_cap = mc.get("usd")
-    elif isinstance(mc, (int, float)):
-        market_cap = float(mc)
-    elif isinstance(data.get("marketCapDisplay"), str):
-        # Parse "3251.40B" style
-        cap_str = data["marketCapDisplay"]
-        try:
-            if cap_str.endswith("B"):
-                market_cap = float(cap_str[:-1]) * 1e9
-            elif cap_str.endswith("M"):
-                market_cap = float(cap_str[:-1]) * 1e6
-            elif cap_str.endswith("T"):
-                market_cap = float(cap_str[:-1]) * 1e12
-        except (ValueError, TypeError):
-            pass
+    market_cap = _normalize_market_cap_usd(symbol, _parse_dailyiq_market_cap_usd(data))
 
-    # DailyIQ doesn't provide forward PE
-    return trailing_pe, None, market_cap
+    return trailing_pe, forward_pe, market_cap

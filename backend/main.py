@@ -34,17 +34,24 @@ from pydantic import BaseModel
 
 from db_utils import run_db, sync_db_session
 from historical import (
+    CACHE_TTL,
+    CACHE_TTL_DAILY,
+    CHART_INTENT_TTL_S,
     DEFAULT_DAILY_DURATION,
     DEFAULT_INTRADAY_DURATION,
+    _cache_fresh,
     _normalize_bar_size,
     _write_bars,
+    is_chart_intent_fresh,
     target_duration_for_bar_size,
     URGENT_HISTORICAL_WAIT_S,
     enqueue_historical_priority,
     get_historical_bars,
+    read_fresh_chart_intents,
     read_cached_series,
     read_bars_window,
     seed_duration_for_bar_size,
+    touch_chart_intent,
 )
 from connection_pool import ConnectionPool, probe_tws_port
 from options_collector import get_market_session, estimate_option_price, DEFAULT_RISK_FREE_RATE as OPTIONS_DEFAULT_RISK_FREE_RATE
@@ -890,11 +897,17 @@ def _enrich_with_tech_scores(conn, payloads: list[dict]) -> None:
 
 def _enrich_with_sentiment_scores(payloads: list[dict]) -> None:
     """Merge DailyIQ sentiment scores (from cache) into snapshot payloads in-place."""
-    from dailyiq_provider import fetch_sentiment_scores_from_cache
+    from dailyiq_provider import fetch_sentiment_scores_from_cache, queue_sentiment_score_refresh
     symbols = [p["symbol"] for p in payloads]
     score_map = fetch_sentiment_scores_from_cache(symbols)
+    missing_symbols: list[str] = []
     for p in payloads:
-        p["sentimentScore"] = score_map.get(p["symbol"])
+        score = score_map.get(p["symbol"])
+        p["sentimentScore"] = score
+        if score is None:
+            missing_symbols.append(p["symbol"])
+    if missing_symbols:
+        queue_sentiment_score_refresh(missing_symbols)
 
 
 def _format_option_expiration_label(expiration_ms: int) -> str:
@@ -1241,10 +1254,41 @@ _refresh_last_triggered: dict[str, float] = {}
 _REFRESH_THROTTLE_SECONDS = 12.0
 _historical_revalidate_last_triggered: dict[str, float] = {}
 _HISTORICAL_REVALIDATE_THROTTLE_S = 8.0
+_historical_live_refresh_last_triggered: dict[str, float] = {}
+_HISTORICAL_LIVE_REFRESH_THROTTLE_S = 2.5
 _DEBUG_EVENTS_MAX = 2000
 _debug_events: deque[dict] = deque(maxlen=_DEBUG_EVENTS_MAX)
 _debug_events_lock = threading.Lock()
 _debug_event_seq = 0
+CHART_REFRESH_READ_LIMIT = 3
+DAILYIQ_LIVE_TTL_S = 55.0
+DAILYIQ_LIVE_LIMIT_1M = 390
+DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S = 60
+DAILYIQ_LIVE_INTRADAY_MAX_REFRESH_S = 300
+DAILYIQ_LIVE_DAILY_REFRESH_S = 3600
+DAILYIQ_UNIVERSE_REFRESH_S = 900
+DAILYIQ_UNIVERSE_BATCH_SIZE = 60
+DAILYIQ_UNIVERSE_BATCH_PAUSE_S = 0.25
+DAILYIQ_SENTIMENT_UNIVERSE_REFRESH_S = 300
+DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE = 100
+DAILYIQ_SENTIMENT_UNIVERSE_BATCH_PAUSE_S = 0.1
+DAILYIQ_UNIVERSE_BAR_LIMITS: dict[str, int] = {
+    "1m": 240,
+    "5m": 240,
+    "15m": 240,
+    "1h": 240,
+    "4h": 240,
+    "1d": 600,
+}
+_DAILYIQ_BAR_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+    "1w": 604800,
+}
 
 
 def _push_debug_event(payload: dict) -> None:
@@ -1280,6 +1324,98 @@ def _clear_debug_events() -> int:
         count = len(_debug_events)
         _debug_events.clear()
     return count
+
+
+def _is_intraday_bar_size(bar_size: str) -> bool:
+    return _normalize_bar_size(bar_size) != "1d"
+
+
+def _read_chart_refresh_intents(limit: int = CHART_REFRESH_READ_LIMIT) -> list[dict]:
+    return read_fresh_chart_intents(limit)
+
+
+def _ordered_enabled_symbols(ticker_metadata: dict[str, dict], watchlist_symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in watchlist_symbols:
+        sym = str(raw or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            ordered.append(sym)
+
+    enabled_tickers = [
+        sym for sym, meta in ticker_metadata.items()
+        if meta.get("enabled")
+    ]
+    enabled_tickers.sort(key=lambda sym: float(ticker_metadata[sym].get("sp500Weight") or 0), reverse=True)
+    for sym in enabled_tickers:
+        if sym not in seen:
+            seen.add(sym)
+            ordered.append(sym)
+    return ordered
+
+
+def _find_stale_universe_bar_pairs(symbols: list[str]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if not symbols:
+        return pairs
+    with sync_db_session() as conn:
+        for sym in symbols:
+            for bar_size in DAILYIQ_UNIVERSE_BAR_LIMITS:
+                ttl = CACHE_TTL_DAILY if bar_size == "1d" else CACHE_TTL
+                try:
+                    is_fresh, _, _ = _cache_fresh(conn, sym, bar_size, ttl)
+                except Exception:
+                    is_fresh = False
+                if not is_fresh:
+                    pairs.append((sym, bar_size))
+    return pairs
+
+
+def _write_dailyiq_bar_results(bar_results: list[tuple[str, str, list[dict]]]) -> dict[str, list[str]]:
+    refreshed: dict[str, list[str]] = {}
+    if not bar_results:
+        return refreshed
+    with sync_db_session() as conn:
+        for sym, bar_size, bars in bar_results:
+            normalized = _normalize_bar_size(bar_size)
+            if normalized not in DAILYIQ_UNIVERSE_BAR_LIMITS or not bars:
+                continue
+            _write_bars(conn, sym, bars, bar_size=normalized, source="dailyiq")
+            score_timeframes = ["1d", "1w"] if normalized == "1d" else [normalized]
+            refreshed.setdefault(sym, [])
+            for tf in score_timeframes:
+                if tf not in refreshed[sym]:
+                    refreshed[sym].append(tf)
+    return refreshed
+
+
+def _chunked_pairs(pairs: list[tuple[str, str]], size: int) -> list[list[tuple[str, str]]]:
+    return [pairs[i:i + size] for i in range(0, len(pairs), max(1, size))]
+
+
+def _build_chart_refresh_plan(intents: list[dict]) -> list[dict]:
+    plan_by_symbol: dict[str, dict] = {}
+    for intent in intents:
+        symbol = str(intent.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        entry = plan_by_symbol.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "fetch_1m": False,
+                "fetch_1d": False,
+                "bar_sizes": [],
+            },
+        )
+        bar_size = _normalize_bar_size(str(intent.get("bar_size") or "1m"))
+        entry["bar_sizes"].append(bar_size)
+        if _is_intraday_bar_size(bar_size):
+            entry["fetch_1m"] = True
+        else:
+            entry["fetch_1d"] = True
+    return list(plan_by_symbol.values())
 
 
 def create_app() -> FastAPI:
@@ -1375,32 +1511,6 @@ def create_app() -> FastAPI:
         # so that incremental chart polls see new candles without waiting for the
         # 5-minute cache TTL to expire.
         async def _dailyiq_live_refresh_loop() -> None:
-            # How many seconds per bar for each raw bar size (used to set refresh cadence)
-            BAR_SECONDS: dict[str, int] = {
-                "1m": 60, "5m": 300, "15m": 900, "1h": 3600,
-                "4h": 14400, "1d": 86400, "1w": 604800,
-            }
-            # Clamp: refresh no faster than 60s, no slower than 5min for intraday
-            MIN_REFRESH_S = 60
-            MAX_INTRADAY_REFRESH_S = 300
-            DAILY_REFRESH_S = 3600
-            # DailyIQ response-cache TTL slightly under refresh interval
-            LIVE_TTL_S = 55.0
-            # 1m bars to fetch — covers enough history to fill any recent gap
-            LIMIT_1M = 390  # one full trading day
-
-            def _read_active_chart() -> tuple[str, str] | None:
-                """Return (symbol, bar_size) for the most recently active chart, or None."""
-                with sync_db_session() as conn:
-                    row = conn.execute(
-                        """
-                        SELECT symbol, bar_size FROM active_symbols
-                        WHERE bar_size IS NOT NULL
-                        ORDER BY last_requested DESC LIMIT 1
-                        """
-                    ).fetchone()
-                return (row[0], row[1]) if row else None
-
             def _aggregate_1m(bars_1m: list[dict], bucket_ms: int) -> list[dict]:
                 buckets: dict[int, dict] = {}
                 for b in bars_1m:
@@ -1418,7 +1528,7 @@ def create_app() -> FastAPI:
 
             def _secs_until_next_boundary(bar_size: str) -> float:
                 """Seconds until the next bar closes for the given bar size."""
-                period = BAR_SECONDS.get(bar_size, 60)
+                period = _DAILYIQ_BAR_SECONDS.get(bar_size, 60)
                 now = time.time()
                 return period - (now % period)
 
@@ -1426,69 +1536,84 @@ def create_app() -> FastAPI:
             while True:
                 try:
                     from dailyiq_provider import fetch_bars_from_dailyiq_async
-                    active = await run_db(_read_active_chart)
-                    if active:
-                        sym, bar_size = active
-                        is_daily = BAR_SECONDS.get(bar_size, 60) >= 86400
+                    fresh_intents = await run_db(_read_chart_refresh_intents, CHART_REFRESH_READ_LIMIT)
+                    if not fresh_intents:
+                        await asyncio.sleep(30)  # nothing active yet
+                        continue
 
-                        if is_daily:
-                            refresh_s = DAILY_REFRESH_S
-                        else:
-                            period = BAR_SECONDS.get(bar_size, 60)
-                            refresh_s = max(MIN_REFRESH_S, min(period, MAX_INTRADAY_REFRESH_S))
-
-                        try:
-                            if is_daily:
+                    refresh_plan = _build_chart_refresh_plan(fresh_intents)
+                    intraday_bar_sizes = [
+                        _normalize_bar_size(intent["bar_size"])
+                        for intent in fresh_intents
+                        if _is_intraday_bar_size(intent["bar_size"])
+                    ]
+                    try:
+                        for item in refresh_plan:
+                            sym = item["symbol"]
+                            if item["fetch_1d"]:
                                 bars = await fetch_bars_from_dailyiq_async(
-                                    sym, timeframe="1d", limit=50, ttl_s=LIVE_TTL_S,
+                                    sym,
+                                    timeframe="1d",
+                                    limit=50,
+                                    ttl_s=DAILYIQ_LIVE_TTL_S,
                                 )
                                 if bars:
                                     def _write_daily(s=sym, b=bars):
                                         with sync_db_session() as conn:
                                             _write_bars(conn, s, b, bar_size="1d", source="dailyiq", update_meta=False)
                                     await run_db(_write_daily)
-                            else:
+                            if item["fetch_1m"]:
                                 bars_1m = await fetch_bars_from_dailyiq_async(
-                                    sym, timeframe="1m", limit=LIMIT_1M, ttl_s=LIVE_TTL_S,
+                                    sym,
+                                    timeframe="1m",
+                                    limit=DAILYIQ_LIVE_LIMIT_1M,
+                                    ttl_s=DAILYIQ_LIVE_TTL_S,
                                 )
                                 if bars_1m:
-                                    bars_5m  = _aggregate_1m(bars_1m,  5 * 60 * 1000)
+                                    bars_5m = _aggregate_1m(bars_1m, 5 * 60 * 1000)
                                     bars_15m = _aggregate_1m(bars_1m, 15 * 60 * 1000)
-                                    def _write(s=sym, b1=bars_1m, b5=bars_5m, b15=bars_15m):
+                                    def _write_intraday(s=sym, b1=bars_1m, b5=bars_5m, b15=bars_15m):
                                         with sync_db_session() as conn:
-                                            _write_bars(conn, s, b1,  bar_size="1m",  source="dailyiq", update_meta=False)
-                                            _write_bars(conn, s, b5,  bar_size="5m",  source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b1, bar_size="1m", source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b5, bar_size="5m", source="dailyiq", update_meta=False)
                                             _write_bars(conn, s, b15, bar_size="15m", source="dailyiq", update_meta=False)
-                                    await run_db(_write)
-                            logger.debug("DailyIQ live refresh: %s/%s, next in %ds", sym, bar_size, refresh_s)
-                        except Exception as exc:
-                            logger.debug("DailyIQ live refresh failed %s/%s: %s", sym, bar_size, exc)
+                                    await run_db(_write_intraday)
+                        logger.debug("DailyIQ live refresh: %s", refresh_plan)
+                    except Exception as exc:
+                        logger.debug("DailyIQ live refresh failed for intents %s: %s", fresh_intents, exc)
 
-                        # Sleep until the next bar boundary (aligned to timeframe)
-                        boundary_wait = _secs_until_next_boundary(bar_size)
-                        await asyncio.sleep(max(MIN_REFRESH_S, min(boundary_wait, refresh_s)))
+                    if intraday_bar_sizes:
+                        period = min(_DAILYIQ_BAR_SECONDS.get(bar_size, 60) for bar_size in intraday_bar_sizes)
+                        refresh_s = max(
+                            DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S,
+                            min(period, DAILYIQ_LIVE_INTRADAY_MAX_REFRESH_S),
+                        )
+                        boundary_wait = min(_secs_until_next_boundary(bar_size) for bar_size in intraday_bar_sizes)
+                        await asyncio.sleep(
+                            max(
+                                DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S,
+                                min(boundary_wait, refresh_s),
+                            )
+                        )
                     else:
-                        await asyncio.sleep(30)  # nothing active yet
+                        await asyncio.sleep(DAILYIQ_LIVE_DAILY_REFRESH_S)
                 except Exception as exc:
                     logger.debug("DailyIQ live refresh loop error: %s", exc)
                     await asyncio.sleep(30)
 
-        # Fire-and-forget: pre-warm DailyIQ data for watchlist symbols so the
-        # frontend sees data immediately on first load (before IBKR backfill).
-        async def _startup_warmup() -> None:
+        # Fire-and-forget: pre-warm DailyIQ quotes for watchlist symbols so the
+        # frontend sees snapshots immediately on first load.
+        async def _startup_quote_warmup() -> None:
             try:
                 watchlist_syms = await run_db(read_watchlist_symbols)
                 if not watchlist_syms:
                     return
                 logger.info(
-                    "[Warmup] Pre-fetching DailyIQ data for %d watchlist symbol(s): %s",
+                    "[Warmup] Pre-fetching DailyIQ quotes for %d watchlist symbol(s): %s",
                     len(watchlist_syms),
                     ", ".join(watchlist_syms[:10]),
                 )
-                from dailyiq_provider import (
-                    fetch_watchlist_quotes_from_dailyiq_concurrent,
-                    fetch_bars_batch_concurrent,
-                )
+                from dailyiq_provider import fetch_watchlist_quotes_from_dailyiq_concurrent
                 loop = asyncio.get_event_loop()
 
                 # Concurrent quote snapshots — populates dailyiq_cache so
@@ -1499,57 +1624,114 @@ def create_app() -> FastAPI:
                     watchlist_syms,
                 )
                 logger.info("[Warmup] Fetched %d DailyIQ quotes", len(quotes))
-
-                # Concurrent bars: 1d + 5m for each watchlist symbol.
-                # This populates the dailyiq_cache table so that when the
-                # frontend calls /historical, DailyIQ fetch_bars returns
-                # immediately from cache, then writes into the OHLCV tables.
-                # Skip pairs that are already fresh in the DB.
-                from historical import _cache_fresh, CACHE_TTL, CACHE_TTL_DAILY
-                from db_utils import sync_db_session
-
-                all_pairs = (
-                    [(sym, "1m") for sym in watchlist_syms]
-                    + [(sym, "5m") for sym in watchlist_syms]
-                    + [(sym, "15m") for sym in watchlist_syms]
-                    + [(sym, "1h") for sym in watchlist_syms]
-                    + [(sym, "4h") for sym in watchlist_syms]
-                    + [(sym, "1d") for sym in watchlist_syms]
-                    + [(sym, "1w") for sym in watchlist_syms]
-                )
-                ttl_map = {"1d": CACHE_TTL_DAILY, "1w": CACHE_TTL_DAILY}
-                stale_pairs = []
-                for sym, bar_size in all_pairs:
-                    ttl = ttl_map.get(bar_size, CACHE_TTL)
-                    try:
-                        with sync_db_session() as conn:
-                            is_fresh, _, _ = _cache_fresh(conn, sym, bar_size, ttl)
-                        if not is_fresh:
-                            stale_pairs.append((sym, bar_size))
-                    except Exception:
-                        stale_pairs.append((sym, bar_size))
-
-                skipped = len(all_pairs) - len(stale_pairs)
-                if skipped:
-                    logger.info("[Warmup] Skipping %d already-fresh series", skipped)
-                if not stale_pairs:
-                    logger.info("[Warmup] All series already fresh — skipping DailyIQ bar pre-warm")
-                    return
-
-                bar_results = await loop.run_in_executor(
-                    None,
-                    lambda: fetch_bars_batch_concurrent(stale_pairs, limit=500),
-                )
-                total_bars = sum(len(bars) for _, _, bars in bar_results)
-                logger.info(
-                    "[Warmup] DailyIQ pre-warm complete — %d total bars across %d series",
-                    total_bars,
-                    len(bar_results),
-                )
             except Exception as exc:
-                logger.warning("[Warmup] DailyIQ pre-warm failed: %s", exc)
+                logger.warning("[Warmup] DailyIQ quote pre-warm failed: %s", exc)
 
-        asyncio.create_task(_startup_warmup())
+        async def _dailyiq_universe_bar_refresh_loop() -> None:
+            await asyncio.sleep(12)
+            while True:
+                try:
+                    from dailyiq_provider import fetch_bars_batch_concurrent
+
+                    watchlist_syms = await run_db(read_watchlist_symbols)
+                    symbols = _ordered_enabled_symbols(ticker_metadata, watchlist_syms)
+                    if not symbols:
+                        await asyncio.sleep(DAILYIQ_UNIVERSE_REFRESH_S)
+                        continue
+
+                    stale_pairs = await run_db(_find_stale_universe_bar_pairs, symbols)
+                    if not stale_pairs:
+                        logger.info("[UniverseWarmup] All DailyIQ bar series are fresh")
+                        await asyncio.sleep(DAILYIQ_UNIVERSE_REFRESH_S)
+                        continue
+
+                    logger.info(
+                        "[UniverseWarmup] Refreshing %d stale DailyIQ bar series across %d symbol(s)",
+                        len(stale_pairs),
+                        len({sym for sym, _ in stale_pairs}),
+                    )
+                    loop = asyncio.get_event_loop()
+                    for bar_size, limit in DAILYIQ_UNIVERSE_BAR_LIMITS.items():
+                        tf_pairs = [(sym, tf) for sym, tf in stale_pairs if tf == bar_size]
+                        for chunk in _chunked_pairs(tf_pairs, DAILYIQ_UNIVERSE_BATCH_SIZE):
+                            bar_results = await loop.run_in_executor(
+                                None,
+                                lambda pairs=chunk, lim=limit: fetch_bars_batch_concurrent(pairs, limit=lim),
+                            )
+                            refreshed = await run_db(_write_dailyiq_bar_results, bar_results)
+                            if refreshed:
+                                score_tfs = sorted({
+                                    tf
+                                    for tfs in refreshed.values()
+                                    for tf in tfs
+                                })
+                                scorer.request_refresh(list(refreshed.keys()), score_tfs)
+                                total_bars = sum(len(bars) for _, _, bars in bar_results)
+                                logger.info(
+                                    "[UniverseWarmup] Persisted %d bars for %d %s series; queued score refresh for %s",
+                                    total_bars,
+                                    len(refreshed),
+                                    bar_size,
+                                    ",".join(score_tfs),
+                                )
+                            await asyncio.sleep(DAILYIQ_UNIVERSE_BATCH_PAUSE_S)
+
+                    await asyncio.sleep(DAILYIQ_UNIVERSE_REFRESH_S)
+                except Exception as exc:
+                    logger.warning("[UniverseWarmup] DailyIQ universe bar refresh failed: %s", exc)
+                    await asyncio.sleep(60)
+
+        async def _dailyiq_universe_sentiment_refresh_loop() -> None:
+            await asyncio.sleep(8)
+            while True:
+                try:
+                    from dailyiq_provider import (
+                        fetch_sentiment_scores_from_cache,
+                        fetch_watchlist_quotes_from_dailyiq_concurrent,
+                        queue_sentiment_score_refresh,
+                    )
+
+                    watchlist_syms = await run_db(read_watchlist_symbols)
+                    symbols = _ordered_enabled_symbols(ticker_metadata, watchlist_syms)
+                    if not symbols:
+                        await asyncio.sleep(DAILYIQ_SENTIMENT_UNIVERSE_REFRESH_S)
+                        continue
+
+                    logger.info(
+                        "[SentimentWarmup] Refreshing DailyIQ sentiment/quotes for %d symbol(s)",
+                        len(symbols),
+                    )
+                    loop = asyncio.get_event_loop()
+                    refreshed_count = 0
+                    fallback_queued = 0
+                    for i in range(0, len(symbols), DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE):
+                        chunk = symbols[i:i + DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE]
+                        quotes = await loop.run_in_executor(
+                            None,
+                            fetch_watchlist_quotes_from_dailyiq_concurrent,
+                            chunk,
+                        )
+                        refreshed_count += len(quotes)
+
+                        score_map = await run_db(fetch_sentiment_scores_from_cache, chunk)
+                        missing = [sym for sym in chunk if score_map.get(sym) is None]
+                        if missing:
+                            fallback_queued += queue_sentiment_score_refresh(missing)
+                        await asyncio.sleep(DAILYIQ_SENTIMENT_UNIVERSE_BATCH_PAUSE_S)
+
+                    logger.info(
+                        "[SentimentWarmup] Refreshed %d quote rows; queued %d snapshot sentiment fallback(s)",
+                        refreshed_count,
+                        fallback_queued,
+                    )
+                    await asyncio.sleep(DAILYIQ_SENTIMENT_UNIVERSE_REFRESH_S)
+                except Exception as exc:
+                    logger.warning("[SentimentWarmup] DailyIQ universe sentiment refresh failed: %s", exc)
+                    await asyncio.sleep(60)
+
+        asyncio.create_task(_startup_quote_warmup())
+        asyncio.create_task(_dailyiq_universe_sentiment_refresh_loop())
+        asyncio.create_task(_dailyiq_universe_bar_refresh_loop())
         asyncio.create_task(_dailyiq_live_refresh_loop())
 
         try:
@@ -2470,9 +2652,63 @@ def create_app() -> FastAPI:
 
     class HeatmapGroupPayload(BaseModel):
         name: str
-        type: str  # 'sp500' | 'watchlist' | 'etf' | 'custom'
+        type: str  # 'sp500' | 'watchlist' | 'etf' | 'custom' | 'sector' | 'industry'
         etf_symbol: str | None = None
         symbols: list[str] | None = None
+
+    def _normalize_heatmap_group_symbols(symbols: list[str] | None) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw in symbols or []:
+            symbol = raw.strip().upper()
+            if not symbol or len(symbol) > 12:
+                raise HTTPException(status_code=400, detail="Invalid symbol in custom group.")
+            if not all(c.isalnum() or c in ".-" for c in symbol):
+                raise HTTPException(status_code=400, detail="Invalid symbol in custom group.")
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append(symbol)
+            if len(out) > CUSTOM_HEATMAP_MAX_SYMBOLS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Custom groups are limited to {CUSTOM_HEATMAP_MAX_SYMBOLS} symbols.",
+                )
+        return out
+
+    def _normalize_heatmap_group_payload(payload: HeatmapGroupPayload) -> tuple[str, str, str | None, list[str] | None]:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Group name is required.")
+
+        group_type = payload.type.strip().lower()
+        if group_type not in ("sp500", "watchlist", "etf", "custom", "sector", "industry"):
+            raise HTTPException(status_code=400, detail="Invalid group type.")
+
+        if group_type == "etf":
+            etf_symbol = payload.etf_symbol.strip().upper() if payload.etf_symbol else ""
+            if not etf_symbol:
+                raise HTTPException(status_code=400, detail="ETF symbol is required.")
+            return name, group_type, etf_symbol, None
+
+        if group_type in ("custom", "sector", "industry"):
+            symbols = _normalize_heatmap_group_symbols(payload.symbols)
+            if not symbols:
+                raise HTTPException(status_code=400, detail=f"{group_type.title()} groups require at least one symbol.")
+            return name, group_type, None, symbols
+
+        return name, group_type, None, None
+
+    def _heatmap_group_row_to_payload(row) -> dict:
+        return {
+            "id": row[0],
+            "name": row[1],
+            "type": row[2],
+            "etfSymbol": row[3],
+            "symbols": json.loads(row[4]) if row[4] else None,
+            "createdAt": row[5],
+            "updatedAt": row[6],
+        }
 
     @app.get("/heatmap/groups")
     async def list_heatmap_groups():
@@ -2481,27 +2717,12 @@ def create_app() -> FastAPI:
                 rows = conn.execute(
                     "SELECT id, name, type, etf_symbol, symbols, created_at, updated_at FROM heatmap_groups ORDER BY created_at ASC"
                 ).fetchall()
-                return [
-                    {
-                        "id": row[0],
-                        "name": row[1],
-                        "type": row[2],
-                        "etfSymbol": row[3],
-                        "symbols": json.loads(row[4]) if row[4] else None,
-                        "createdAt": row[5],
-                        "updatedAt": row[6],
-                    }
-                    for row in rows
-                ]
+                return [_heatmap_group_row_to_payload(row) for row in rows]
         return {"groups": await run_db(_read)}
 
     @app.post("/heatmap/groups")
     async def create_heatmap_group(payload: HeatmapGroupPayload):
-        name = payload.name.strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="Group name is required.")
-        if payload.type not in ("sp500", "watchlist", "etf", "custom"):
-            raise HTTPException(status_code=400, detail="Invalid group type.")
+        name, group_type, etf_symbol, symbols = _normalize_heatmap_group_payload(payload)
 
         def _create():
             with sync_db_session() as conn:
@@ -2510,9 +2731,9 @@ def create_app() -> FastAPI:
                     "INSERT INTO heatmap_groups (name, type, etf_symbol, symbols, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         name,
-                        payload.type,
-                        payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
-                        json.dumps(payload.symbols) if payload.symbols is not None else None,
+                        group_type,
+                        etf_symbol,
+                        json.dumps(symbols) if symbols is not None else None,
                         now,
                         now,
                     ),
@@ -2520,9 +2741,9 @@ def create_app() -> FastAPI:
                 return {
                     "id": cursor.lastrowid,
                     "name": name,
-                    "type": payload.type,
-                    "etfSymbol": payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
-                    "symbols": payload.symbols,
+                    "type": group_type,
+                    "etfSymbol": etf_symbol,
+                    "symbols": symbols,
                     "createdAt": now,
                     "updatedAt": now,
                 }
@@ -2530,15 +2751,14 @@ def create_app() -> FastAPI:
 
     @app.put("/heatmap/groups/{group_id}")
     async def update_heatmap_group(group_id: int, payload: HeatmapGroupPayload):
-        name = payload.name.strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="Group name is required.")
-        if payload.type not in ("sp500", "watchlist", "etf", "custom"):
-            raise HTTPException(status_code=400, detail="Invalid group type.")
+        name, group_type, etf_symbol, symbols = _normalize_heatmap_group_payload(payload)
 
         def _update():
             with sync_db_session() as conn:
-                row = conn.execute("SELECT id FROM heatmap_groups WHERE id = ?", (group_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT id, created_at FROM heatmap_groups WHERE id = ?",
+                    (group_id,),
+                ).fetchone()
                 if not row:
                     raise HTTPException(status_code=404, detail="Heatmap group not found.")
                 now = _now_ms()
@@ -2546,9 +2766,9 @@ def create_app() -> FastAPI:
                     "UPDATE heatmap_groups SET name = ?, type = ?, etf_symbol = ?, symbols = ?, updated_at = ? WHERE id = ?",
                     (
                         name,
-                        payload.type,
-                        payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
-                        json.dumps(payload.symbols) if payload.symbols is not None else None,
+                        group_type,
+                        etf_symbol,
+                        json.dumps(symbols) if symbols is not None else None,
                         now,
                         group_id,
                     ),
@@ -2556,9 +2776,10 @@ def create_app() -> FastAPI:
                 return {
                     "id": group_id,
                     "name": name,
-                    "type": payload.type,
-                    "etfSymbol": payload.etf_symbol.strip().upper() if payload.etf_symbol else None,
-                    "symbols": payload.symbols,
+                    "type": group_type,
+                    "etfSymbol": etf_symbol,
+                    "symbols": symbols,
+                    "createdAt": row[1],
                     "updatedAt": now,
                 }
         return await run_db(_update)
@@ -2642,6 +2863,8 @@ def create_app() -> FastAPI:
                 )
 
         await run_db(_touch)
+        scorer.set_active_symbols(sym_list)
+        scorer.request_refresh(sym_list)
         return {"registered": len(sym_list)}
 
     @app.get("/technicals/scores")
@@ -2669,8 +2892,24 @@ def create_app() -> FastAPI:
             f"Requested technical scores for {len(sym_list)} symbol(s)",
             {"symbols": sym_list[:20], "timeframes": tf_list, "include_indicators": include_indicators},
         )
-        from score_worker import read_scores_for_timeframes
+        from score_worker import find_refresh_candidates, read_scores_for_timeframes
         rows = await run_db(read_scores_for_timeframes, sym_list, tf_list)
+        refresh_candidates = await run_db(find_refresh_candidates, sym_list, tf_list)
+        if refresh_candidates:
+            scorer.request_refresh(list(refresh_candidates.keys()), sorted({
+                tf
+                for tfs in refresh_candidates.values()
+                for tf in tfs
+            }))
+            emit_debug_event(
+                "technicals",
+                "scores_refresh_queued",
+                f"Queued technical score refresh for {len(refresh_candidates)} symbol(s)",
+                {
+                    "symbols": list(refresh_candidates.keys())[:20],
+                    "timeframes": sorted({tf for tfs in refresh_candidates.values() for tf in tfs}),
+                },
+            )
 
         if include_indicators:
             # Compute raw indicator values + signal classifications for each
@@ -2810,6 +3049,7 @@ def create_app() -> FastAPI:
 
     @app.get("/historical")
     async def get_historical(
+        request: Request,
         symbol: str,
         bar_size: str = "1 min",
         duration: str = DEFAULT_INTRADAY_DURATION,
@@ -2817,6 +3057,7 @@ def create_app() -> FastAPI:
         ts_start: int | None = None,
         ts_end: int | None = None,
         limit: int | None = None,
+        prefer_live_refresh: bool = False,
     ):
         """Return historical bars for a symbol.
 
@@ -2839,6 +3080,7 @@ def create_app() -> FastAPI:
                 "tsStart": ts_start,
                 "tsEnd": ts_end,
                 "limit": limit,
+                "preferLiveRefresh": prefer_live_refresh,
             },
         )
         # Mark symbol as active so the worker can prioritize TWS backfill + realtime bars.
@@ -2856,8 +3098,41 @@ def create_app() -> FastAPI:
                 )
 
         await run_db(_touch_active)
+        await run_db(touch_chart_intent, symbol, db_bar_size, what_to_show)
 
         refresh_key = f"{symbol}:{db_bar_size}:{what_to_show.upper()}"
+        pool: ConnectionPool = request.app.state.pool
+
+        def _tws_connected_for_chart() -> bool:
+            try:
+                status = pool.get_role_status(PORTFOLIO_ROLE)
+            except Exception:
+                return False
+            return bool(status.get("connected"))
+
+        async def _attempt_live_refresh(fetch_duration: str) -> bool:
+            if not prefer_live_refresh or _tws_connected_for_chart():
+                return False
+            now = time.time()
+            last = _historical_live_refresh_last_triggered.get(refresh_key, 0.0)
+            if (now - last) < _HISTORICAL_LIVE_REFRESH_THROTTLE_S:
+                return False
+            _historical_live_refresh_last_triggered[refresh_key] = now
+            try:
+                bars, _ = await asyncio.wait_for(
+                    get_historical_bars(
+                        symbol=symbol,
+                        ib=None,
+                        tws_connected=False,
+                        duration=fetch_duration,
+                        bar_size=bar_size,
+                        what_to_show=what_to_show,
+                    ),
+                    timeout=URGENT_HISTORICAL_WAIT_S,
+                )
+                return bool(bars)
+            except Exception:
+                return False
 
         def _spawn_background_revalidate(fetch_duration: str) -> None:
             now = time.time()
@@ -2873,6 +3148,19 @@ def create_app() -> FastAPI:
             )
 
             async def _revalidate_task() -> None:
+                still_fresh = False
+                try:
+                    still_fresh = await run_db(
+                        is_chart_intent_fresh,
+                        symbol,
+                        db_bar_size,
+                        what_to_show,
+                        CHART_INTENT_TTL_S,
+                    )
+                except Exception:
+                    still_fresh = False
+                if not still_fresh:
+                    return
                 # Always enqueue for the dedicated worker so TWS/backfill can
                 # deepen history, then run a local fetch for fast DailyIQ refresh.
                 try:
@@ -2923,6 +3211,26 @@ def create_app() -> FastAPI:
                 "ts_max": result["ts_max"],
             }
             if result["count"] > 0:
+                refreshed = await _attempt_live_refresh(requested_duration)
+                if refreshed:
+                    result = await run_db(
+                        read_bars_window,
+                        symbol,
+                        db_bar_size,
+                        what_to_show,
+                        ts_start,
+                        ts_end,
+                        limit,
+                    )
+                    payload = {
+                        "symbol": symbol,
+                        "bars": result["bars"],
+                        "source": "dailyiq",
+                        "count": result["count"],
+                        "whatToShow": what_to_show.upper(),
+                        "ts_min": result["ts_min"],
+                        "ts_max": result["ts_max"],
+                    }
                 _spawn_background_revalidate(requested_duration)
                 emit_debug_event(
                     "historical",
@@ -2987,8 +3295,17 @@ def create_app() -> FastAPI:
             and bool(cached.get("has_full_coverage"))
         )
         if cache_ready:
+            refreshed = await _attempt_live_refresh(requested_duration)
+            if refreshed:
+                cached = await run_db(
+                    read_cached_series,
+                    symbol,
+                    db_bar_size,
+                    what_to_show,
+                    requested_duration,
+                )
             _spawn_background_revalidate(requested_duration)
-            bars, source = cached["bars"], "cache"
+            bars, source = cached["bars"], ("dailyiq" if refreshed else "cache")
             emit_debug_event(
                 "historical",
                 "cache_hit",

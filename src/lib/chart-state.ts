@@ -3,6 +3,8 @@ import type { ChartType, Timeframe, YScaleMode, SubPaneStateSnapshot } from "../
 import { indicatorRegistry } from "../chart/indicators/registry";
 import type { CustomStrategyDefinition } from "../chart/customStrategies";
 
+export type ChartSplitLayout = "1" | "2h" | "2v" | "4" | "3h" | "3v" | "9";
+
 export interface PersistedChartIndicator {
   name: string;
   paneId: string;
@@ -37,6 +39,7 @@ export interface TechnicalTableWidgetState {
   x: number;
   y: number;
   width: number;
+  height: number;
   /** 0-1 horizontal position in the draggable band (persists across resize). */
   normX?: number;
   /** 0-1 vertical position in the draggable band (persists across resize). */
@@ -65,6 +68,7 @@ export interface ChartState {
   strategyPanelOpen?: boolean;
   legendCollapsed?: boolean;
   subPaneState?: SubPaneStateSnapshot;
+  splitLayout?: ChartSplitLayout;
 }
 
 const KEY_PREFIX = "chart-state:";
@@ -84,6 +88,7 @@ export function createDefaultTechnicalTableWidgetState(): TechnicalTableWidgetSt
     x: 120,
     y: 120,
     width: 520,
+    height: 286,
     visible: true,
     locked: false,
   };
@@ -160,6 +165,12 @@ function parseSubPaneState(value: unknown): SubPaneStateSnapshot | undefined {
     collapsedPaneIds,
     maximizedPaneId,
   };
+}
+
+function parseSplitLayout(value: unknown): ChartSplitLayout {
+  return value === "2h" || value === "2v" || value === "4" || value === "3h" || value === "3v" || value === "9"
+    ? value
+    : "1";
 }
 
 function parseIndicators(value: unknown): PersistedChartIndicator[] {
@@ -271,6 +282,7 @@ export function loadChartState(tabId: string): ChartState | null {
         ? (parsed as { legendCollapsed: boolean }).legendCollapsed
         : false,
       subPaneState: parseSubPaneState((parsed as { subPaneState?: unknown }).subPaneState),
+      splitLayout: parseSplitLayout((parsed as { splitLayout?: unknown }).splitLayout),
       probEngWidget: isRecord((parsed as { probEngWidget?: unknown }).probEngWidget)
         ? (() => {
             const pw = (parsed as { probEngWidget?: unknown }).probEngWidget as Record<string, unknown>;
@@ -294,7 +306,8 @@ export function loadChartState(tabId: string): ChartState | null {
             const base = {
               x: typeof tw.x === "number" ? tw.x : 120,
               y: typeof tw.y === "number" ? tw.y : 120,
-              width: typeof tw.width === "number" ? Math.max(460, Math.min(680, tw.width)) : 520,
+              width: typeof tw.width === "number" ? Math.max(360, Math.min(680, tw.width)) : 520,
+              height: typeof tw.height === "number" ? Math.max(250, Math.min(520, tw.height)) : 286,
               visible: typeof tw.visible === "boolean" ? tw.visible : true,
               locked: typeof tw.locked === "boolean" ? tw.locked : false,
             };

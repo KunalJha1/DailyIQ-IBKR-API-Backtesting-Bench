@@ -4,10 +4,13 @@ import type { Timeframe } from "../chart/types";
 import { TwsContext } from "./tws";
 
 const POLL_INTERVAL_MS = 60_000;
+const FAST_POLL_INTERVAL_MS = 5_000;
+const FAST_POLL_DURATION_MS = 30_000;
 const POLLER_STOP_GRACE_MS = 1_000;
 
 export type TechScoreStatus =
   | "ok"
+  | "not_computed"
   | "insufficient_bars"
   | "unsupported_timeframe"
   | "error"
@@ -26,9 +29,11 @@ type PollerState = {
   symbols: Map<string, number>;
   timeframes: Map<string, number>;
   intervalId: number | null;
+  fastIntervalId: number | null;
   stopTimeoutId: number | null;
   subscriberCount: number;
   inFlight: boolean;
+  pendingFetch: boolean;
   lastRequestKey: string;
 };
 
@@ -97,9 +102,11 @@ function getOrCreatePoller(sidecarPort: number): PollerState {
     symbols: new Map(),
     timeframes: new Map(),
     intervalId: null,
+    fastIntervalId: null,
     stopTimeoutId: null,
     subscriberCount: 0,
     inFlight: false,
+    pendingFetch: false,
     lastRequestKey: "",
   };
   pollersByPort.set(sidecarPort, created);
@@ -121,7 +128,11 @@ function getTrackedKey(poller: PollerState): string {
 async function fetchScores(sidecarPort: number, poller: PollerState): Promise<void> {
   const symbols = getTrackedSymbols(poller);
   const timeframes = getTrackedTimeframes(poller);
-  if (!sidecarPort || symbols.length === 0 || timeframes.length === 0 || poller.inFlight) return;
+  if (!sidecarPort || symbols.length === 0 || timeframes.length === 0) return;
+  if (poller.inFlight) {
+    poller.pendingFetch = true;
+    return;
+  }
 
   poller.inFlight = true;
   try {
@@ -187,7 +198,30 @@ async function fetchScores(sidecarPort: number, poller: PollerState): Promise<vo
     // Sidecar not ready, or transient request failure.
   } finally {
     poller.inFlight = false;
+    if (poller.pendingFetch) {
+      poller.pendingFetch = false;
+      void fetchScores(sidecarPort, poller);
+    }
   }
+}
+
+function startFastPolling(sidecarPort: number, poller: PollerState): void {
+  const stopAt = Date.now() + FAST_POLL_DURATION_MS;
+  if (poller.fastIntervalId !== null) {
+    window.clearInterval(poller.fastIntervalId);
+    poller.fastIntervalId = null;
+  }
+  void fetchScores(sidecarPort, poller);
+  poller.fastIntervalId = window.setInterval(() => {
+    if (Date.now() >= stopAt) {
+      if (poller.fastIntervalId !== null) {
+        window.clearInterval(poller.fastIntervalId);
+        poller.fastIntervalId = null;
+      }
+      return;
+    }
+    void fetchScores(sidecarPort, poller);
+  }, FAST_POLL_INTERVAL_MS);
 }
 
 function ensurePollerRunning(sidecarPort: number, poller: PollerState): void {
@@ -198,7 +232,7 @@ function ensurePollerRunning(sidecarPort: number, poller: PollerState): void {
 
   if (poller.intervalId !== null) return;
 
-  void fetchScores(sidecarPort, poller);
+  startFastPolling(sidecarPort, poller);
   poller.intervalId = window.setInterval(() => {
     void fetchScores(sidecarPort, poller);
   }, POLL_INTERVAL_MS);
@@ -208,6 +242,10 @@ function stopPoller(sidecarPort: number, poller: PollerState): void {
   if (poller.intervalId !== null) {
     window.clearInterval(poller.intervalId);
     poller.intervalId = null;
+  }
+  if (poller.fastIntervalId !== null) {
+    window.clearInterval(poller.fastIntervalId);
+    poller.fastIntervalId = null;
   }
   if (poller.stopTimeoutId !== null) {
     window.clearTimeout(poller.stopTimeoutId);
@@ -239,7 +277,7 @@ function subscribeScores(
 
   ensurePollerRunning(sidecarPort, poller);
   if (getTrackedKey(poller) !== previousKey) {
-    void fetchScores(sidecarPort, poller);
+    startFastPolling(sidecarPort, poller);
   }
 
   return () => {
@@ -356,6 +394,9 @@ export function describeTechScoreCell(
     const bars = cell.barCount ?? 0;
     const required = cell.requiredBars ?? 60;
     return `${prefix}: not enough bars (${bars}/${required})`;
+  }
+  if (cell.status === "not_computed") {
+    return `${prefix}: pending calculation`;
   }
   if (cell.status === "unsupported_timeframe") {
     return `${prefix}: unsupported timeframe`;

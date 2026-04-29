@@ -7,17 +7,18 @@ import {
 /** Alias for heatmap UI — same horizons as watchlist TA score columns. */
 export type HeatmapTechTimeframe = TaScoreTimeframe;
 
-export type HeatmapMetricMode = "change" | `tech-${TaScoreTimeframe}`;
+export type HeatmapMetricMode = "change" | "sentiment" | `tech-${TaScoreTimeframe}`;
 
 export const HEATMAP_TECH_TIMEFRAMES: { key: HeatmapTechTimeframe; label: string }[] =
   TA_SCORE_TIMEFRAMES.map((key) => ({ key, label: TA_SCORE_TF_LABELS[key] }));
 
 export const HEATMAP_METRIC_OPTIONS: { value: HeatmapMetricMode; label: string }[] = [
   { value: "change", label: "Change" },
+  { value: "sentiment", label: "Sentiment" },
   { value: "tech-5m", label: "Tech Score 5M" },
   { value: "tech-15m", label: "Tech Score 15M" },
   { value: "tech-1h", label: "Tech Score 1H" },
-{ value: "tech-1d", label: "Tech Score 1D" },
+  { value: "tech-1d", label: "Tech Score 1D" },
   { value: "tech-1w", label: "Tech Score 1W" },
 ];
 
@@ -80,6 +81,7 @@ export function getTileMetricValue(
   mode: HeatmapMetricMode,
 ): number | null {
   if (mode === "change") return tile.changePct;
+  if (mode === "sentiment") return tile.sentimentScore ?? null;
   if (mode.startsWith("tech-")) {
     const tf = mode.slice(5) as TaScoreTimeframe;
     return resolveHeatmapTechScore(tile, tf);

@@ -1,4 +1,4 @@
-export type HeatmapGroupType = "sp500" | "watchlist" | "etf" | "custom";
+export type HeatmapGroupType = "sp500" | "watchlist" | "etf" | "custom" | "sector" | "industry";
 
 export interface HeatmapGroup {
   id: number;
@@ -15,6 +15,12 @@ export interface HeatmapGroupPayload {
   type: HeatmapGroupType;
   etf_symbol?: string | null;
   symbols?: string[] | null;
+}
+
+const SYMBOL_LIST_GROUP_TYPES = new Set<HeatmapGroupType>(["custom", "sector", "industry"]);
+
+export function isSymbolListHeatmapGroup(group: HeatmapGroup | null): boolean {
+  return Boolean(group && SYMBOL_LIST_GROUP_TYPES.has(group.type) && group.symbols?.length);
 }
 
 // ── API functions ──────────────────────────────────────────────────────────────
@@ -79,7 +85,7 @@ export function resolveHeatmapUrl(
   if (group.type === "etf" && group.etfSymbol) {
     return `http://127.0.0.1:${port}/heatmap/etf/${encodeURIComponent(group.etfSymbol)}`;
   }
-  if (group.type === "custom" && group.symbols?.length) {
+  if (SYMBOL_LIST_GROUP_TYPES.has(group.type) && group.symbols?.length) {
     const syms = group.symbols.join(",");
     return `http://127.0.0.1:${port}/heatmap/custom?symbols=${encodeURIComponent(syms)}`;
   }

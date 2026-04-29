@@ -13,7 +13,7 @@ type RawBarSize = '1m' | '5m' | '15m' | '1d';
 interface UseChartDataResult {
   bars: OHLCVBar[];
   loading: boolean;
-  source: 'tws' | 'yahoo' | 'cache' | 'offline';
+  source: 'tws' | 'dailyiq' | 'yahoo' | 'cache' | 'offline';
   datasetKey: string;
   onViewportChange: (startIdx: number, endIdx: number) => void;
   pendingViewportShift: number;
@@ -44,7 +44,7 @@ const MAX_INTRADAY_RAW_BARS = 200_000;
 // Debounce pan-triggered fetches (ms)
 const PAN_FETCH_DEBOUNCE = 200;
 // Polling intervals (ms)
-const INTRADAY_POLL_MS = 5_000;
+const INTRADAY_POLL_MS = 3_000;
 const DAILY_POLL_MS = 60_000;
 
 function parseBars(payload: { bars: Array<Record<string, number | boolean>> }): OHLCVBar[] {
@@ -146,7 +146,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
   const [rawBars, setRawBars] = useState<OHLCVBar[]>([]);
   const [rawBarSize, setRawBarSize] = useState<RawBarSize>('1m');
   const [loading, setLoading] = useState(false);
-  const [source, setSource] = useState<'tws' | 'yahoo' | 'cache' | 'offline'>('offline');
+  const [source, setSource] = useState<'tws' | 'dailyiq' | 'yahoo' | 'cache' | 'offline'>('offline');
   const [pendingViewportShift, setPendingViewportShift] = useState(0);
   const [updateMode, setUpdateMode] = useState<'full' | 'tail'>('full');
   const [tailChangeOffset, setTailChangeOffset] = useState(0);
@@ -162,7 +162,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
   const panFetchingRef = useRef(false);
   const viewportAnchorRef = useRef<{ startIdx: number; anchorTime: number } | null>(null);
   const intradayPollRafRef = useRef<number | null>(null);
-  const intradayPollPendingRef = useRef<{ bars: OHLCVBar[]; source: 'tws' | 'yahoo' | 'cache' } | null>(null);
+  const intradayPollPendingRef = useRef<{ bars: OHLCVBar[]; source: 'tws' | 'dailyiq' | 'yahoo' | 'cache' } | null>(null);
   const activeDatasetKeyRef = useRef('');
 
   // Keep ref in sync for async access
@@ -234,6 +234,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         url.searchParams.set('symbol', normalizedSymbol);
         url.searchParams.set('bar_size', requestConfig.barSizeParam);
         url.searchParams.set('duration', requestConfig.duration);
+        url.searchParams.set('prefer_live_refresh', '1');
 
         const res = await fetch(url.toString());
         if (!res.ok) return;
@@ -250,7 +251,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         if (bars.length > 0) {
           setRawBars(useDaily ? bars : trimIntradayTail(bars));
           setRawBarSize(requestConfig.rawBarSize);
-          setSource((payload.source as 'tws' | 'yahoo' | 'cache') || 'yahoo');
+          setSource((payload.source as 'tws' | 'dailyiq' | 'yahoo' | 'cache') || 'yahoo');
         } else {
           setRawBars([]);
           setSource('offline');
@@ -276,6 +277,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         const url = new URL(`http://127.0.0.1:${sidecarPort}/historical`);
         url.searchParams.set('symbol', normalizedSymbol);
         url.searchParams.set('bar_size', requestConfig.barSizeParam);
+        url.searchParams.set('prefer_live_refresh', '1');
         const currentBars = rawBarsRef.current;
         if (currentBars.length > 0) {
           const lastTs = currentBars[currentBars.length - 1].time;
@@ -298,7 +300,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         if (newBars.length > 0) {
           intradayPollPendingRef.current = {
             bars: newBars,
-            source: (payload.source as 'tws' | 'yahoo' | 'cache') || 'yahoo',
+            source: (payload.source as 'tws' | 'dailyiq' | 'yahoo' | 'cache') || 'yahoo',
           };
           if (intradayPollRafRef.current == null) {
             intradayPollRafRef.current = requestAnimationFrame(() => {
@@ -380,6 +382,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           const url = new URL(`http://127.0.0.1:${sidecarPort}/historical`);
           url.searchParams.set('symbol', normalizedSymbol);
           url.searchParams.set('bar_size', requestConfig.barSizeParam);
+          url.searchParams.set('prefer_live_refresh', '1');
 
           const curBars = rawBarsRef.current;
           if (curBars.length > 0) {

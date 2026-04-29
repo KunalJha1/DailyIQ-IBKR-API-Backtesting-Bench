@@ -1,5 +1,6 @@
 import { useEffect, useState, type MutableRefObject } from "react";
 import { createPortal } from "react-dom";
+import ScrollArea from "../ScrollArea";
 import type { CustomColumnDef, ExpressionColumn } from "../../lib/custom-column-types";
 import { TA_SCORE_TIMEFRAMES } from "../../lib/ta-score-timeframes";
 
@@ -105,7 +106,7 @@ export default function ColumnPopover({
         {/* Column 2: Quick Add */}
         <div className="px-2.5 py-2">
           <p className="pb-1.5 text-[8px] uppercase tracking-wider text-white/25">Quick Add</p>
-          <div className="max-h-[220px] overflow-y-auto">
+          <ScrollArea viewportClassName="max-h-[220px] pr-2">
             {availablePresets.map((preset) => (
               <button
                 key={preset.label}
@@ -127,7 +128,7 @@ export default function ColumnPopover({
             {availablePresets.length === 0 && (
               <p className="py-1 text-[9px] text-white/20 italic">All added</p>
             )}
-          </div>
+          </ScrollArea>
         </div>
 
         {/* Column 3: Custom */}

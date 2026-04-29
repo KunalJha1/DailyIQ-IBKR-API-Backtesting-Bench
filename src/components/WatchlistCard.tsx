@@ -1119,6 +1119,11 @@ function WatchlistCard({
   // ── How many visible rows per pane? ──
   const bodyRef = useRef<HTMLDivElement>(null);
   const [bodyHeight, setBodyHeight] = useState(300);
+  const [horizontalScrollbar, setHorizontalScrollbar] = useState({
+    visible: false,
+    thumbLeft: 0,
+    thumbWidth: 0,
+  });
   useEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
@@ -1128,6 +1133,109 @@ function WatchlistCard({
     obs.observe(el);
     return () => obs.disconnect();
   }, []);
+
+  const updateHorizontalScrollbar = useCallback(() => {
+    const el = containerRef.current;
+    if (!el || fixedPaneCount == null) {
+      setHorizontalScrollbar((prev) => (
+        prev.visible ? { visible: false, thumbLeft: 0, thumbWidth: 0 } : prev
+      ));
+      return;
+    }
+
+    const { clientWidth, scrollLeft, scrollWidth } = el;
+    const visible = scrollWidth > clientWidth + 1;
+    if (!visible) {
+      setHorizontalScrollbar((prev) => (
+        prev.visible ? { visible: false, thumbLeft: 0, thumbWidth: 0 } : prev
+      ));
+      return;
+    }
+
+    const thumbWidth = Math.max(36, Math.round((clientWidth / scrollWidth) * clientWidth));
+    const maxScrollLeft = scrollWidth - clientWidth;
+    const maxThumbLeft = clientWidth - thumbWidth;
+    const thumbLeft = maxScrollLeft > 0
+      ? Math.round((scrollLeft / maxScrollLeft) * maxThumbLeft)
+      : 0;
+
+    setHorizontalScrollbar((prev) => {
+      if (
+        prev.visible === visible &&
+        prev.thumbLeft === thumbLeft &&
+        prev.thumbWidth === thumbWidth
+      ) {
+        return prev;
+      }
+      return { visible, thumbLeft, thumbWidth };
+    });
+  }, [fixedPaneCount]);
+
+  useEffect(() => {
+    const scrollEl = containerRef.current;
+    const bodyEl = bodyRef.current;
+    if (!scrollEl) return;
+
+    updateHorizontalScrollbar();
+    scrollEl.addEventListener("scroll", updateHorizontalScrollbar, { passive: true });
+
+    const resizeObserver = new ResizeObserver(updateHorizontalScrollbar);
+    resizeObserver.observe(scrollEl);
+    if (bodyEl) resizeObserver.observe(bodyEl);
+    window.addEventListener("resize", updateHorizontalScrollbar);
+
+    return () => {
+      scrollEl.removeEventListener("scroll", updateHorizontalScrollbar);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateHorizontalScrollbar);
+    };
+  }, [paneCount, paneWidth, updateHorizontalScrollbar]);
+
+  const handleHorizontalTrackPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
+    const el = containerRef.current;
+    if (!el || !horizontalScrollbar.visible) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const maxThumbLeft = rect.width - horizontalScrollbar.thumbWidth;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    if (maxThumbLeft <= 0 || maxScrollLeft <= 0) return;
+
+    const targetThumbLeft = Math.max(
+      0,
+      Math.min(e.clientX - rect.left - horizontalScrollbar.thumbWidth / 2, maxThumbLeft),
+    );
+    el.scrollLeft = (targetThumbLeft / maxThumbLeft) * maxScrollLeft;
+    updateHorizontalScrollbar();
+  }, [horizontalScrollbar, updateHorizontalScrollbar]);
+
+  const handleHorizontalThumbPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const startX = e.clientX;
+    const startScrollLeft = el.scrollLeft;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    const maxThumbTravel = el.clientWidth - horizontalScrollbar.thumbWidth;
+    if (maxScrollLeft <= 0 || maxThumbTravel <= 0) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const delta = event.clientX - startX;
+      el.scrollLeft = startScrollLeft + delta * (maxScrollLeft / maxThumbTravel);
+      updateHorizontalScrollbar();
+    };
+
+    const handlePointerUp = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+  }, [horizontalScrollbar.thumbWidth, updateHorizontalScrollbar]);
 
   const rowsPerPane = Math.max(4, Math.floor((bodyHeight - HEADER_H) / ROW_H));
 
@@ -1195,7 +1303,7 @@ function WatchlistCard({
 
   return (
     <div
-      className="flex h-full flex-col overflow-hidden border border-white/[0.06] bg-panel"
+      className="flex h-full select-none flex-col overflow-hidden border border-white/[0.06] bg-panel"
     >
       {/* Header */}
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.10] bg-base px-2">
@@ -1381,7 +1489,7 @@ function WatchlistCard({
       {/* Body — data-no-drag prevents GridLayout from starting a component move on row mousedown */}
       <div
         ref={containerRef}
-        className={`flex flex-1 scrollbar-watchlist ${fixedPaneCount != null ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}
+        className={`flex flex-1 ${fixedPaneCount != null ? "scrollbar-none overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}
         data-no-drag
       >
         <div ref={bodyRef} className={`flex h-full gap-[6px] ${fixedPaneCount != null ? "" : "w-full"}`}>
@@ -1440,7 +1548,7 @@ function WatchlistCard({
                         {editingHeaderKey === col.key ? (
                           <input
                             autoFocus
-                            className="w-full bg-transparent text-[10px] font-medium uppercase tracking-wider text-white/70 outline-none"
+                            className="w-full select-text bg-transparent text-[10px] font-medium uppercase tracking-wider text-white/70 outline-none"
                             value={editingHeaderValue}
                             onChange={(e) => setEditingHeaderValue(e.target.value)}
                             onBlur={() => {
@@ -1595,6 +1703,24 @@ function WatchlistCard({
           ))}
         </div>
       </div>
+      {horizontalScrollbar.visible ? (
+        <div
+          className="h-3 shrink-0 cursor-pointer border-t border-white/[0.06] bg-[#161B22] py-[3px]"
+          data-no-drag
+          onPointerDown={handleHorizontalTrackPointerDown}
+        >
+          <div className="relative h-full">
+            <div
+              className="absolute top-0 h-full cursor-grab rounded-full bg-white/25 transition-colors duration-75 hover:bg-white/40 active:cursor-grabbing"
+              style={{
+                left: horizontalScrollbar.thumbLeft,
+                width: horizontalScrollbar.thumbWidth,
+              }}
+              onPointerDown={handleHorizontalThumbPointerDown}
+            />
+          </div>
+        </div>
+      ) : null}
 
       {/* Context Menu */}
       {overlayRoot && contextMenu && createPortal(
@@ -1794,7 +1920,7 @@ function WatchlistCard({
             </div>
 
             {/* Holdings list */}
-            <div className="max-h-[240px] overflow-y-auto scrollbar-none px-2 py-2">
+            <div className="scrollbar-dark max-h-[240px] overflow-y-auto px-2 py-2">
               {etfPrompt.holdings.map((h) => (
                 <label
                   key={h.symbol}
@@ -2201,7 +2327,7 @@ function WatchlistRow({
                 }, 150);
               }}
               placeholder="Type symbol..."
-              className="w-full bg-transparent font-mono text-[12px] text-white/70 placeholder:text-white/15 focus:outline-none"
+              className="w-full select-text bg-transparent font-mono text-[12px] text-white/70 placeholder:text-white/15 focus:outline-none"
             />
             {showSuggestions && suggestions.length > 0 && (
               <div
@@ -2308,7 +2434,7 @@ function WatchlistRow({
               }, 150);
             }}
             placeholder={symbol}
-            className="w-full bg-transparent font-mono text-[12px] text-white/70 placeholder:text-white/25 focus:outline-none"
+            className="w-full select-text bg-transparent font-mono text-[12px] text-white/70 placeholder:text-white/25 focus:outline-none"
           />
           {showSuggestions && suggestions.length > 0 && (
             <div

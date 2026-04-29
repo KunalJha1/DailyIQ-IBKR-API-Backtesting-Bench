@@ -25,6 +25,7 @@ import {
   createHeatmapGroup,
   updateHeatmapGroup,
   deleteHeatmapGroup,
+  isSymbolListHeatmapGroup,
   resolveHeatmapUrl,
   type HeatmapGroup,
   type HeatmapGroupPayload,
@@ -38,7 +39,7 @@ const HEATMAP_GROUP_STORAGE_KEY = "dailyiq-heatmap-group";
 function loadStoredMetricMode(): HeatmapMetricMode {
   try {
     const raw = localStorage.getItem(HEATMAP_METRIC_STORAGE_KEY);
-    if (raw === "change" || raw === "tech-1d" || raw === "tech-1w") return raw;
+    if (HEATMAP_METRIC_OPTIONS.some((option) => option.value === raw)) return raw as HeatmapMetricMode;
   } catch {
     // Ignore localStorage failures.
   }
@@ -67,9 +68,7 @@ function getMetricToneClass(value: number | null, mode: HeatmapMetricMode): stri
 }
 
 function getMetricLabel(mode: HeatmapMetricMode): string {
-  if (mode === "change") return "Change";
-  if (mode === "tech-1d") return "Technical Score 1D";
-  return "Technical Score 1W";
+  return HEATMAP_METRIC_OPTIONS.find((option) => option.value === mode)?.label ?? "Metric";
 }
 
 function getLegendItems(mode: HeatmapMetricMode): { color: string; label: string }[] {
@@ -81,6 +80,17 @@ function getLegendItems(mode: HeatmapMetricMode): { color: string; label: string
       { color: "#8a3344", label: "Slight loss" },
       { color: "#c43d53", label: "Loss (<=-0.5%)" },
       { color: "#981b31", label: "Strong loss (<=-4%)" },
+    ];
+  }
+
+  if (mode === "sentiment") {
+    return [
+      { color: "#0b7a36", label: "Very bullish (85+)" },
+      { color: "#138a40", label: "Bullish (70-84)" },
+      { color: "#1fa34f", label: "Leaning bullish (55-69)" },
+      { color: "#4b5563", label: "Neutral (45-54)" },
+      { color: "#c43d53", label: "Leaning bearish (30-44)" },
+      { color: "#981b31", label: "Bearish (<30)" },
     ];
   }
 
@@ -163,6 +173,10 @@ function HeatmapPage() {
   }, [metricMode]);
 
   const activeGroup = activeGroupId !== null ? (groups.find((g) => g.id === activeGroupId) ?? null) : null;
+  const activeCustomSymbols = useMemo(
+    () => (isSymbolListHeatmapGroup(activeGroup) ? (activeGroup?.symbols ?? []) : []),
+    [activeGroup],
+  );
 
   // Resolve heatmap URL
   const heatmapUrl = useMemo(() => {
@@ -171,6 +185,15 @@ function HeatmapPage() {
   }, [sidecarPort, activeGroup, watchlistSymbols]);
 
   const { tiles, asOf } = useHeatmapData(heatmapUrl);
+
+  useEffect(() => {
+    if (!sidecarPort || activeCustomSymbols.length === 0) return;
+    fetch(`http://127.0.0.1:${sidecarPort}/active-symbols`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: activeCustomSymbols }),
+    }).catch(() => {});
+  }, [sidecarPort, activeCustomSymbols]);
 
   // Container resize
   useEffect(() => {

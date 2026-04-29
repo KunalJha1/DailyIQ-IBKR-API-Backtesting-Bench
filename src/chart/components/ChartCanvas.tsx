@@ -1,5 +1,9 @@
 import { useRef, useEffect, useCallback, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { ChartEngine } from '../core/ChartEngine';
+import ChartContextMenu from '../../components/ChartContextMenu';
+import AlertDialog from '../../components/AlertDialog';
+import type { ActiveIndicator } from '../types';
+import type { ChartAlert } from '../../lib/alerts';
 import type {
   OHLCVBar,
   ChartType,
@@ -54,6 +58,9 @@ interface ChartCanvasProps {
   onViewportShiftApplied?: () => void;
   updateMode?: 'full' | 'tail';
   tailChangeOffset?: number;
+  activeIndicators?: ActiveIndicator[];
+  alerts?: ChartAlert[];
+  onAddAlert?: (price: number, symbol: string) => void;
   children?: React.ReactNode;
 }
 
@@ -78,6 +85,9 @@ export default function ChartCanvas({
   onViewportShiftApplied,
   updateMode = 'full',
   tailChangeOffset = 0,
+  activeIndicators = [],
+  alerts = [],
+  onAddAlert,
   children,
 }: ChartCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -88,11 +98,16 @@ export default function ChartCanvas({
   const [yAxisHovered, setYAxisHovered] = useState(false);
   const [xAxisHovered, setXAxisHovered] = useState(false);
   const [drawingHovered, setDrawingHovered] = useState(false);
-  const [volumeProfileHovered, setVolumeProfileHovered] = useState(false);
+  const yAxisHoveredRef = useRef(false);
+  const xAxisHoveredRef = useRef(false);
+  const drawingHoveredRef = useRef(false);
   const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelection | null>(null);
   const [pendingTextAnchor, setPendingTextAnchor] = useState<DrawingAnchor | null>(null);
   const [pendingTextValue, setPendingTextValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<DrawingContextMenu | null>(null);
+  const [alertCtxMenu, setAlertCtxMenu] = useState<{ x: number; y: number; price: number } | null>(null);
+  const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  const [alertDialogPrice, setAlertDialogPrice] = useState(0);
   const [priceSectionHeight, setPriceSectionHeight] = useState(0);
   const [paneLayout, setPaneLayout] = useState<Array<{ paneId: string; top: number; height: number; yScaleMode: YScaleMode; showScaleControls: boolean; collapsed: boolean; maximized: boolean }>>([]);
 
@@ -231,11 +246,15 @@ export default function ChartCanvas({
     engine.setOnDrawingHoverChange((hoveredId) => {
       setDrawingHovered(!!hoveredId);
     });
+    engine.setOnChartContextMenu((info) => {
+      setAlertCtxMenu({ x: info.screenX, y: info.screenY, price: info.price });
+    });
     return () => {
       engine.setOnTextPlacementRequest(null);
       engine.setOnDrawingSelectionChange(null);
       engine.setOnDrawingContextMenu(null);
       engine.setOnDrawingHoverChange(null);
+      engine.setOnChartContextMenu(null);
     };
   }, [engineRef]);
 
@@ -261,6 +280,10 @@ export default function ChartCanvas({
     }
     notifyLayout();
   }, [activeScripts, engineRef, onLayoutChange]);
+
+  useEffect(() => {
+    engineRef.current?.setAlerts(alerts);
+  }, [alerts, engineRef]);
 
   const handleSelectTool = useCallback((tool: DrawingTool) => {
     const nextTool = activeTool === tool ? 'none' : tool;
@@ -365,19 +388,28 @@ export default function ChartCanvas({
     const overYAxis = x >= w - PRICE_AXIS_WIDTH && y >= 0 && y <= h;
     const axisTop = h - 24;
     const overXAxis = x < w - PRICE_AXIS_WIDTH && y >= axisTop && y <= h;
-    setYAxisHovered(prev => prev === overYAxis ? prev : overYAxis);
-    setXAxisHovered(prev => prev === overXAxis ? prev : overXAxis);
+    if (yAxisHoveredRef.current !== overYAxis) {
+      yAxisHoveredRef.current = overYAxis;
+      setYAxisHovered(overYAxis);
+    }
+    if (xAxisHoveredRef.current !== overXAxis) {
+      xAxisHoveredRef.current = overXAxis;
+      setXAxisHovered(overXAxis);
+    }
     const hovered = !!engineRef.current?.getHoveredDrawingId();
-    setDrawingHovered(prev => prev === hovered ? prev : hovered);
-    const hoveredVolumeProfile = !!engineRef.current?.getHoveredVolumeProfileId();
-    setVolumeProfileHovered(prev => prev === hoveredVolumeProfile ? prev : hoveredVolumeProfile);
+    if (drawingHoveredRef.current !== hovered) {
+      drawingHoveredRef.current = hovered;
+      setDrawingHovered(hovered);
+    }
   }, [engineRef]);
 
   const handleCanvasPointerLeave = useCallback(() => {
+    yAxisHoveredRef.current = false;
+    xAxisHoveredRef.current = false;
+    drawingHoveredRef.current = false;
     setYAxisHovered(false);
     setXAxisHovered(false);
     setDrawingHovered(false);
-    setVolumeProfileHovered(false);
   }, []);
 
   useEffect(() => {
@@ -502,7 +534,7 @@ export default function ChartCanvas({
           className="absolute inset-0"
           onMouseMove={handleCanvasPointerMove}
           onMouseLeave={handleCanvasPointerLeave}
-          style={{ cursor: yAxisHovered ? 'ns-resize' : xAxisHovered ? 'ew-resize' : activeTool !== 'none' ? 'copy' : drawingHovered ? 'move' : volumeProfileHovered ? 'grab' : 'crosshair' }}
+          style={{ cursor: yAxisHovered ? 'ns-resize' : xAxisHovered ? 'ew-resize' : activeTool !== 'none' ? 'copy' : drawingHovered ? 'move' : 'crosshair' }}
         />
         {/* A / L scale mode buttons pinned to bottom of price section y-axis */}
         <div
@@ -740,6 +772,29 @@ export default function ChartCanvas({
             </div>
           </>
         )}
+        {alertCtxMenu && (
+          <ChartContextMenu
+            x={alertCtxMenu.x}
+            y={alertCtxMenu.y}
+            onAddAlert={() => {
+              setAlertDialogPrice(alertCtxMenu.price);
+              if (onAddAlert) {
+                onAddAlert(alertCtxMenu.price, symbol ?? '');
+              } else {
+                setAlertDialogOpen(true);
+              }
+            }}
+            onClose={() => setAlertCtxMenu(null)}
+          />
+        )}
+        <AlertDialog
+          open={alertDialogOpen}
+          symbol={symbol ?? ''}
+          initialPrice={alertDialogPrice}
+          activeIndicators={activeIndicators}
+          onClose={() => setAlertDialogOpen(false)}
+          onSave={() => setAlertDialogOpen(false)}
+        />
         <div style={{ pointerEvents: (drawingHovered || activeTool !== 'none' || selectedDrawing) ? 'none' : undefined }}>
           {children}
         </div>

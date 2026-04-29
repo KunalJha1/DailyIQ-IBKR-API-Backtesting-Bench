@@ -20,11 +20,29 @@ export class CandlestickRenderer {
       const yOpen = viewport.priceToPixelY(bar.open);
       const yClose = viewport.priceToPixelY(bar.close);
 
-      // Wick
-      renderer.line(cx, yHigh, cx, yLow, color, 1);
+      // Draw wicks as separate hairlines so very small upper/lower wicks do
+      // not turn into square 1px caps at the candle extremes.
+      const wickX = Math.round(cx) + 0.5;
+      const bodyTop = Math.min(yOpen, yClose);
+      const bodyBottom = Math.max(yOpen, yClose);
+      const upperWickEnd = Math.min(bodyTop, yLow);
+      const lowerWickStart = Math.max(bodyBottom, yHigh);
+      renderer.ctx.fillStyle = color;
+      renderer.ctx.strokeStyle = color;
+      renderer.ctx.lineWidth = 1;
+      renderer.ctx.lineCap = 'butt';
+      renderer.ctx.beginPath();
+      if (upperWickEnd - yHigh >= 1) {
+        renderer.ctx.moveTo(wickX, Math.round(yHigh) + 0.5);
+        renderer.ctx.lineTo(wickX, Math.round(upperWickEnd) + 0.5);
+      }
+      if (yLow - lowerWickStart >= 1) {
+        renderer.ctx.moveTo(wickX, Math.round(lowerWickStart) + 0.5);
+        renderer.ctx.lineTo(wickX, Math.round(yLow) + 0.5);
+      }
+      renderer.ctx.stroke();
 
       // Body
-      const bodyTop = Math.min(yOpen, yClose);
       const bodyH = Math.max(1, Math.abs(yOpen - yClose));
       renderer.rect(cx - bodyWidth / 2, bodyTop, bodyWidth, bodyH, color);
     }

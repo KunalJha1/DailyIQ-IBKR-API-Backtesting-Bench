@@ -119,6 +119,17 @@ def ensure_base_schema(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS heatmap_groups (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            type        TEXT NOT NULL,
+            etf_symbol  TEXT,
+            symbols     TEXT,
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS portfolio_manual_accounts (
             id         TEXT PRIMARY KEY,
             name       TEXT NOT NULL,
@@ -275,6 +286,38 @@ def ensure_historical_schema(conn: sqlite3.Connection) -> None:
         ON ohlcv_15m (symbol, ts)
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS ohlcv_1h (
+            symbol   TEXT    NOT NULL,
+            ts       INTEGER NOT NULL,
+            open     REAL    NOT NULL,
+            high     REAL    NOT NULL,
+            low      REAL    NOT NULL,
+            close    REAL    NOT NULL,
+            volume   REAL    NOT NULL,
+            PRIMARY KEY (symbol, ts)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ohlcv_1h_sym_ts
+        ON ohlcv_1h (symbol, ts)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ohlcv_4h (
+            symbol   TEXT    NOT NULL,
+            ts       INTEGER NOT NULL,
+            open     REAL    NOT NULL,
+            high     REAL    NOT NULL,
+            low      REAL    NOT NULL,
+            close    REAL    NOT NULL,
+            volume   REAL    NOT NULL,
+            PRIMARY KEY (symbol, ts)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ohlcv_4h_sym_ts
+        ON ohlcv_4h (symbol, ts)
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS ohlcv_1d (
             symbol   TEXT    NOT NULL,
             ts       INTEGER NOT NULL,
@@ -351,6 +394,21 @@ def ensure_historical_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_historical_priority_requested
         ON historical_priority_queue (requested_at DESC)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chart_intents (
+            symbol         TEXT    NOT NULL,
+            bar_size       TEXT    NOT NULL,
+            what_to_show   TEXT    NOT NULL DEFAULT 'TRADES',
+            last_requested INTEGER NOT NULL,
+            last_served    INTEGER,
+            priority_rank  INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (symbol, bar_size, what_to_show)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chart_intents_requested
+        ON chart_intents (last_requested DESC)
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fetch_meta (

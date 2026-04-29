@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
+import ScrollArea from "./ScrollArea";
 
 export interface CustomSelectOption {
   value: string;
@@ -210,43 +211,49 @@ export default function CustomSelect({
 
       {open ? createPortal(
         <div
-          ref={panelRef}
-          id={listboxId}
-          role="listbox"
-          tabIndex={-1}
-          aria-activedescendant={activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined}
-          onKeyDown={handlePanelKeyDown}
-          className={`fixed z-[1000] overflow-y-auto rounded-md border border-white/[0.10] bg-[#161B22] p-1 shadow-2xl shadow-black/60 backdrop-blur-sm scrollbar-dark ${panelClassName ?? ""}`}
+          className={`fixed z-[1100] rounded-md border border-white/[0.10] bg-[#161B22] p-1 shadow-2xl shadow-black/60 backdrop-blur-sm ${panelClassName ?? ""}`}
           style={panelStyle}
         >
-          {options.map((option, index) => {
-            const selected = option.value === value;
-            const active = index === activeIndex;
-            return (
-              <button
-                key={option.value}
-                id={`${listboxId}-option-${index}`}
-                data-option-index={index}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                disabled={option.disabled}
-                onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => { if (!option.disabled) selectValue(option.value); }}
-                className={`flex w-full items-start gap-2 rounded-sm px-2 py-2 text-left transition-colors ${selected ? "bg-blue/[0.14] text-white" : active ? "bg-white/[0.06] text-white/90" : "text-white/64"} ${option.disabled ? "cursor-not-allowed opacity-35" : ""} ${optionClassName ?? ""}`}
-              >
-                <span className="flex-1">
-                  <span className="block font-mono text-[10px]">{option.label}</span>
-                  {option.description ? (
-                    <span className="mt-0.5 block text-[9px] leading-4 text-white/36">{option.description}</span>
-                  ) : null}
-                </span>
-                <span className="mt-0.5 h-3.5 w-3.5 shrink-0">
-                  {selected ? <Check className="h-3.5 w-3.5 text-blue" strokeWidth={1.7} /> : null}
-                </span>
-              </button>
-            );
-          })}
+          <ScrollArea
+            ref={panelRef}
+            id={listboxId}
+            role="listbox"
+            tabIndex={-1}
+            aria-activedescendant={activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined}
+            onKeyDown={handlePanelKeyDown}
+            viewportClassName="max-h-full pr-2"
+            viewportStyle={{ maxHeight: panelStyle.maxHeight }}
+            trackClassName="right-0.5"
+          >
+            {options.map((option, index) => {
+              const selected = option.value === value;
+              const active = index === activeIndex;
+              return (
+                <button
+                  key={option.value}
+                  id={`${listboxId}-option-${index}`}
+                  data-option-index={index}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  disabled={option.disabled}
+                  onMouseEnter={() => setActiveIndex(index)}
+                  onClick={() => { if (!option.disabled) selectValue(option.value); }}
+                  className={`flex w-full items-start gap-2 rounded-sm px-2 py-2 text-left transition-colors ${selected ? "bg-blue/[0.14] text-white" : active ? "bg-white/[0.06] text-white/90" : "text-white/64"} ${option.disabled ? "cursor-not-allowed opacity-35" : ""} ${optionClassName ?? ""}`}
+                >
+                  <span className="flex-1">
+                    <span className="block font-mono text-[10px]">{option.label}</span>
+                    {option.description ? (
+                      <span className="mt-0.5 block text-[9px] leading-4 text-white/36">{option.description}</span>
+                    ) : null}
+                  </span>
+                  <span className="mt-0.5 h-3.5 w-3.5 shrink-0">
+                    {selected ? <Check className="h-3.5 w-3.5 text-blue" strokeWidth={1.7} /> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </ScrollArea>
         </div>,
         document.body,
       ) : null}

@@ -62,6 +62,7 @@ export default function Dashboard() {
   const { isMac } = usePlatform();
   const isIbConnected = ibStatus === "connected";
   const isIbReconnecting = ibStatus === "reconnecting";
+  const isDailyiqConnected = Boolean(session?.api_key) || dailyiqHasKey;
   const footerConnectionLabel =
     connectionType && status === "connected"
       ? CONNECTION_LABELS[connectionType]
@@ -75,7 +76,9 @@ export default function Dashboard() {
         ? "finnhub"
         : observedMarketDataSource === "yahoo"
           ? "yahoo"
-          : "offline";
+          : backendState === "healthy"
+            ? "idle"
+            : "offline";
   const finnhubIndicatorState =
     finnhubStatus === "connected"
       ? "connected"
@@ -271,7 +274,9 @@ export default function Dashboard() {
                     ? "bg-sky-400"
                     : dataProvider === "finnhub" || dataProvider === "yahoo"
                       ? "bg-blue"
-                      : "bg-red/60"
+                      : dataProvider === "idle"
+                        ? "bg-white/35"
+                        : "bg-red/60"
               }`}
             />
             <span className={
@@ -281,7 +286,9 @@ export default function Dashboard() {
                   ? "text-sky-400"
                   : dataProvider === "finnhub" || dataProvider === "yahoo"
                     ? "text-blue"
-                    : "text-red/60"
+                    : dataProvider === "idle"
+                      ? "text-white/45"
+                      : "text-red/60"
             }>
               {dataProvider === "live"
                 ? "LIVE"
@@ -291,6 +298,8 @@ export default function Dashboard() {
                     ? "FINNHUB"
                 : dataProvider === "yahoo"
                   ? "YAHOO"
+                  : dataProvider === "idle"
+                    ? "DATA IDLE"
                   : "OFFLINE"}
             </span>
           </div>
@@ -330,6 +339,17 @@ export default function Dashboard() {
               </span>
             </button>
           )}
+          <span className="text-white/30">|</span>
+          <div className="flex items-center gap-1.5">
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                isDailyiqConnected ? "bg-sky-400" : "bg-red/60"
+              }`}
+            />
+            <span className={isDailyiqConnected ? "text-sky-400" : "text-red/60"}>
+              {isDailyiqConnected ? "DAILYIQ" : "DAILYIQ OFFLINE"}
+            </span>
+          </div>
           <span className="text-white/30">|</span>
           {finnhubIndicatorState !== "off" ? (
             <>

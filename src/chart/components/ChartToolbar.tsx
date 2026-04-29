@@ -53,7 +53,7 @@ interface ChartToolbarProps {
   onCreateCodeStrategy?: () => void;
   onCopyMasterPrompt?: () => void;
   activeIndicators?: ActiveIndicator[];
-  dataSource?: 'tws' | 'yahoo' | 'cache' | 'offline';
+  dataSource?: 'tws' | 'dailyiq' | 'yahoo' | 'cache' | 'offline';
   loading?: boolean;
   linkChannel?: number | null;
   onLinkChannelChange?: (ch: number | null) => void;
@@ -356,11 +356,13 @@ export default function ChartToolbar({
         )}
         <span className={`text-[9px] font-mono ${
           dataSource === 'tws' ? 'text-green'
+            : dataSource === 'dailyiq' ? 'text-cyan-400'
             : dataSource === 'yahoo' ? 'text-blue'
             : dataSource === 'cache' ? 'text-amber'
             : 'text-text-muted'
         }`}>
           {dataSource === 'tws' ? 'LIVE'
+            : dataSource === 'dailyiq' ? 'DIQ'
             : dataSource === 'yahoo' ? 'YAHOO'
             : dataSource === 'cache' ? 'CACHED'
             : 'OFFLINE'}

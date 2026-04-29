@@ -54,6 +54,7 @@ export class PanZoom {
 
   onMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    e.preventDefault();
     const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
     const { sx, sy } = this.getScale();
     const mx = (e.clientX - rect.left) / sx;
@@ -86,6 +87,8 @@ export class PanZoom {
   }
 
   onMouseMove(e: MouseEvent, canvasRect?: DOMRect) {
+    if (!Number.isFinite(e.clientX) || !Number.isFinite(e.clientY)) return;
+
     if (this.yScaling && canvasRect) {
       const { sy } = this.getScale();
       const my = (e.clientY - canvasRect.top) / sy;
@@ -144,6 +147,13 @@ export class PanZoom {
     }
   }
 
+  reset() {
+    this.dragging = false;
+    this.yScaling = false;
+    this.xScaling = false;
+    this.dragVx = 0;
+  }
+
   onWheel(e: WheelEvent) {
     e.preventDefault();
     const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
@@ -162,6 +172,7 @@ export class PanZoom {
       deltaY *= 400;
       deltaX *= 400;
     }
+    if (!Number.isFinite(deltaY) || !Number.isFinite(deltaX) || !Number.isFinite(mouseX)) return;
 
     // Wheel on price axis: scale Y; auto mode detaches first
     if (this.viewport.isInPriceAxis(mouseX, this.canvasWidth, PRICE_AXIS_WIDTH)) {

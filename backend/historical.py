@@ -12,6 +12,8 @@ from pathlib import Path
 from db_utils import (
     DB_DIR,
     DB_PATH,
+    begin_immediate,
+    commit_with_retry,
     db_session as _raw_db_session,
     execute_many_with_retry,
     execute_one_tx_with_retry,
@@ -55,12 +57,16 @@ BAR_SIZE_TARGET_DURATIONS = {
     "1m": "20 D",
     "5m": "90 D",
     "15m": "270 D",
+    "1h": "2 Y",
+    "4h": "5 Y",
     "1d": "30 Y",
 }
 MIN_INCREMENTAL_DAYS = 1
 MIN_INCREMENTAL_DAILY_DAYS = 30  # 1m minimum window for daily bar incremental fetches
 MAX_INCREMENTAL_INTRADAY_DAYS = 14
 MIN_INCREMENTAL_INTRADAY_SECONDS = 60
+CHART_INTENT_TTL_S = 90.0
+CHART_INTENT_MAX_ROWS = 6
 
 # Per-symbol async locks to prevent concurrent fetches for the same symbol+bar_size.
 # Key: "{symbol}:{bar_size}" (e.g. "HIMS:1m")
@@ -93,6 +99,18 @@ def _normalize_bar_size(bar_size: str) -> str:
         "15m": "15m",
         "15 min": "15m",
         "15 mins": "15m",
+        "1h": "1h",
+        "1 hour": "1h",
+        "1 hours": "1h",
+        "60m": "1h",
+        "60 min": "1h",
+        "60 mins": "1h",
+        "4h": "4h",
+        "4 hour": "4h",
+        "4 hours": "4h",
+        "240m": "4h",
+        "240 min": "4h",
+        "240 mins": "4h",
         "1d": "1d",
         "1 day": "1d",
         "5s": "5s",
@@ -112,6 +130,10 @@ def _ib_bar_size_setting(bar_size: str) -> str:
         return "5 mins"
     if normalized == "15m":
         return "15 mins"
+    if normalized == "1h":
+        return "1 hour"
+    if normalized == "4h":
+        return "4 hours"
     if normalized == "1d":
         return "1 day"
     if normalized == "5s":
@@ -125,6 +147,8 @@ def _table_for_series(bar_size: str, what_to_show: str) -> str:
         "1m": "ohlcv_1m",
         "5m": "ohlcv_5m",
         "15m": "ohlcv_15m",
+        "1h": "ohlcv_1h",
+        "4h": "ohlcv_4h",
         "1d": "ohlcv_1d",
         "5s": "ohlcv_5s",
     }
@@ -179,6 +203,66 @@ def _duration_to_days(duration: str | None, fallback_days: int) -> int:
     if unit.startswith("Y"):
         return value * 365
     return fallback_days
+
+
+def _rollup_intraday_bars(
+    bars: list[dict],
+    source_bar_size: str,
+    target_bar_size: str,
+) -> list[dict]:
+    source = _normalize_bar_size(source_bar_size)
+    target = _normalize_bar_size(target_bar_size)
+    if not bars or source == target:
+        return bars
+
+    minutes_per_bar = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "1h": 60,
+        "4h": 240,
+    }
+    source_minutes = minutes_per_bar.get(source)
+    target_minutes = minutes_per_bar.get(target)
+    if not source_minutes or not target_minutes or target_minutes < source_minutes:
+        return bars
+    if target_minutes % source_minutes != 0:
+        return bars
+
+    bars_per_bucket = target_minutes // source_minutes
+    expected_step_ms = source_minutes * 60_000
+    max_gap_ms = expected_step_ms * 2
+    sorted_bars = sorted(bars, key=lambda bar: bar["time"])
+
+    result: list[dict] = []
+    bucket: list[dict] = []
+    previous_ts: int | None = None
+
+    def flush_bucket() -> None:
+        if not bucket:
+            return
+        result.append({
+            "time": bucket[0]["time"],
+            "open": bucket[0]["open"],
+            "high": max(bar["high"] for bar in bucket),
+            "low": min(bar["low"] for bar in bucket),
+            "close": bucket[-1]["close"],
+            "volume": sum(bar["volume"] for bar in bucket),
+        })
+        bucket.clear()
+
+    for bar in sorted_bars:
+        if previous_ts is not None:
+            gap_ms = bar["time"] - previous_ts
+            if gap_ms <= 0 or gap_ms > max_gap_ms:
+                flush_bucket()
+        bucket.append(bar)
+        previous_ts = bar["time"]
+        if len(bucket) >= bars_per_bucket:
+            flush_bucket()
+
+    flush_bucket()
+    return result
 
 
 def _normalize_background_intraday_years(value) -> int:
@@ -511,6 +595,184 @@ def _init_schema(conn: sqlite3.Connection):
         _schema_initialized = True
 
 
+def _recompute_chart_intent_priority(cur: sqlite3.Cursor) -> None:
+    rows = cur.execute(
+        """
+        SELECT symbol, bar_size, what_to_show
+        FROM chart_intents
+        ORDER BY last_requested DESC, symbol ASC, bar_size ASC, what_to_show ASC
+        """
+    ).fetchall()
+    if not rows:
+        return
+    cur.executemany(
+        """
+        UPDATE chart_intents
+        SET priority_rank = ?
+        WHERE symbol = ? AND bar_size = ? AND what_to_show = ?
+        """,
+        [(idx, row[0], row[1], row[2]) for idx, row in enumerate(rows, start=1)],
+    )
+
+
+def _prune_chart_intents_in_tx(
+    cur: sqlite3.Cursor,
+    *,
+    now_ms: int,
+    ttl_s: float,
+    max_rows: int,
+) -> int:
+    ttl_ms = max(0, int(ttl_s * 1000))
+    cutoff_ms = now_ms - ttl_ms
+    before_count = cur.execute("SELECT COUNT(*) FROM chart_intents").fetchone()[0]
+    cur.execute("DELETE FROM chart_intents WHERE last_requested < ?", (cutoff_ms,))
+    if max_rows >= 0:
+        rows = cur.execute(
+            """
+            SELECT symbol, bar_size, what_to_show
+            FROM chart_intents
+            ORDER BY last_requested DESC, symbol ASC, bar_size ASC, what_to_show ASC
+            """
+        ).fetchall()
+        overflow = rows[max_rows:]
+        if overflow:
+            cur.executemany(
+                """
+                DELETE FROM chart_intents
+                WHERE symbol = ? AND bar_size = ? AND what_to_show = ?
+                """,
+                overflow,
+            )
+    _recompute_chart_intent_priority(cur)
+    after_count = cur.execute("SELECT COUNT(*) FROM chart_intents").fetchone()[0]
+    return max(0, before_count - after_count)
+
+
+def touch_chart_intent(symbol: str, bar_size: str, what_to_show: str = "TRADES") -> None:
+    symbol = symbol.upper()
+    db_bar_size = _normalize_bar_size(bar_size)
+    mode = _normalize_what_to_show(what_to_show)
+    now_ms = int(time.time() * 1000)
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        cur = conn.cursor()
+        begin_immediate(cur)
+        try:
+            cur.execute(
+                """
+                INSERT INTO chart_intents (
+                    symbol, bar_size, what_to_show, last_requested, last_served, priority_rank
+                )
+                VALUES (?, ?, ?, ?, NULL, 1)
+                ON CONFLICT(symbol, bar_size, what_to_show) DO UPDATE SET
+                    last_requested = excluded.last_requested
+                """,
+                (symbol, db_bar_size, mode, now_ms),
+            )
+            _prune_chart_intents_in_tx(
+                cur,
+                now_ms=now_ms,
+                ttl_s=CHART_INTENT_TTL_S,
+                max_rows=CHART_INTENT_MAX_ROWS,
+            )
+            commit_with_retry(conn)
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def prune_chart_intents(ttl_s: float = CHART_INTENT_TTL_S, max_rows: int = CHART_INTENT_MAX_ROWS) -> int:
+    now_ms = int(time.time() * 1000)
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        cur = conn.cursor()
+        begin_immediate(cur)
+        try:
+            pruned = _prune_chart_intents_in_tx(cur, now_ms=now_ms, ttl_s=ttl_s, max_rows=max_rows)
+            commit_with_retry(conn)
+            return pruned
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def read_fresh_chart_intents(limit: int) -> list[dict]:
+    if limit <= 0:
+        return []
+
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - int(CHART_INTENT_TTL_S * 1000)
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        cur = conn.cursor()
+        begin_immediate(cur)
+        try:
+            _prune_chart_intents_in_tx(
+                cur,
+                now_ms=now_ms,
+                ttl_s=CHART_INTENT_TTL_S,
+                max_rows=CHART_INTENT_MAX_ROWS,
+            )
+            rows = cur.execute(
+                """
+                SELECT symbol, bar_size, what_to_show, last_requested, last_served, priority_rank
+                FROM chart_intents
+                WHERE last_requested >= ?
+                ORDER BY priority_rank ASC, last_requested DESC
+                LIMIT ?
+                """,
+                (cutoff_ms, limit),
+            ).fetchall()
+            if rows:
+                cur.executemany(
+                    """
+                    UPDATE chart_intents
+                    SET last_served = ?
+                    WHERE symbol = ? AND bar_size = ? AND what_to_show = ?
+                    """,
+                    [(now_ms, row[0], row[1], row[2]) for row in rows],
+                )
+            commit_with_retry(conn)
+        except Exception:
+            conn.rollback()
+            raise
+
+    return [
+        {
+            "symbol": row[0],
+            "bar_size": row[1],
+            "what_to_show": row[2],
+            "last_requested": row[3],
+            "last_served": now_ms if rows else row[4],
+            "priority_rank": row[5],
+        }
+        for row in rows
+    ]
+
+
+def is_chart_intent_fresh(
+    symbol: str,
+    bar_size: str,
+    what_to_show: str = "TRADES",
+    ttl_s: float = CHART_INTENT_TTL_S,
+) -> bool:
+    symbol = symbol.upper()
+    db_bar_size = _normalize_bar_size(bar_size)
+    mode = _normalize_what_to_show(what_to_show)
+    cutoff_ms = int(time.time() * 1000) - int(ttl_s * 1000)
+    with sync_db_session() as conn:
+        _init_schema(conn)
+        row = conn.execute(
+            """
+            SELECT last_requested
+            FROM chart_intents
+            WHERE symbol = ? AND bar_size = ? AND what_to_show = ?
+            """,
+            (symbol, db_bar_size, mode),
+        ).fetchone()
+    return bool(row and row[0] >= cutoff_ms)
+
+
 def _cache_fresh(
     conn: sqlite3.Connection, symbol: str, bar_size: str, ttl: float = CACHE_TTL
 ) -> tuple[bool, str, bool]:
@@ -831,6 +1093,10 @@ def seed_duration_for_bar_size(bar_size: str) -> str:
         return "30 D"
     if normalized == "15m":
         return "90 D"
+    if normalized == "1h":
+        return "180 D"
+    if normalized == "4h":
+        return "365 D"
     return SEED_INTRADAY_DURATION
 
 
@@ -919,7 +1185,8 @@ def _write_bars(
                 (symbol, cache_key, int(time.time() * 1000), "tws", dc_val),
             )
     else:
-        # Yahoo — gap-fill only: never overwrite bars that may be from TWS
+        # Non-TWS providers gap-fill only: never overwrite authoritative TWS bars.
+        source_label = "dailyiq" if source == "dailyiq" else "yahoo"
         if has_synthetic_col:
             execute_many_with_retry(
                 conn,
@@ -940,7 +1207,7 @@ def _write_bars(
             )
         if update_meta:
             # Always update fetch_meta so the cache is marked fresh.
-            # Bar-level protection (INSERT OR IGNORE above) already prevents Yahoo
+            # Bar-level protection (INSERT OR IGNORE above) already prevents fallback providers
             # from overwriting TWS bars — the metadata must still be updated so
             # _cache_fresh() doesn't loop forever when TWS was the prior source.
             if depth_complete is None:
@@ -957,7 +1224,7 @@ def _write_bars(
                 INSERT OR REPLACE INTO fetch_meta (symbol, bar_size, fetched_at, source, depth_complete)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (symbol, cache_key, int(time.time() * 1000), "yahoo", dc_val),
+                (symbol, cache_key, int(time.time() * 1000), source_label, dc_val),
             )
 
 
@@ -1377,7 +1644,19 @@ async def get_historical_bars(
             # Even if cached source is TWS, still fetch from Yahoo to gap-fill
             # older history. Yahoo uses INSERT OR IGNORE so TWS bars stay intact.
             try:
-                yf_interval = "1d" if is_daily else ("15m" if db_bar_size == "15m" else ("5m" if db_bar_size == "5m" else "1m"))
+                yahoo_source_bar_size = db_bar_size
+                if is_daily:
+                    yf_interval = "1d"
+                elif db_bar_size == "15m":
+                    yf_interval = "15m"
+                elif db_bar_size == "5m":
+                    yf_interval = "5m"
+                elif db_bar_size in {"1h", "4h"}:
+                    yahoo_source_bar_size = "5m"
+                    yf_interval = "5m"
+                else:
+                    yahoo_source_bar_size = "1m"
+                    yf_interval = "1m"
                 yf_default = _yahoo_seed_period(db_bar_size, lookback_days)
                 # If we have cached bars but they don't go back far enough, and depth is
                 # not already known to be complete, use the full period to backfill.
@@ -1401,6 +1680,12 @@ async def get_historical_bars(
                     {"symbol": symbol, "source": "yahoo", "period": yf_period, "interval": yf_interval},
                 )
                 fetched_bars = await fetch_from_yahoo(symbol, period=yf_period, interval=yf_interval)
+                if fetched_bars and yahoo_source_bar_size != db_bar_size:
+                    fetched_bars = _rollup_intraday_bars(
+                        fetched_bars,
+                        source_bar_size=yahoo_source_bar_size,
+                        target_bar_size=db_bar_size,
+                    )
                 if fetched_bars:
                     fetch_source = "yahoo"
                     logger.info(

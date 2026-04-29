@@ -549,7 +549,7 @@ def refresh_symbol_valuations_with_fallback(
         if _diq_fetch is not None:
             try:
                 trailing_pe, forward_pe, market_cap = _diq_fetch(sym)
-                if trailing_pe is not None or market_cap is not None:
+                if trailing_pe is not None or forward_pe is not None or market_cap is not None:
                     upsert_quote_valuation(
                         sym,
                         trailing_pe,
@@ -559,7 +559,7 @@ def refresh_symbol_valuations_with_fallback(
                         source="dailyiq",
                     )
                     cap_str = f"${market_cap/1e9:.2f}B" if market_cap else "N/A"
-                    valuation_msg = f"[Valuation] {sym} (DailyIQ): P/E={trailing_pe}, MktCap={cap_str}"
+                    valuation_msg = f"[Valuation] {sym} (DailyIQ): P/E={trailing_pe}, Fwd P/E={forward_pe}, MktCap={cap_str}"
                     print(valuation_msg, flush=True)
                     _log.info(valuation_msg)
                     if idx < total:

@@ -42,6 +42,7 @@ const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   SMA: 'Trend-following moving average',
   EMA: 'Faster-reacting moving average',
   'EMA Ribbon 5/20/200': 'Three-line EMA structure ribbon',
+  'DailyIQ Technical Table': 'Multi-timeframe technical table with trend, strength, chop, RSI, and MACD summary',
   'Bollinger Bands': 'Volatility bands around a moving average',
   VWAP: 'Average price weighted by volume',
   Ichimoku: 'Multi-component trend & momentum system',
