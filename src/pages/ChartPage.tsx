@@ -414,7 +414,7 @@ function ProbEngFloatingWidget({
     { label: 'Min Obs', value: String(Math.round(indicator.params.minObs ?? 0)) },
     { label: 'Use Body', value: (indicator.params.useBody ?? 1) > 0 ? 'Yes' : 'No' },
   ];
-  const showHeader = !widget.locked || headerHovered;
+  const showHeader = headerHovered;
 
   return (
     <div
@@ -438,90 +438,90 @@ function ProbEngFloatingWidget({
       }}
     >
       <div
-        onPointerDown={widget.locked ? undefined : onHeaderPointerDown}
-        onPointerMove={widget.locked ? undefined : onHeaderPointerMove}
-        onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
-        onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
         style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          height: PROBENG_HEADER_HEIGHT,
-          zIndex: 2,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 8px 0 6px',
-          borderBottom: '1px solid rgba(255,255,255,0.12)',
-          fontSize: 10,
-          fontFamily: '"JetBrains Mono", monospace',
-          color: '#E6EDF3',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-          background: widget.locked
-            ? '#000000'
-            : dragging
-              ? 'linear-gradient(180deg, rgba(39,56,82,0.98) 0%, rgba(19,28,43,0.98) 100%)'
-              : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
-          cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
-          touchAction: widget.locked ? undefined : 'none',
-          opacity: showHeader ? 1 : 0,
-          pointerEvents: showHeader ? 'auto' : 'none',
-          transform: showHeader ? 'translateY(0)' : 'translateY(-100%)',
-          transition: 'opacity 120ms ease-out, transform 120ms ease-out',
+          height: showHeader ? PROBENG_HEADER_HEIGHT : 0,
+          minHeight: 0,
+          overflow: 'hidden',
+          transition: 'height 120ms ease-out',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          {!widget.locked && (
-            <span
+        <div
+          onPointerDown={widget.locked ? undefined : onHeaderPointerDown}
+          onPointerMove={widget.locked ? undefined : onHeaderPointerMove}
+          onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
+          onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
+          style={{
+            height: PROBENG_HEADER_HEIGHT,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '0 8px 0 6px',
+            borderBottom: '1px solid rgba(255,255,255,0.12)',
+            fontSize: 10,
+            fontFamily: '"JetBrains Mono", monospace',
+            color: '#E6EDF3',
+            userSelect: 'none',
+            WebkitUserSelect: 'none',
+            background: widget.locked
+              ? '#000000'
+              : dragging
+                ? 'linear-gradient(180deg, rgba(39,56,82,0.98) 0%, rgba(19,28,43,0.98) 100%)'
+                : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
+            cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
+            touchAction: widget.locked ? undefined : 'none',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            {!widget.locked && (
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 16,
+                  height: 16,
+                  borderRadius: 4,
+                  color: dragging ? '#C7D2FE' : '#8B949E',
+                  background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  flexShrink: 0,
+                }}
+              >
+                <GripHorizontal size={10} strokeWidth={1.7} />
+              </span>
+            )}
+            <span style={{ color: '#8B949E' }}>DailyIQ Bar Probability Table</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleLock();
+              }}
               style={{
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 4,
+                background: 'transparent',
+                color: '#E6EDF3',
+                width: 20,
+                height: 20,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                width: 16,
-                height: 16,
-                borderRadius: 4,
-                color: dragging ? '#C7D2FE' : '#8B949E',
-                background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                flexShrink: 0,
+                lineHeight: 1,
+                fontSize: 11,
+                fontFamily: '"JetBrains Mono", monospace',
+                padding: 0,
+                cursor: 'pointer',
               }}
+              title={widget.locked ? 'Unlock placement' : 'Lock placement'}
+              aria-label={widget.locked ? 'Unlock placement' : 'Lock placement'}
             >
-              <GripHorizontal size={10} strokeWidth={1.7} />
-            </span>
-          )}
-          <span style={{ color: '#8B949E' }}>DailyIQ Bar Probability Table</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <button
-            type="button"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleLock();
-            }}
-            style={{
-              border: '1px solid rgba(255,255,255,0.12)',
-              borderRadius: 4,
-              background: 'transparent',
-              color: '#E6EDF3',
-              width: 20,
-              height: 20,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-              fontSize: 11,
-              fontFamily: '"JetBrains Mono", monospace',
-              padding: 0,
-              cursor: 'pointer',
-            }}
-            title={widget.locked ? 'Unlock placement' : 'Lock placement'}
-            aria-label={widget.locked ? 'Unlock placement' : 'Lock placement'}
-          >
-            {widget.locked ? <Lock size={12} strokeWidth={1.5} /> : <Unlock size={12} strokeWidth={1.5} />}
-          </button>
+              {widget.locked ? <Lock size={12} strokeWidth={1.5} /> : <Unlock size={12} strokeWidth={1.5} />}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -533,6 +533,8 @@ function ProbEngFloatingWidget({
           fontFamily: '"JetBrains Mono", monospace',
           color: '#E6EDF3',
           backgroundColor: '#000000',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
         }}
       >
         <tbody>

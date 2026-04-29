@@ -433,7 +433,9 @@ function SymbolLogo({ symbol, size = 40 }: { symbol: string; size?: number }) {
 
 function OptionsPage() {
   const defaultSymbol = useDefaultOptionsSymbol();
-  const [selectedSymbol, setSelectedSymbol] = useState(defaultSymbol);
+  const [selectedSymbol, setSelectedSymbol] = useState<string>(
+    () => localStorage.getItem("options:lastSymbol") || defaultSymbol,
+  );
   const [symbolSearchOpen, setSymbolSearchOpen] = useState(false);
   const { summary, loading: summaryLoading, error: summaryError } = useOptionsSummary(selectedSymbol);
   const [selectedExpiration, setSelectedExpiration] = useState<number | null>(null);
@@ -449,6 +451,8 @@ function OptionsPage() {
   useEffect(() => {
     if (!selectedSymbol) {
       setSelectedSymbol(defaultSymbol);
+    } else {
+      localStorage.setItem("options:lastSymbol", selectedSymbol);
     }
   }, [defaultSymbol, selectedSymbol]);
 
@@ -603,14 +607,22 @@ function OptionsPage() {
   const [manualCostBasisInput, setManualCostBasisInput] = useState<string>("");
 
   useEffect(() => {
-    setManualCostBasis(null);
-    setManualCostBasisInput("");
+    const stored = localStorage.getItem(`options:costBasis:${selectedSymbol}`);
+    const v = stored ? parseFloat(stored) : NaN;
+    if (!isNaN(v) && v > 0) {
+      setManualCostBasis(v);
+      setManualCostBasisInput(String(v));
+    } else {
+      setManualCostBasis(null);
+      setManualCostBasisInput("");
+    }
   }, [selectedSymbol]);
 
   const effectiveCostBasis = manualCostBasis ?? portfolioCostBasis;
 
   const [hoveredAnalytics, setHoveredAnalytics] = useState<{
     strike: number;
+    side: "call" | "put";
     x: number;
     y: number;
   } | null>(null);
@@ -648,6 +660,29 @@ function OptionsPage() {
 
   const underlyingPrice = summary?.underlyingPrice ?? null;
   const analytics = useOptionsAnalytics(chain ?? null, effectiveCostBasis, underlyingPrice);
+
+  // Best expiration for selling covered calls — closest to the 21-45 DTE theta sweet spot (~30d ideal)
+  const bestCCExpiration = useMemo(() => {
+    if (effectiveCostBasis == null || flatExpirations.length === 0) return null;
+    const now = Date.now();
+    const IDEAL_DTE = 30;
+    let bestExp: number | null = null;
+    let bestScore = -Infinity;
+    for (const exp of flatExpirations) {
+      const expMs = exp.expiration > 1e12 ? exp.expiration : exp.expiration * 1000;
+      const dte = (expMs - now) / (1000 * 60 * 60 * 24);
+      if (dte <= 0) continue;
+      // reward 21-45 window, penalize outside; closer to 30 = higher score
+      const distFromIdeal = Math.abs(dte - IDEAL_DTE);
+      const inWindow = dte >= 21 && dte <= 45;
+      const score = (inWindow ? 100 : 0) - distFromIdeal;
+      if (score > bestScore) {
+        bestScore = score;
+        bestExp = exp.expiration;
+      }
+    }
+    return bestExp;
+  }, [effectiveCostBasis, flatExpirations]);
 
   const maxVolume = useMemo(() => {
     const rows = chain?.rows ?? [];
@@ -786,7 +821,13 @@ function OptionsPage() {
               onChange={(e) => {
                 setManualCostBasisInput(e.target.value);
                 const v = parseFloat(e.target.value);
-                setManualCostBasis(!isNaN(v) && v > 0 ? v : null);
+                if (!isNaN(v) && v > 0) {
+                  setManualCostBasis(v);
+                  localStorage.setItem(`options:costBasis:${selectedSymbol}`, String(v));
+                } else {
+                  setManualCostBasis(null);
+                  localStorage.removeItem(`options:costBasis:${selectedSymbol}`);
+                }
               }}
               className="h-6 w-28 border border-white/[0.10] bg-[#1C2128] px-1.5 text-center font-mono text-[10px] text-white/70 placeholder:text-white/25 focus:outline-none focus:border-[#F59E0B]/50 transition-colors duration-100 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               style={{ borderRadius: 4, MozAppearance: "textfield" } as React.CSSProperties}
@@ -868,7 +909,7 @@ function OptionsPage() {
               />
             </div>
           </div>
-          <div className="overflow-x-auto pb-1 [scrollbar-color:#2a3140_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:bg-white/[0.14] [&::-webkit-scrollbar-track]:bg-transparent">
+          <div className="scrollbar-none overflow-x-auto pb-1">
             <div className="flex min-w-max gap-6 pb-1">
               {activeMonths.map((month) => (
                 <div
@@ -882,20 +923,38 @@ function OptionsPage() {
                   <div className="flex flex-wrap gap-2">
                     {month.expirations.map((expiration) => {
                       const active = expiration.expiration === selectedExpiration;
+                      const isBestCC = expiration.expiration === bestCCExpiration;
+                      const expMs = expiration.expiration > 1e12 ? expiration.expiration : expiration.expiration * 1000;
+                      const dte = (expMs - Date.now()) / (1000 * 60 * 60 * 24);
+                      const dteLabel = dte > 0 ? `${Math.round(dte)}d` : null;
                       return (
                         <button
                           key={expiration.expiration}
                           type="button"
                           onClick={() => setSelectedExpiration(expiration.expiration)}
-                          className={`min-w-[56px] border px-2.5 py-1.5 text-left font-mono transition-[border-color,background-color,color] duration-100 ease-out ${
-                            active
-                              ? "border-[#1A56DB] bg-[#1A56DB]/18 text-white"
-                              : "border-white/[0.10] bg-[#1C2128] text-white/80 hover:border-white/20 hover:bg-[#222d3d] hover:text-white"
-                          }`}
+                          className={`relative min-w-[56px] px-2.5 py-1.5 text-left font-mono transition-[border-color,background-color,color,box-shadow] duration-100 ease-out ${
+                            active && isBestCC
+                              ? "border-[#F59E0B] bg-[#1A56DB]/15 text-white shadow-[0_0_0_1px_rgba(245,158,11,0.5)]"
+                              : active
+                                ? "border-[#1A56DB] bg-[#1A56DB]/18 text-white"
+                                : isBestCC
+                                  ? "border-[#F59E0B]/70 bg-[#F59E0B]/[0.06] text-white/90 shadow-[0_0_0_1px_rgba(245,158,11,0.25)] hover:border-[#F59E0B] hover:bg-[#F59E0B]/10"
+                                  : "border-white/[0.10] bg-[#1C2128] text-white/80 hover:border-white/20 hover:bg-[#222d3d] hover:text-white"
+                          } border`}
                           style={{ borderRadius: 4 }}
+                          title={isBestCC ? `Best expiration to sell covered calls (${dteLabel ?? "?"} DTE — theta sweet spot)` : undefined}
                         >
                           <div className="text-[11px] leading-tight">{expiration.label}</div>
-                          <div className={`mt-0.5 text-[9px] ${active ? "text-white/55" : "text-white/45"}`}>{expiration.contractCount} lines</div>
+                          <div className={`mt-0.5 flex items-center gap-1 text-[9px] ${active ? "text-white/55" : "text-white/45"}`}>
+                            {dteLabel && <span className={isBestCC ? "text-[#F59E0B]/80" : ""}>{dteLabel}</span>}
+                            {dteLabel && <span className="text-white/20">·</span>}
+                            <span>{expiration.contractCount} lines</span>
+                          </div>
+                          {isBestCC && (
+                            <span className="absolute -right-1 -top-1 rounded border border-[#F59E0B]/50 bg-[#0D1117] px-1 font-mono text-[8px] uppercase tracking-[0.08em] text-[#F59E0B]">
+                              CC
+                            </span>
+                          )}
                         </button>
                       );
                     })}
@@ -934,7 +993,7 @@ function OptionsPage() {
           >
             {/* Single scroll container — header sticky inside it so both scroll together horizontally */}
             <div
-              className="min-h-0 flex-1 overflow-auto [scrollbar-color:#2a3140_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:bg-white/[0.14] [&::-webkit-scrollbar-track]:bg-transparent"
+              className="scrollbar-none min-h-0 flex-1 overflow-auto"
               style={{ backgroundColor: BG_HOVER }}
             >
             {/* Sticky header block */}
@@ -1087,9 +1146,7 @@ function OptionsPage() {
                             atm ? "border-[#1A56DB]/20 bg-[#1A56DB]/[0.05]" : "border-white/[0.05] hover:bg-white/[0.03]"
                           } ${rowBgExtra}`}
                           style={{ borderLeft: `4px solid ${rowBorderLeft}` }}
-                          onMouseEnter={hasAnalytics ? (e) => setHoveredAnalytics({ strike: row.strike, x: e.clientX, y: e.clientY }) : undefined}
-                          onMouseMove={hasAnalytics ? (e) => setHoveredAnalytics((prev) => prev ? { ...prev, x: e.clientX, y: e.clientY } : null) : undefined}
-                          onMouseLeave={hasAnalytics ? () => setHoveredAnalytics(null) : undefined}
+                          onMouseLeave={() => setHoveredAnalytics(null)}
                         >
                           {estimate && (() => {
                             const est = estMap.get(row.strike);
@@ -1105,52 +1162,64 @@ function OptionsPage() {
                           <div
                             className={`flex flex-1 items-center justify-end ${callItm ? "bg-[#00C853]/[0.07]" : ""} ${isCoveredCall ? "bg-[#F59E0B]/[0.08]" : ""}`}
                             style={{ minWidth: totalWidth(callCols), borderLeft: isCoveredCall ? "2px solid rgba(245,158,11,0.5)" : undefined }}
+                            onMouseEnter={isCoveredCall ? (e) => setHoveredAnalytics({ strike: row.strike, side: "call", x: e.clientX, y: e.clientY }) : undefined}
+                            onMouseMove={isCoveredCall ? (e) => setHoveredAnalytics((prev) => prev ? { ...prev, x: e.clientX, y: e.clientY } : null) : undefined}
                           >
                             <SideMetrics
                               side={row.call} isCall={true}
                               cols={callCols} strike={row.strike}
                               underlyingPrice={underlyingPrice} maxVolume={maxVolume}
                             />
-                            {isCoveredCall && (
-                              <div className="flex shrink-0 items-center pr-2">
-                                <span className="rounded border border-[#F59E0B]/40 bg-[#F59E0B]/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-[#F59E0B]">
-                                  CC
-                                </span>
-                              </div>
-                            )}
                           </div>
-                          {/* Center: Strike IV */}
+                          {/* Center: Strike / IV / badges */}
                           <div
-                            className={`flex flex-col items-center justify-center border-x py-1.5 ${atm ? "border-x-[#1A56DB]/25 bg-[#1A56DB]/[0.04]" : "border-x-white/[0.05]"}`}
-                            style={{ width: CENTER_W, minWidth: CENTER_W }}
+                            className={`flex flex-col border-x ${atm ? "border-x-[#1A56DB]/25" : "border-x-white/[0.05]"}`}
+                            style={{
+                              width: CENTER_W,
+                              minWidth: CENTER_W,
+                              background: isCoveredCall
+                                ? "linear-gradient(to right, rgba(245,158,11,0.08) 50%, rgba(139,92,246,0.08) 50%)"
+                                : atm
+                                  ? "rgba(26,86,219,0.04)"
+                                  : undefined,
+                            }}
                           >
-                            <div className="flex w-full items-center">
-                              <div className="pr-2 text-right" style={{ width: 130 }}>
+                            <div className="flex flex-1 items-stretch">
+                              <div className="flex items-center justify-end pr-2" style={{ width: 130 }}>
                                 <span className={`font-mono text-[15px] font-semibold tabular-nums ${atm ? "text-white" : "text-white/88"}`}>
                                   {formatPrice(row.strike)}
                                 </span>
                               </div>
-                              <div className="border-l border-white/[0.08] pl-2 font-mono text-[13px] tabular-nums text-white/50" style={{ width: 130 }}>
+                              <div className="flex items-center border-l border-white/[0.08] pl-2 font-mono text-[13px] tabular-nums text-white/50" style={{ width: 130 }}>
                                 {formatIv(midIv)}
                               </div>
                             </div>
+                            {(isCoveredCall || isEquivPut) && (
+                              <div className="flex items-center justify-center gap-1.5 py-1">
+                                {isCoveredCall && (
+                                  <span className="rounded border border-[#F59E0B]/40 bg-[#F59E0B]/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-[#F59E0B]">
+                                    CC
+                                  </span>
+                                )}
+                                {isEquivPut && (() => {
+                                  const putBid = row.put?.bid ?? null;
+                                  const callBid = row.call?.bid ?? null;
+                                  const putHigher = putBid != null && callBid != null && putBid > callBid;
+                                  return (
+                                    <span className="rounded border border-[#8B5CF6]/40 bg-[#8B5CF6]/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-[#8B5CF6]">
+                                      {putHigher ? "NP ▲" : "NP"}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+                            )}
                           </div>
                           <div
                             className={`flex flex-1 items-center justify-start ${putItm ? "bg-[#FF3D71]/[0.07]" : ""} ${isEquivPut ? "bg-[#8B5CF6]/[0.08]" : ""}`}
                             style={{ minWidth: totalWidth(putCols), borderRight: isEquivPut ? "2px solid rgba(139,92,246,0.5)" : undefined }}
+                            onMouseEnter={isEquivPut ? (e) => setHoveredAnalytics({ strike: row.strike, side: "put", x: e.clientX, y: e.clientY }) : undefined}
+                            onMouseMove={isEquivPut ? (e) => setHoveredAnalytics((prev) => prev ? { ...prev, x: e.clientX, y: e.clientY } : null) : undefined}
                           >
-                            {isEquivPut && (() => {
-                              const putBid = row.put?.bid ?? null;
-                              const callBid = row.call?.bid ?? null;
-                              const putHigher = putBid != null && callBid != null && putBid > callBid;
-                              return (
-                                <div className="flex shrink-0 items-center pl-2">
-                                  <span className="rounded border border-[#8B5CF6]/40 bg-[#8B5CF6]/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-[#8B5CF6]">
-                                    {putHigher ? "NP ▲" : "NP"}
-                                  </span>
-                                </div>
-                              );
-                            })()}
                             <SideMetrics
                               side={row.put} isCall={false}
                               cols={putCols} strike={row.strike}
@@ -1189,8 +1258,12 @@ function OptionsPage() {
 
       {/* Analytics floating tooltip */}
       {hoveredAnalytics && (() => {
-        const details = analytics.details.get(hoveredAnalytics.strike);
-        if (!details || details.length === 0) return null;
+        const allDetails = analytics.details.get(hoveredAnalytics.strike);
+        if (!allDetails || allDetails.length === 0) return null;
+        const details = allDetails.filter((d) =>
+          hoveredAnalytics.side === "call" ? d.type === "coveredCall" : d.type === "equivalentPut",
+        );
+        if (details.length === 0) return null;
         const tooltipWidth = 264;
         const x = Math.min(hoveredAnalytics.x + 14, window.innerWidth - tooltipWidth - 8);
         const y = Math.min(hoveredAnalytics.y + 14, window.innerHeight - 220);

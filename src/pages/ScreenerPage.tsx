@@ -128,8 +128,8 @@ const MIN_SCREENER_COL_WIDTHS: ScreenerColWidths = {
   fpe: 64,
   change: 100,
   w52: 128,
-  ta: 50,
-  sentiment: 48,
+  ta: 62,
+  sentiment: 80,
   verdict: 104,
 };
 
@@ -140,8 +140,8 @@ const DEFAULT_SCREENER_COL_WIDTHS: ScreenerColWidths = {
   fpe: 80,
   change: 120,
   w52: 156,
-  ta: 56,
-  sentiment: 60,
+  ta: 72,
+  sentiment: 100,
   verdict: 128,
 };
 

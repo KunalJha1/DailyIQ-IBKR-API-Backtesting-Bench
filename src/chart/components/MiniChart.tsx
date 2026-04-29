@@ -1,4 +1,5 @@
 import { useRef, useEffect, useMemo, useState, useCallback, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { interpretScript } from '../scripting/interpreter';
 import { ChartEngine } from '../core/ChartEngine';
 import { useChartData } from '../hooks/useChartData';
@@ -204,6 +205,8 @@ function getProbEngStatColor(value: number | undefined): string {
   return `rgb(${mixProbChannel(248, 255, t)}, ${mixProbChannel(163, 184, t)}, ${mixProbChannel(184, 113, t)})`;
 }
 
+const MINI_PROBENG_HEADER_HEIGHT = 28;
+
 function MiniProbEngWidget({
   indicator,
   widget,
@@ -223,6 +226,7 @@ function MiniProbEngWidget({
   onHeaderPointerCancel: (e: ReactPointerEvent<HTMLDivElement>) => void;
   onToggleLock: () => void;
 }) {
+  const [headerHovered, setHeaderHovered] = useState(false);
   const latestProb1 = [...(indicator.data[0] ?? [])].reverse().find((v) => Number.isFinite(v));
   const latestProb3 = [...(indicator.data[1] ?? [])].reverse().find((v) => Number.isFinite(v));
   const width = widget.detailed ? PROBENG_WIDGET_WIDTH_DETAILED : PROBENG_WIDGET_WIDTH;
@@ -235,15 +239,13 @@ function MiniProbEngWidget({
     { label: 'Min Obs', value: String(Math.round(indicator.params.minObs ?? 0)) },
     { label: 'Use Body', value: (indicator.params.useBody ?? 1) > 0 ? 'Yes' : 'No' },
   ];
+  const showHeader = headerHovered;
 
   return (
     <div
       data-no-drag
-      title={widget.locked ? 'Placement locked' : 'Drag to reposition'}
-      onPointerDown={widget.locked ? undefined : onHeaderPointerDown}
-      onPointerMove={widget.locked ? undefined : onHeaderPointerMove}
-      onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
-      onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
+      onPointerEnter={() => setHeaderHovered(true)}
+      onPointerLeave={() => setHeaderHovered(false)}
       style={{
         position: 'absolute', left: widget.x, top: widget.y, width, zIndex: 18,
         borderRadius: 8, overflow: 'hidden',
@@ -253,56 +255,69 @@ function MiniProbEngWidget({
         pointerEvents: 'auto', opacity: dragging ? 0.96 : 1,
         transform: dragging ? 'scale(1.01)' : 'scale(1)',
         transition: dragging ? 'none' : 'box-shadow 120ms ease-out, border-color 120ms ease-out, opacity 120ms ease-out, transform 120ms ease-out',
-        cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
-        touchAction: widget.locked ? undefined : 'none',
       }}
     >
       <div
         style={{
-          minHeight: widget.locked ? 22 : 28,
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: widget.locked ? '0 6px 0 8px' : '0 8px 0 6px',
-          borderBottom: '1px solid rgba(255,255,255,0.12)',
-          fontSize: 10, fontFamily: '"JetBrains Mono", monospace', color: '#E6EDF3',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-          background: widget.locked ? '#000000' : dragging
-            ? 'linear-gradient(180deg, rgba(39,56,82,0.98) 0%, rgba(19,28,43,0.98) 100%)'
-            : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
+          height: showHeader ? MINI_PROBENG_HEADER_HEIGHT : 0,
+          minHeight: 0,
+          overflow: 'hidden',
+          transition: 'height 120ms ease-out',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          {!widget.locked && (
-            <span style={{
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              width: 16, height: 16, borderRadius: 4,
-              color: dragging ? '#C7D2FE' : '#8B949E',
-              background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
-              border: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
-            }}>
-              <GripHorizontal size={10} strokeWidth={1.7} />
-            </span>
-          )}
-          <span style={{ color: '#8B949E' }}>Probability Table</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <button
-            type="button"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); onToggleLock(); }}
-            style={{
-              border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4, background: 'transparent',
-              color: '#E6EDF3', width: 20, height: 20,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              lineHeight: 1, fontSize: 11, fontFamily: '"JetBrains Mono", monospace', padding: 0, cursor: 'pointer',
-            }}
-            title={widget.locked ? 'Unlock position' : 'Lock position'}
-          >
-            {widget.locked ? <Lock size={10} /> : <Unlock size={10} />}
-          </button>
+        <div
+          onPointerDown={widget.locked ? undefined : onHeaderPointerDown}
+          onPointerMove={widget.locked ? undefined : onHeaderPointerMove}
+          onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
+          onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
+          style={{
+            height: MINI_PROBENG_HEADER_HEIGHT,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '0 8px 0 6px',
+            borderBottom: '1px solid rgba(255,255,255,0.12)',
+            fontSize: 10, fontFamily: '"JetBrains Mono", monospace', color: '#E6EDF3',
+            userSelect: 'none',
+            WebkitUserSelect: 'none',
+            background: widget.locked ? '#000000' : dragging
+              ? 'linear-gradient(180deg, rgba(39,56,82,0.98) 0%, rgba(19,28,43,0.98) 100%)'
+              : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
+            cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
+            touchAction: widget.locked ? undefined : 'none',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            {!widget.locked && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 16, height: 16, borderRadius: 4,
+                color: dragging ? '#C7D2FE' : '#8B949E',
+                background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
+              }}>
+                <GripHorizontal size={10} strokeWidth={1.7} />
+              </span>
+            )}
+            <span style={{ color: '#8B949E' }}>DailyIQ Bar Probability Table</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); onToggleLock(); }}
+              style={{
+                border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4, background: 'transparent',
+                color: '#E6EDF3', width: 20, height: 20,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                lineHeight: 1, fontSize: 11, fontFamily: '"JetBrains Mono", monospace', padding: 0, cursor: 'pointer',
+              }}
+              title={widget.locked ? 'Unlock position' : 'Lock position'}
+            >
+              {widget.locked ? <Lock size={10} /> : <Unlock size={10} />}
+            </button>
+          </div>
         </div>
       </div>
-      <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6, userSelect: 'none', WebkitUserSelect: 'none' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 9, color: '#8B949E' }}>1-bar Up</span>
           <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 13, fontWeight: 700, color: prob1Color }}>{formatProbEngValue(latestProb1)}</span>
@@ -584,6 +599,7 @@ export default function MiniChart({
   const [highlightedStrategyIndex, setHighlightedStrategyIndex] = useState(-1);
   const [activeIndicators, setActiveIndicators] = useState<ActiveIndicator[]>([]);
   const [alertCtxMenu, setAlertCtxMenu] = useState<{ x: number; y: number; price: number } | null>(null);
+  const [alertLineCtxMenu, setAlertLineCtxMenu] = useState<{ x: number; y: number; alertId: string } | null>(null);
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
   const [alertDialogPrice, setAlertDialogPrice] = useState(0);
   /** Bumps when ChartEngine is (re)created so indicator reconcile runs against the new instance. */
@@ -680,7 +696,7 @@ export default function MiniChart({
   const isPositive = priceChange >= 0;
 
   // Alert evaluation and creation
-  const { addAlert, alerts } = useAlerts();
+  const { addAlert, removeAlert, alerts } = useAlerts();
   const chartAlerts = useMemo(
     () => alerts.filter((alert) => alert.symbol === symbol),
     [alerts, symbol],
@@ -707,7 +723,13 @@ export default function MiniChart({
     engine.setOnChartContextMenu((info) => {
       setAlertCtxMenu({ x: info.screenX, y: info.screenY, price: info.price });
     });
-    return () => { engine.setOnChartContextMenu(null); };
+    engine.setOnAlertContextMenu((info) => {
+      setAlertLineCtxMenu({ x: info.screenX, y: info.screenY, alertId: info.alertId });
+    });
+    return () => {
+      engine.setOnChartContextMenu(null);
+      engine.setOnAlertContextMenu(null);
+    };
   }, [engineVersion]);
 
   // Suspend ChartEngine RAF when scrolled off-screen (many dashboard tiles).
@@ -2454,7 +2476,7 @@ export default function MiniChart({
           }}
           style={{ cursor: yAxisHovered ? 'ns-resize' : 'crosshair' }}
         />
-        {alertCtxMenu && (
+        {alertCtxMenu && createPortal(
           <ChartContextMenu
             x={alertCtxMenu.x}
             y={alertCtxMenu.y}
@@ -2463,7 +2485,17 @@ export default function MiniChart({
               setAlertDialogOpen(true);
             }}
             onClose={() => setAlertCtxMenu(null)}
-          />
+          />,
+          document.body,
+        )}
+        {alertLineCtxMenu && createPortal(
+          <ChartContextMenu
+            x={alertLineCtxMenu.x}
+            y={alertLineCtxMenu.y}
+            onDeleteAlert={() => removeAlert(alertLineCtxMenu.alertId)}
+            onClose={() => setAlertLineCtxMenu(null)}
+          />,
+          document.body,
         )}
         <AlertDialog
           open={alertDialogOpen}

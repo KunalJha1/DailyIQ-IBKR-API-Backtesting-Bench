@@ -177,7 +177,7 @@ export default function SymbolSearchModal({
           <span className="text-center">Technical Score 1D</span>
         </div>
 
-        <div ref={listRef} className="scrollbar-dark flex-1 overflow-y-auto px-3 py-2">
+        <div ref={listRef} className="scrollbar-none flex-1 overflow-y-auto px-3 py-2">
           {filtered.map((s, idx) => {
             const techCell = techScores.get(s.symbol)?.get("1d") ?? null;
             const score = techCell?.score ?? null;
