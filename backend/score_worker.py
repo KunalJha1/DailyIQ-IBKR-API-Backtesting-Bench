@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -388,6 +389,16 @@ class TechnicalsScorer:
         self._targeted_task: asyncio.Task | None = None
         self._pending_refreshes: dict[str, set[str]] = {}
         self._pending_lock: asyncio.Lock | None = None
+        self._tws_connected_fn: Callable[[], bool] | None = None
+
+    def set_tws_connected_fn(self, fn: Callable[[], bool]) -> None:
+        """Inject a callable that returns True when IBKR/TWS is connected.
+
+        When connected, the scorer computes technicals locally from fresh IBKR bars.
+        When disconnected, local computation is skipped and DailyIQ pre-computed
+        scores (written by the universe scores refresh loop) serve as the fallback.
+        """
+        self._tws_connected_fn = fn
 
     def set_symbols(self, symbols: list[str]) -> None:
         self._symbols = _normalize_symbols(symbols)
@@ -477,19 +488,17 @@ class TechnicalsScorer:
 
         while True:
             loop = asyncio.get_event_loop()
+            tws_connected = self._tws_connected_fn() if self._tws_connected_fn else True
 
             priority_symbols = self._priority_symbols()
-            if priority_symbols:
+            if priority_symbols and tws_connected:
                 try:
                     await loop.run_in_executor(None, _compute_and_upsert, priority_symbols)
                 except Exception as exc:
                     logger.error("TechnicalsScorer priority tier error: %s", exc)
-
-            universe_batch = self._next_universe_batch(set(priority_symbols))
-            if universe_batch:
-                try:
-                    await loop.run_in_executor(None, _compute_and_upsert_universe, universe_batch)
-                except Exception as exc:
-                    logger.error("TechnicalsScorer universe tier error: %s", exc)
+            elif priority_symbols and not tws_connected:
+                logger.debug(
+                    "TechnicalsScorer skipping local compute — TWS disconnected, using DailyIQ fallback"
+                )
 
             await asyncio.sleep(INTERVAL_S)

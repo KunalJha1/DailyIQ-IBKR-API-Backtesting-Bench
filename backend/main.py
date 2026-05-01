@@ -1261,25 +1261,16 @@ _debug_events: deque[dict] = deque(maxlen=_DEBUG_EVENTS_MAX)
 _debug_events_lock = threading.Lock()
 _debug_event_seq = 0
 CHART_REFRESH_READ_LIMIT = 3
-DAILYIQ_LIVE_TTL_S = 55.0
-DAILYIQ_LIVE_LIMIT_1M = 390
-DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S = 60
-DAILYIQ_LIVE_INTRADAY_MAX_REFRESH_S = 300
+DAILYIQ_LIVE_TTL_S = 28.0
+DAILYIQ_LIVE_LIMIT_1M = 480        # 8 hrs of 1m bars — enough for 1h/4h aggregation
+DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S = 30
+DAILYIQ_LIVE_INTRADAY_MAX_REFRESH_S = 120
 DAILYIQ_LIVE_DAILY_REFRESH_S = 3600
-DAILYIQ_UNIVERSE_REFRESH_S = 900
-DAILYIQ_UNIVERSE_BATCH_SIZE = 60
-DAILYIQ_UNIVERSE_BATCH_PAUSE_S = 0.25
+DAILYIQ_UNIVERSE_SCORES_REFRESH_S = 900
+DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE = 200
 DAILYIQ_SENTIMENT_UNIVERSE_REFRESH_S = 300
 DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE = 100
 DAILYIQ_SENTIMENT_UNIVERSE_BATCH_PAUSE_S = 0.1
-DAILYIQ_UNIVERSE_BAR_LIMITS: dict[str, int] = {
-    "1m": 240,
-    "5m": 240,
-    "15m": 240,
-    "1h": 240,
-    "4h": 240,
-    "1d": 600,
-}
 _DAILYIQ_BAR_SECONDS: dict[str, int] = {
     "1m": 60,
     "5m": 300,
@@ -1355,43 +1346,34 @@ def _ordered_enabled_symbols(ticker_metadata: dict[str, dict], watchlist_symbols
     return ordered
 
 
-def _find_stale_universe_bar_pairs(symbols: list[str]) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    if not symbols:
-        return pairs
+def _write_dailyiq_scores(scores: dict[str, dict[str, int | None]]) -> int:
+    """Upsert DailyIQ pre-computed scores into technical_scores.
+
+    Only touches score_5m/15m/1d/1w — preserves locally-computed 1m/1h/4h values.
+    """
+    if not scores:
+        return 0
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     with sync_db_session() as conn:
-        for sym in symbols:
-            for bar_size in DAILYIQ_UNIVERSE_BAR_LIMITS:
-                ttl = CACHE_TTL_DAILY if bar_size == "1d" else CACHE_TTL
-                try:
-                    is_fresh, _, _ = _cache_fresh(conn, sym, bar_size, ttl)
-                except Exception:
-                    is_fresh = False
-                if not is_fresh:
-                    pairs.append((sym, bar_size))
-    return pairs
-
-
-def _write_dailyiq_bar_results(bar_results: list[tuple[str, str, list[dict]]]) -> dict[str, list[str]]:
-    refreshed: dict[str, list[str]] = {}
-    if not bar_results:
-        return refreshed
-    with sync_db_session() as conn:
-        for sym, bar_size, bars in bar_results:
-            normalized = _normalize_bar_size(bar_size)
-            if normalized not in DAILYIQ_UNIVERSE_BAR_LIMITS or not bars:
-                continue
-            _write_bars(conn, sym, bars, bar_size=normalized, source="dailyiq")
-            score_timeframes = ["1d", "1w"] if normalized == "1d" else [normalized]
-            refreshed.setdefault(sym, [])
-            for tf in score_timeframes:
-                if tf not in refreshed[sym]:
-                    refreshed[sym].append(tf)
-    return refreshed
-
-
-def _chunked_pairs(pairs: list[tuple[str, str]], size: int) -> list[list[tuple[str, str]]]:
-    return [pairs[i:i + size] for i in range(0, len(pairs), max(1, size))]
+        execute_many_with_retry(
+            conn,
+            """
+            INSERT INTO technical_scores
+                (symbol, score_5m, score_15m, score_1d, score_1w, last_updated_utc)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (symbol) DO UPDATE SET
+                score_5m         = COALESCE(excluded.score_5m, score_5m),
+                score_15m        = COALESCE(excluded.score_15m, score_15m),
+                score_1d         = COALESCE(excluded.score_1d, score_1d),
+                score_1w         = COALESCE(excluded.score_1w, score_1w),
+                last_updated_utc = excluded.last_updated_utc
+            """,
+            [
+                (sym, d["score_5m"], d["score_15m"], d["score_1d"], d["score_1w"], now_utc)
+                for sym, d in scores.items()
+            ],
+        )
+    return len(scores)
 
 
 def _build_chart_refresh_plan(intents: list[dict]) -> list[dict]:
@@ -1460,17 +1442,22 @@ def create_app() -> FastAPI:
         _app.state.pool = pool
 
         scorer.set_symbols(await run_db(read_watchlist_symbols))
-        sp500_symbols = [
-            sym for sym, meta in ticker_metadata.items()
-            if meta.get("enabled") and float(meta.get("sp500Weight") or 0) > 0
-        ]
-        scorer.set_universe(sp500_symbols)
+        scorer.set_tws_connected_fn(
+            lambda: bool(pool.get_role_status(PORTFOLIO_ROLE).get("connected"))
+        )
         scorer.start()
         options_worker.start()
 
         # Parent-death watchdog: if the Tauri host process dies unexpectedly
         # (crash, task-kill) the sidecar self-terminates so it doesn't linger
-        # as an orphan in Task Manager.
+        # as an orphan.
+        #
+        # Two complementary mechanisms:
+        #   1. PID poll (requires psutil + DAILYIQ_PARENT_PID env var)
+        #   2. stdin EOF watch — works whenever stdin is a pipe (Tauri, shell pipe, etc.)
+        #      Skipped in interactive terminals (isatty) so dev runs aren't affected.
+        import sys as _sys
+
         _parent_pid = int(os.environ.get("DAILYIQ_PARENT_PID", 0))
         if _parent_pid:
             import threading
@@ -1480,7 +1467,7 @@ def create_app() -> FastAPI:
             except ImportError:
                 _psutil = None  # type: ignore[assignment]
                 _psutil_ok = False
-                logger.warning("psutil not installed — parent-death watchdog disabled")
+                logger.warning("psutil not installed — PID watchdog disabled (stdin watchdog still active)")
 
             if _psutil_ok:
                 def _parent_watchdog() -> None:
@@ -1494,6 +1481,23 @@ def create_app() -> FastAPI:
                         threading.Event().wait(3)
 
                 threading.Thread(target=_parent_watchdog, daemon=True, name="parent-watchdog").start()
+
+        # stdin EOF watchdog — catches the case where the parent process dies without
+        # DAILYIQ_PARENT_PID being set (e.g. launched from a terminal that then closes).
+        # Only activates when stdin is a pipe, not a TTY, so interactive dev runs are safe.
+        if not _sys.stdin.isatty():
+            import threading as _threading
+
+            def _stdin_watchdog() -> None:
+                try:
+                    while _sys.stdin.read(256):
+                        pass
+                except Exception:
+                    pass
+                logger.info("stdin EOF — parent gone, sidecar shutting down")
+                os._exit(0)
+
+            _threading.Thread(target=_stdin_watchdog, daemon=True, name="stdin-watchdog").start()
 
         # Pre-warm persistent IB connection for portfolio reads
         port = await probe_tws_port(DEFAULT_TWS_HOST, DEFAULT_TWS_PORTS)
@@ -1527,35 +1531,43 @@ def create_app() -> FastAPI:
                 return sorted(buckets.values(), key=lambda x: x["time"])
 
             def _secs_until_next_boundary(bar_size: str) -> float:
-                """Seconds until the next bar closes for the given bar size."""
                 period = _DAILYIQ_BAR_SECONDS.get(bar_size, 60)
                 now = time.time()
                 return period - (now % period)
 
-            await asyncio.sleep(10)  # brief startup delay
+            def _tws_live() -> bool:
+                try:
+                    return bool(pool.get_role_status(PORTFOLIO_ROLE).get("connected"))
+                except Exception:
+                    return False
+
+            await asyncio.sleep(10)
             while True:
                 try:
+                    # When IBKR is connected it streams bars directly — no need to poll DailyIQ
+                    if _tws_live():
+                        await asyncio.sleep(30)
+                        continue
+
                     from dailyiq_provider import fetch_bars_from_dailyiq_async
                     fresh_intents = await run_db(_read_chart_refresh_intents, CHART_REFRESH_READ_LIMIT)
                     if not fresh_intents:
-                        await asyncio.sleep(30)  # nothing active yet
+                        await asyncio.sleep(30)
                         continue
 
                     refresh_plan = _build_chart_refresh_plan(fresh_intents)
-                    intraday_bar_sizes = [
+                    active_bar_sizes = {
                         _normalize_bar_size(intent["bar_size"])
                         for intent in fresh_intents
-                        if _is_intraday_bar_size(intent["bar_size"])
-                    ]
+                    }
+                    intraday_bar_sizes = [bs for bs in active_bar_sizes if _is_intraday_bar_size(bs)]
+
                     try:
                         for item in refresh_plan:
                             sym = item["symbol"]
                             if item["fetch_1d"]:
                                 bars = await fetch_bars_from_dailyiq_async(
-                                    sym,
-                                    timeframe="1d",
-                                    limit=50,
-                                    ttl_s=DAILYIQ_LIVE_TTL_S,
+                                    sym, timeframe="1d", limit=50, ttl_s=DAILYIQ_LIVE_TTL_S,
                                 )
                                 if bars:
                                     def _write_daily(s=sym, b=bars):
@@ -1564,37 +1576,37 @@ def create_app() -> FastAPI:
                                     await run_db(_write_daily)
                             if item["fetch_1m"]:
                                 bars_1m = await fetch_bars_from_dailyiq_async(
-                                    sym,
-                                    timeframe="1m",
-                                    limit=DAILYIQ_LIVE_LIMIT_1M,
+                                    sym, timeframe="1m", limit=DAILYIQ_LIVE_LIMIT_1M,
                                     ttl_s=DAILYIQ_LIVE_TTL_S,
                                 )
                                 if bars_1m:
-                                    bars_5m = _aggregate_1m(bars_1m, 5 * 60 * 1000)
+                                    bars_5m  = _aggregate_1m(bars_1m,  5 * 60 * 1000)
                                     bars_15m = _aggregate_1m(bars_1m, 15 * 60 * 1000)
-                                    def _write_intraday(s=sym, b1=bars_1m, b5=bars_5m, b15=bars_15m):
+                                    bars_1h  = _aggregate_1m(bars_1m, 60 * 60 * 1000)
+                                    bars_4h  = _aggregate_1m(bars_1m, 4 * 60 * 60 * 1000)
+                                    def _write_intraday(
+                                        s=sym, b1=bars_1m, b5=bars_5m, b15=bars_15m,
+                                        b1h=bars_1h, b4h=bars_4h,
+                                    ):
                                         with sync_db_session() as conn:
-                                            _write_bars(conn, s, b1, bar_size="1m", source="dailyiq", update_meta=False)
-                                            _write_bars(conn, s, b5, bar_size="5m", source="dailyiq", update_meta=False)
-                                            _write_bars(conn, s, b15, bar_size="15m", source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b1,   bar_size="1m",  source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b5,   bar_size="5m",  source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b15,  bar_size="15m", source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b1h,  bar_size="1h",  source="dailyiq", update_meta=False)
+                                            _write_bars(conn, s, b4h,  bar_size="4h",  source="dailyiq", update_meta=False)
                                     await run_db(_write_intraday)
-                        logger.debug("DailyIQ live refresh: %s", refresh_plan)
+                        logger.debug("DailyIQ live refresh: %s", [i["symbol"] for i in refresh_plan])
                     except Exception as exc:
                         logger.debug("DailyIQ live refresh failed for intents %s: %s", fresh_intents, exc)
 
                     if intraday_bar_sizes:
-                        period = min(_DAILYIQ_BAR_SECONDS.get(bar_size, 60) for bar_size in intraday_bar_sizes)
-                        refresh_s = max(
+                        period = min(_DAILYIQ_BAR_SECONDS.get(bs, 60) for bs in intraday_bar_sizes)
+                        sleep_s = max(
                             DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S,
-                            min(period, DAILYIQ_LIVE_INTRADAY_MAX_REFRESH_S),
+                            min(_secs_until_next_boundary(min(intraday_bar_sizes, key=lambda bs: _DAILYIQ_BAR_SECONDS.get(bs, 60))),
+                                DAILYIQ_LIVE_INTRADAY_MAX_REFRESH_S),
                         )
-                        boundary_wait = min(_secs_until_next_boundary(bar_size) for bar_size in intraday_bar_sizes)
-                        await asyncio.sleep(
-                            max(
-                                DAILYIQ_LIVE_INTRADAY_MIN_REFRESH_S,
-                                min(boundary_wait, refresh_s),
-                            )
-                        )
+                        await asyncio.sleep(sleep_s)
                     else:
                         await asyncio.sleep(DAILYIQ_LIVE_DAILY_REFRESH_S)
                 except Exception as exc:
@@ -1627,58 +1639,34 @@ def create_app() -> FastAPI:
             except Exception as exc:
                 logger.warning("[Warmup] DailyIQ quote pre-warm failed: %s", exc)
 
-        async def _dailyiq_universe_bar_refresh_loop() -> None:
+        async def _dailyiq_universe_scores_refresh_loop() -> None:
             await asyncio.sleep(12)
             while True:
                 try:
-                    from dailyiq_provider import fetch_bars_batch_concurrent
+                    from dailyiq_provider import fetch_scores_batch_from_dailyiq
 
                     watchlist_syms = await run_db(read_watchlist_symbols)
                     symbols = _ordered_enabled_symbols(ticker_metadata, watchlist_syms)
                     if not symbols:
-                        await asyncio.sleep(DAILYIQ_UNIVERSE_REFRESH_S)
+                        await asyncio.sleep(DAILYIQ_UNIVERSE_SCORES_REFRESH_S)
                         continue
 
-                    stale_pairs = await run_db(_find_stale_universe_bar_pairs, symbols)
-                    if not stale_pairs:
-                        logger.info("[UniverseWarmup] All DailyIQ bar series are fresh")
-                        await asyncio.sleep(DAILYIQ_UNIVERSE_REFRESH_S)
-                        continue
-
-                    logger.info(
-                        "[UniverseWarmup] Refreshing %d stale DailyIQ bar series across %d symbol(s)",
-                        len(stale_pairs),
-                        len({sym for sym, _ in stale_pairs}),
-                    )
+                    logger.info("[ScoresRefresh] Fetching DailyIQ scores for %d symbols", len(symbols))
                     loop = asyncio.get_event_loop()
-                    for bar_size, limit in DAILYIQ_UNIVERSE_BAR_LIMITS.items():
-                        tf_pairs = [(sym, tf) for sym, tf in stale_pairs if tf == bar_size]
-                        for chunk in _chunked_pairs(tf_pairs, DAILYIQ_UNIVERSE_BATCH_SIZE):
-                            bar_results = await loop.run_in_executor(
-                                None,
-                                lambda pairs=chunk, lim=limit: fetch_bars_batch_concurrent(pairs, limit=lim),
-                            )
-                            refreshed = await run_db(_write_dailyiq_bar_results, bar_results)
-                            if refreshed:
-                                score_tfs = sorted({
-                                    tf
-                                    for tfs in refreshed.values()
-                                    for tf in tfs
-                                })
-                                scorer.request_refresh(list(refreshed.keys()), score_tfs)
-                                total_bars = sum(len(bars) for _, _, bars in bar_results)
-                                logger.info(
-                                    "[UniverseWarmup] Persisted %d bars for %d %s series; queued score refresh for %s",
-                                    total_bars,
-                                    len(refreshed),
-                                    bar_size,
-                                    ",".join(score_tfs),
-                                )
-                            await asyncio.sleep(DAILYIQ_UNIVERSE_BATCH_PAUSE_S)
+                    total_updated = 0
+                    for i in range(0, len(symbols), DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE):
+                        chunk = symbols[i:i + DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE]
+                        scores = await loop.run_in_executor(
+                            None, fetch_scores_batch_from_dailyiq, chunk
+                        )
+                        if scores:
+                            updated = await run_db(_write_dailyiq_scores, scores)
+                            total_updated += updated
 
-                    await asyncio.sleep(DAILYIQ_UNIVERSE_REFRESH_S)
+                    logger.info("[ScoresRefresh] Updated scores for %d symbols", total_updated)
+                    await asyncio.sleep(DAILYIQ_UNIVERSE_SCORES_REFRESH_S)
                 except Exception as exc:
-                    logger.warning("[UniverseWarmup] DailyIQ universe bar refresh failed: %s", exc)
+                    logger.warning("[ScoresRefresh] DailyIQ scores refresh failed: %s", exc)
                     await asyncio.sleep(60)
 
         async def _dailyiq_universe_sentiment_refresh_loop() -> None:
@@ -1731,7 +1719,7 @@ def create_app() -> FastAPI:
 
         asyncio.create_task(_startup_quote_warmup())
         asyncio.create_task(_dailyiq_universe_sentiment_refresh_loop())
-        asyncio.create_task(_dailyiq_universe_bar_refresh_loop())
+        asyncio.create_task(_dailyiq_universe_scores_refresh_loop())
         asyncio.create_task(_dailyiq_live_refresh_loop())
 
         try:

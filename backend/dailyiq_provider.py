@@ -31,6 +31,7 @@ CACHE_TTL_BARS_LIVE = 90            # 90s — used when TWS is disconnected for 
 CACHE_TTL_BARS_DAILY = 21_600       # 6 hr
 CACHE_TTL_SNAPSHOT = 60             # 1 min
 CACHE_TTL_FUNDAMENTALS = 86_400     # 24 hr
+CACHE_TTL_SCORES = 600              # 10 min — pre-computed scores update on DailyIQ's own schedule
 
 # Supported bar timeframes
 SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d", "1w"}
@@ -749,6 +750,46 @@ def fetch_watchlist_quotes_from_dailyiq_concurrent(
     """Backward-compatible wrapper around the bulk DailyIQ quote endpoint."""
     _ = max_workers
     return fetch_watchlist_quotes_from_dailyiq(list(symbols))
+
+
+def fetch_scores_batch_from_dailyiq(symbols: list[str]) -> dict[str, dict[str, int | None]]:
+    """Fetch pre-computed technical scores for multiple symbols from DailyIQ.
+
+    Returns {symbol: {score_5m, score_15m, score_1d, score_1w, sentiment_score}}.
+    Scores are None when DailyIQ has not computed them yet.
+    """
+    sanitized = [(sym or "").strip().upper() for sym in symbols if (sym or "").strip()]
+    if not sanitized:
+        return {}
+
+    data = _dailyiq_post_json(
+        "scores/batch",
+        json_body={"symbols": sanitized},
+        ttl_s=CACHE_TTL_SCORES,
+    )
+    if not isinstance(data, dict):
+        return {}
+
+    result: dict[str, dict[str, int | None]] = {}
+    for sym in sanitized:
+        item = data.get(sym)
+        if not isinstance(item, dict):
+            continue
+        def _int_or_none(v) -> int | None:
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        result[sym] = {
+            "score_5m": _int_or_none(item.get("score5m")),
+            "score_15m": _int_or_none(item.get("score15m")),
+            "score_1d": _int_or_none(item.get("score1d")),
+            "score_1w": _int_or_none(item.get("score1w")),
+            "sentiment_score": _int_or_none(item.get("sentimentScore")),
+        }
+    return result
 
 
 def fetch_bars_batch_concurrent(
