@@ -313,6 +313,20 @@ def _dedupe_bars(bars: list[dict]) -> list[dict]:
     return [deduped[ts] for ts in sorted(deduped)]
 
 
+_MS_PER_DAY = 86_400_000
+
+
+def _normalize_daily_ts(ts_ms: int) -> int:
+    """Floor a daily/weekly bar timestamp to midnight UTC.
+
+    TWS returns daily bars timestamped at market close (e.g. 20:00 UTC) while
+    DailyIQ/Yahoo use midnight UTC for the same trading day.  Normalizing to
+    midnight ensures a consistent primary key so INSERT OR REPLACE/IGNORE
+    deduplication works correctly across sources.
+    """
+    return (ts_ms // _MS_PER_DAY) * _MS_PER_DAY
+
+
 def _days_to_ib_duration(days: int, is_daily: bool) -> str:
     _min = MIN_INCREMENTAL_DAILY_DAYS if is_daily else MIN_INCREMENTAL_DAYS
     days = max(_min, int(days))
@@ -815,7 +829,12 @@ def _read_cached(conn: sqlite3.Connection, symbol: str, limit_days: int = 5, tab
             for r in rows
         ]
 
-    # For daily bars, fill in any days that have 1m data but no ohlcv_1d entry.
+    # For daily bars: normalize timestamps to midnight UTC (fixes legacy rows
+    # written by TWS at close-of-day), dedupe, then gap-fill from 1m data.
+    if table in ("ohlcv_1d", "ohlcv_1w"):
+        for b in bars:
+            b["time"] = _normalize_daily_ts(b["time"])
+        bars = _dedupe_bars(bars)
     if table == "ohlcv_1d":
         bars = _fill_daily_gaps_from_1m(conn, symbol, cutoff_ms, bars)
 
@@ -947,14 +966,23 @@ def _read_cached_window(
         rows = conn.execute(query, params).fetchall()
 
     if has_synthetic:
-        return [
+        bars = [
             {"time": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5], "synthetic": bool(r[6])}
             for r in rows
         ]
-    return [
-        {"time": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
-        for r in rows
-    ]
+    else:
+        bars = [
+            {"time": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
+            for r in rows
+        ]
+
+    # Normalize daily/weekly timestamps to midnight UTC and dedupe.
+    if table in ("ohlcv_1d", "ohlcv_1w"):
+        for b in bars:
+            b["time"] = _normalize_daily_ts(b["time"])
+        bars = _dedupe_bars(bars)
+
+    return bars
 
 
 def _cached_extent(
@@ -1131,6 +1159,12 @@ def _write_bars(
     table = _table_for_series(bar_size, what_to_show)
     cache_key = _cache_key_for_series(bar_size, what_to_show)
     synthetic_flag = 1 if synthetic else 0
+
+    # Normalize daily/weekly bar timestamps to midnight UTC so bars from
+    # different sources (TWS uses close-of-day, DailyIQ/Yahoo use midnight)
+    # share the same primary key and don't create duplicate rows.
+    if bar_size in ("1d", "1w"):
+        bars = [{**b, "time": _normalize_daily_ts(b["time"])} for b in bars]
 
     # Only intraday tables carry the synthetic column; daily/5s tables do not.
     _synthetic_tables = {"ohlcv_1m", "ohlcv_5m", "ohlcv_15m"}
