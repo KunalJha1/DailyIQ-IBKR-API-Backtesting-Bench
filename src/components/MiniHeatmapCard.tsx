@@ -20,6 +20,7 @@ import {
   type HeatmapTile,
   type Rect,
   type LayoutRect,
+  type SectorBound,
   formatTileMetricValue,
   squarify,
   formatPrice,
@@ -135,10 +136,11 @@ function MiniHeatmapCard({
     return () => observer.disconnect();
   }, []);
 
-  // Layout tiles grouped by sector (no sector headers in mini view)
-  const tileRects = useMemo(() => {
+  // Layout tiles grouped by sector
+  const layout = useMemo(() => {
     const { width, height } = containerSize;
-    if (width === 0 || height === 0 || tiles.length === 0) return [] as LayoutRect[];
+    if (width === 0 || height === 0 || tiles.length === 0)
+      return { tileRects: [] as LayoutRect[], sectorBounds: [] as SectorBound[] };
 
     const sectorMap = new Map<string, HeatmapTile[]>();
     for (const tile of tiles) {
@@ -149,7 +151,8 @@ function MiniHeatmapCard({
     }
 
     const sectorItems = Array.from(sectorMap.entries())
-      .map(([, items]) => ({
+      .map(([sector, items]) => ({
+        sector,
         items: [...items].sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0)),
         totalMarketCap: items.reduce(
           (sum, tile) => sum + Math.max(tile.marketCap ?? tile.sp500Weight * 1e12, 1),
@@ -158,7 +161,6 @@ function MiniHeatmapCard({
       }))
       .sort((a, b) => b.totalMarketCap - a.totalMarketCap);
 
-    // Lay out sectors first, then tiles within each sector
     const sectorRects = squarify(
       sectorItems.map((s) => ({
         value: s.totalMarketCap,
@@ -167,17 +169,36 @@ function MiniHeatmapCard({
       { x: 0, y: 0, w: width, h: height },
     );
 
-    const result: LayoutRect[] = [];
+    const tileRects: LayoutRect[] = [];
+    const sectorBounds: SectorBound[] = [];
+
     sectorItems.forEach((sectorInfo, index) => {
       const sectorRect = sectorRects[index];
       if (!sectorRect) return;
 
-      const inner: Rect = {
-        x: sectorRect.x + 0.5,
-        y: sectorRect.y + 0.5,
-        w: Math.max(sectorRect.w - 1, 0),
-        h: Math.max(sectorRect.h - 1, 0),
+      const outerGap = 1;
+      const shell: Rect = {
+        x: sectorRect.x + outerGap,
+        y: sectorRect.y + outerGap,
+        w: Math.max(sectorRect.w - outerGap * 2, 0),
+        h: Math.max(sectorRect.h - outerGap * 2, 0),
       };
+
+      const headerHeight = shell.w > 80 && shell.h > 32 ? 14 : 0;
+      const inner: Rect = {
+        x: shell.x,
+        y: shell.y + headerHeight,
+        w: shell.w,
+        h: Math.max(shell.h - headerHeight, 0),
+      };
+
+      sectorBounds.push({
+        ...shell,
+        sector: sectorInfo.sector,
+        totalMarketCap: sectorInfo.totalMarketCap,
+        count: sectorInfo.items.length,
+        headerHeight,
+      });
 
       const rects = squarify(
         sectorInfo.items.map((tile) => ({
@@ -193,11 +214,13 @@ function MiniHeatmapCard({
         h: Math.max(rect.h - 1, 0),
       }));
 
-      result.push(...rects);
+      tileRects.push(...rects);
     });
 
-    return result;
+    return { tileRects, sectorBounds };
   }, [tiles, containerSize]);
+
+  const { tileRects, sectorBounds } = layout;
 
   const handleMouseMove = (e: React.MouseEvent, tile: HeatmapTile) => {
     const container = containerRef.current;
@@ -346,6 +369,44 @@ function MiniHeatmapCard({
           </div>
         ) : (
           <>
+            {/* Sector shells */}
+            {sectorBounds.map((sector) => (
+              <div
+                key={`${sector.sector}-shell`}
+                className="pointer-events-none absolute border border-[#2b313a]"
+                style={{
+                  left: sector.x,
+                  top: sector.y,
+                  width: sector.w,
+                  height: sector.h,
+                }}
+              />
+            ))}
+
+            {/* Sector header bars */}
+            {sectorBounds.map((sector) => {
+              if (sector.headerHeight === 0) return null;
+              return (
+                <div
+                  key={`${sector.sector}-header`}
+                  className="pointer-events-none absolute flex items-center border border-[#2b313a] bg-[#2a2f36] px-1.5"
+                  style={{
+                    left: sector.x,
+                    top: sector.y,
+                    width: sector.w,
+                    height: sector.headerHeight,
+                  }}
+                >
+                  <span
+                    className="truncate font-sans font-semibold uppercase tracking-[0.07em] text-white/75"
+                    style={{ fontSize: 9 }}
+                  >
+                    {sector.sector}
+                  </span>
+                </div>
+              );
+            })}
+
             {tileRects.map((rect) => {
               const area = rect.w * rect.h;
               const showSymbol = area > 600 || (rect.w > 22 && rect.h > 12);

@@ -662,6 +662,8 @@ def _quote_from_dailyiq_price_payload(symbol: str, data: dict) -> dict | None:
     prev_close = round(price - change, 4) if price_raw is not None else 0.0
 
     session = str(data.get("session") or "")
+    # "post" is an alias the API returns for after-hours
+    session = "afterHours" if session == "post" else session
     session_map = {
         "preMarket": data.get("preMarket"),
         "regular": data.get("regular"),

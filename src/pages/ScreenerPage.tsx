@@ -7,6 +7,7 @@ import {
   memo,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { open } from "@tauri-apps/api/shell";
 import { useSidecarPort } from "../lib/tws";
 import { useWatchlist } from "../lib/watchlist";
 import { formatMarketCap } from "../lib/market-data";
@@ -369,7 +370,7 @@ const ScreenerTableRow = memo(function ScreenerTableRow({
   return (
     <tr
       className="group cursor-pointer border-b border-white/[0.06] bg-panel/70 transition-colors duration-[80ms] odd:bg-panel even:bg-base/80 hover:bg-white/[0.04]"
-      onClick={() => window.open(dailyiqInstrumentHref(row.sector, row.symbol), "_blank", "noopener,noreferrer")}
+      onClick={() => open(dailyiqInstrumentHref(row.sector, row.symbol))}
     >
       {/* Symbol */}
       <td className="min-w-0 px-3 py-2 align-top" style={tw(colWidths.symbol)}>
