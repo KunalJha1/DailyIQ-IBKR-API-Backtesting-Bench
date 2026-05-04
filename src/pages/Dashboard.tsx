@@ -20,6 +20,7 @@ const ChartPage = React.lazy(() => import("./ChartPage"));
 const OptionsPage = React.lazy(() => import("./OptionsPage"));
 const BacktestPage = React.lazy(() => import("./BacktestPage"));
 const SimulationsPage = React.lazy(() => import("./SimulationsPage"));
+const ModelTrainerPage = React.lazy(() => import("./ModelTrainerPage"));
 const HeatmapPage = React.lazy(() => import("./HeatmapPage"));
 const MarketBiasPage = React.lazy(() => import("./MarketBiasPage"));
 
@@ -30,6 +31,7 @@ const pageByType: Record<TabType, React.LazyExoticComponent<React.FC<{ tabId?: s
   options: OptionsPage,
   backtest: BacktestPage,
   simulations: SimulationsPage,
+  "model-trainer": ModelTrainerPage,
   heatmap: HeatmapPage,
   bias: MarketBiasPage,
 };

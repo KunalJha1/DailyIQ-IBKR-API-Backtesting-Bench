@@ -9,7 +9,21 @@ import type { Timeframe, ChartType, ActiveIndicator, YScaleMode, ChartLayout, Su
 import {
   createDefaultProbEngWidgetState,
   type ProbEngWidgetState,
+  type TechnicalTableWidgetState,
 } from '../../lib/chart-state';
+import {
+  fetchTableBars,
+  tableResampleBars,
+  computeTechnicalTableRowFromBars,
+  computeLiquidityTableSnapshot,
+  yieldTechnicalTableWork,
+  type TechnicalTableSnapshot,
+  type LiquidityTableSnapshot,
+  DIQ_TABLE_FETCH_LIMITS,
+} from '../../lib/table-overlay';
+import DailyIQTechnicalTableOverlay from './DailyIQTechnicalTableOverlay';
+import DailyIQLiquidityTableOverlay from './DailyIQLiquidityTableOverlay';
+import type { TechnicalTableResizeCorner } from './DailyIQTechnicalTableOverlay';
 import {
   probEngHasNorm,
   probEngNormFromPixel,
@@ -18,7 +32,7 @@ import {
 import { PRICE_AXIS_CONTROL_HEIGHT, PRICE_AXIS_WIDTH, VOLUME_PANE_RATIO } from '../constants';
 import { useSidecarPort } from '../../lib/tws';
 import { linkBus } from '../../lib/link-bus';
-import { X, ChevronDown, ChevronUp, Search, TrendingUp, BrainCircuit, RotateCcw, Minus, Maximize2, ChevronsUpDown, GripHorizontal, Lock, Unlock } from 'lucide-react';
+import { X, ChevronDown, ChevronUp, Search, TrendingUp, BrainCircuit, Minus, Maximize2, ChevronsUpDown, GripHorizontal, Lock, Unlock } from 'lucide-react';
 import ComponentLinkMenu from '../../components/ComponentLinkMenu';
 import ScrollArea from '../../components/ScrollArea';
 import IndicatorLegend from './IndicatorLegend';
@@ -43,16 +57,25 @@ interface MiniChartProps {
 const MINI_TIMEFRAMES: { label: string; value: Timeframe }[] = [
   { label: '1m',  value: '1m'  },
   { label: '2m',  value: '2m'  },
+  { label: '3m',  value: '3m'  },
   { label: '5m',  value: '5m'  },
   { label: '10m', value: '10m' },
   { label: '15m', value: '15m' },
   { label: '30m', value: '30m' },
   { label: '1h',  value: '1H'  },
+  { label: '2h',  value: '2H'  },
+  { label: '3h',  value: '3H'  },
   { label: '4h',  value: '4H'  },
   { label: '1d',  value: '1D'  },
+  { label: '3d',  value: '3D'  },
   { label: '1w',  value: '1W'  },
   { label: '1M',  value: '1M'  },
+  { label: '3M',  value: '3M'  },
+  { label: '6M',  value: '6M'  },
+  { label: '12M', value: '12M' },
 ];
+
+const MINI_TF_DROPDOWN_VALUES = new Set<Timeframe>(['3D', '1W', '1M', '3M', '6M', '12M']);
 
 const CHART_TYPES: { label: string; short: string; value: ChartType }[] = [
   { label: 'Candlestick', short: 'Candle', value: 'candlestick' },
@@ -349,6 +372,97 @@ const INDICATOR_CATEGORIES = [
 
 const HIDDEN_INDICATOR_KEYS = new Set<string>(['Gap Zones']);
 
+// ── Mini table overlay constants (smaller than ChartPage) ────────────────────
+
+const MINI_TECH_TABLE_MIN_WIDTH = 240;
+const MINI_TECH_TABLE_MAX_WIDTH = 480;
+const MINI_TECH_TABLE_MIN_HEIGHT = 150;
+const MINI_TECH_TABLE_MAX_HEIGHT = 360;
+const MINI_LIQ_TABLE_MIN_WIDTH = 280;
+const MINI_LIQ_TABLE_MIN_HEIGHT = 160;
+const MINI_TABLE_EDGE_PADDING = 4;
+const MINI_TABLE_DRAG_THRESHOLD = 4;
+const MINI_TABLE_RESIZE_THRESHOLD = 3;
+
+function miniTableDragBounds(
+  widget: TechnicalTableWidgetState,
+  minW: number, maxW: number, minH: number, maxH: number,
+  layout: ChartLayout, hostWidth: number, hostHeight: number,
+) {
+  const w = Math.max(minW, Math.min(maxW, widget.width));
+  const h = Math.max(minH, Math.min(maxH, widget.height));
+  const minX = MINI_TABLE_EDGE_PADDING;
+  const maxX = Math.max(minX, hostWidth - layout.priceAxisWidth - w - MINI_TABLE_EDGE_PADDING);
+  const minY = layout.mainTop + MINI_TABLE_EDGE_PADDING;
+  const maxY = Math.max(minY, hostHeight - layout.timeAxisHeight - h - MINI_TABLE_EDGE_PADDING);
+  return { minX, maxX, minY, maxY, w, h };
+}
+
+function miniTableClamp(
+  widget: TechnicalTableWidgetState,
+  minW: number, maxW: number, minH: number, maxH: number,
+  layout: ChartLayout | null, hostWidth: number, hostHeight: number,
+): TechnicalTableWidgetState {
+  if (!layout) return widget;
+  const { minX, maxX, minY, maxY, w, h } = miniTableDragBounds(widget, minW, maxW, minH, maxH, layout, hostWidth, hostHeight);
+  return {
+    ...widget, width: w, height: h,
+    x: Math.round(Math.min(Math.max(widget.x, minX), maxX)),
+    y: Math.round(Math.min(Math.max(widget.y, minY), maxY)),
+  };
+}
+
+function miniTableResize(
+  widget: TechnicalTableWidgetState,
+  corner: TechnicalTableResizeCorner,
+  deltaX: number, deltaY: number,
+  minW: number, maxW: number, minH: number, maxH: number,
+  layout: ChartLayout, hostWidth: number, hostHeight: number,
+): TechnicalTableWidgetState {
+  const leftLimit = MINI_TABLE_EDGE_PADDING;
+  const topLimit = layout.mainTop + MINI_TABLE_EDGE_PADDING;
+  const rightLimit = hostWidth - layout.priceAxisWidth - MINI_TABLE_EDGE_PADDING;
+  const bottomLimit = hostHeight - layout.timeAxisHeight - MINI_TABLE_EDGE_PADDING;
+  const startRight = widget.x + widget.width;
+  const startBottom = widget.y + widget.height;
+  const resizeLeft = corner === 'top-left' || corner === 'bottom-left';
+  const resizeTop = corner === 'top-left' || corner === 'top-right';
+  const aspectRatio = widget.width / widget.height;
+  const widthDelta = resizeLeft ? -deltaX : deltaX;
+  const heightDelta = resizeTop ? -deltaY : deltaY;
+  const widthScale = (widget.width + widthDelta) / widget.width;
+  const heightScale = (widget.height + heightDelta) / widget.height;
+  const requestedScale = Math.min(widthScale, heightScale);
+  const maxWidthFromBounds = resizeLeft ? startRight - leftLimit : rightLimit - widget.x;
+  const maxHeightFromBounds = resizeTop ? startBottom - topLimit : bottomLimit - widget.y;
+  const maxScale = Math.min(maxW / widget.width, maxH / widget.height, maxWidthFromBounds / widget.width, maxHeightFromBounds / widget.height);
+  const minScale = Math.max(minW / widget.width, minH / widget.height);
+  const safeScale = Math.min(maxScale, Math.max(minScale, requestedScale));
+  const width = Math.round(widget.width * safeScale);
+  const height = Math.round(width / aspectRatio);
+  const x = resizeLeft ? startRight - width : widget.x;
+  const y = resizeTop ? startBottom - height : widget.y;
+  return miniTableClamp({ ...widget, x, y, width, height }, minW, maxW, minH, maxH, layout, hostWidth, hostHeight);
+}
+
+function parseMiniTableWidget(
+  value: unknown,
+  defaults: { x: number; y: number; width: number; height: number },
+): TechnicalTableWidgetState {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const v = value as Record<string, unknown>;
+    return {
+      x: typeof v.x === 'number' ? v.x : defaults.x,
+      y: typeof v.y === 'number' ? v.y : defaults.y,
+      width: typeof v.width === 'number' ? v.width : defaults.width,
+      height: typeof v.height === 'number' ? v.height : defaults.height,
+      visible: typeof v.visible === 'boolean' ? v.visible : true,
+      locked: typeof v.locked === 'boolean' ? v.locked : false,
+    };
+  }
+  return { ...defaults, visible: true, locked: false };
+}
+
 interface PersistedMiniIndicator {
   name: string;
   paneId: string;
@@ -591,6 +705,7 @@ export default function MiniChart({
   const yScaleMode = (config.yScaleMode as YScaleMode) || 'auto';
 
   const [showChartTypeMenu, setShowChartTypeMenu] = useState(false);
+  const [showTimeframeMenu, setShowTimeframeMenu] = useState(false);
   const [showIndicatorMenu, setShowIndicatorMenu] = useState(false);
   const [showStrategyMenu, setShowStrategyMenu] = useState(false);
   const [showScriptEditor, setShowScriptEditor] = useState(false);
@@ -604,7 +719,7 @@ export default function MiniChart({
   const [alertDialogPrice, setAlertDialogPrice] = useState(0);
   /** Bumps when ChartEngine is (re)created so indicator reconcile runs against the new instance. */
   const [engineVersion, setEngineVersion] = useState(0);
-  const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
+  const [toolbarCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [paneLayout, setPaneLayout] = useState<MiniPaneLayoutRow[]>([]);
   const [priceSectionHeight, setPriceSectionHeight] = useState(0);
@@ -619,6 +734,27 @@ export default function MiniChart({
   const [chartLayout, setChartLayout] = useState<ChartLayout | null>(null);
   const [probEngWidget, setProbEngWidget] = useState<ProbEngWidgetState>(() => parseProbEngWidgetState(config.probEngWidget));
   const [probEngDragging, setProbEngDragging] = useState(false);
+
+  // ── Table overlay state ────────────────────────────────────────────
+  const [techTableWidget, setTechTableWidget] = useState<TechnicalTableWidgetState>(() =>
+    parseMiniTableWidget(config.miniTechTable, { x: 8, y: 36, width: 260, height: 200 }),
+  );
+  const [liqTableWidget, setLiqTableWidget] = useState<TechnicalTableWidgetState>(() =>
+    parseMiniTableWidget(config.miniLiqTable, { x: 8, y: 36, width: 300, height: 200 }),
+  );
+  const [techTableDragging, setTechTableDragging] = useState(false);
+  const [liqTableDragging, setLiqTableDragging] = useState(false);
+  const [techTableResizing, setTechTableResizing] = useState(false);
+  const [liqTableResizing, setLiqTableResizing] = useState(false);
+  const [techTableSnapshot, setTechTableSnapshot] = useState<TechnicalTableSnapshot | null>(null);
+  const [liqTableSnapshot, setLiqTableSnapshot] = useState<LiquidityTableSnapshot | null>(null);
+  const techTableDragRef = useRef<{ pointerId: number; target: HTMLDivElement; offsetX: number; offsetY: number; startClientX: number; startClientY: number; moved: boolean } | null>(null);
+  const liqTableDragRef = useRef<{ pointerId: number; target: HTMLDivElement; offsetX: number; offsetY: number; startClientX: number; startClientY: number; moved: boolean } | null>(null);
+  const techTableResizeRef = useRef<{ pointerId: number; target: HTMLDivElement; startClientX: number; startClientY: number; startX: number; startY: number; startWidth: number; startHeight: number; corner: TechnicalTableResizeCorner; moved: boolean } | null>(null);
+  const liqTableResizeRef = useRef<{ pointerId: number; target: HTMLDivElement; startClientX: number; startClientY: number; startX: number; startY: number; startWidth: number; startHeight: number; corner: TechnicalTableResizeCorner; moved: boolean } | null>(null);
+  const techTableSnapshotCacheRef = useRef<{ key: string; snapshot: TechnicalTableSnapshot } | null>(null);
+  const liqTableSnapshotCacheRef = useRef<{ key: string; snapshot: LiquidityTableSnapshot } | null>(null);
+
   const probEngDragRef = useRef<{
     pointerId: number;
     offsetX: number;
@@ -634,10 +770,23 @@ export default function MiniChart({
   } | null>(null);
 
   const chartTypeMenuRef = useRef<HTMLDivElement>(null);
+  const timeframeMenuRef = useRef<HTMLDivElement>(null);
   const indicatorMenuRef = useRef<HTMLDivElement>(null);
   const strategyMenuRef = useRef<HTMLDivElement>(null);
   const indicatorSearchRef = useRef<HTMLInputElement>(null);
   const strategySearchRef = useRef<HTMLInputElement>(null);
+
+  const miniTfLayout = useMemo(() => {
+    return {
+      visible: MINI_TIMEFRAMES.filter(tf => !MINI_TF_DROPDOWN_VALUES.has(tf.value)),
+      hidden: MINI_TIMEFRAMES.filter(tf => MINI_TF_DROPDOWN_VALUES.has(tf.value)),
+    };
+  }, []);
+
+  const hiddenMiniTfs = miniTfLayout.hidden;
+  const visibleMiniTfs = miniTfLayout.visible;
+  const activeHiddenTimeframe = hiddenMiniTfs.some(tf => tf.value === timeframe);
+
 
   // Pull real data from the sidecar (same path as ChartPage)
   const sidecarPort = useSidecarPort();
@@ -962,6 +1111,9 @@ export default function MiniChart({
       if (chartTypeMenuRef.current && !chartTypeMenuRef.current.contains(e.target as Node)) {
         setShowChartTypeMenu(false);
       }
+      if (timeframeMenuRef.current && !timeframeMenuRef.current.contains(e.target as Node)) {
+        setShowTimeframeMenu(false);
+      }
       if (indicatorMenuRef.current && !indicatorMenuRef.current.contains(e.target as Node)) {
         setShowIndicatorMenu(false);
         setIndicatorSearch('');
@@ -1086,6 +1238,19 @@ export default function MiniChart({
   const activeProbEngIndicator = activeIndicators.find(
     (indicator) => indicator.name === 'Probability Engine' && indicator.visible,
   );
+  const activeTechTableIndicator = activeIndicators.find(
+    (ind) => ind.name === 'DailyIQ Technical Table' && ind.visible,
+  );
+  const activeLiqTableIndicator = activeIndicators.find(
+    (ind) => (ind.name === 'DailyIQ Liquidity Sweep Table' || ind.name === 'Liquidity Sweep Signal') && ind.visible,
+  );
+  const techTableFastLen = Math.max(1, Math.round(activeTechTableIndicator?.params.fastLen ?? 5));
+  const techTableSlowLen = Math.max(techTableFastLen + 1, Math.round(activeTechTableIndicator?.params.slowLen ?? 20));
+  const techTableTrendLen = Math.max(1, Math.round(activeTechTableIndicator?.params.trendLen ?? 50));
+  const liqTableAtrLen = Math.max(1, Math.round(activeLiqTableIndicator?.params.atrLen ?? 14));
+  const liqTableTargetAtr = Math.max(0.1, activeLiqTableIndicator?.params.targetAtrMult ?? 1);
+  const liqTableNearPct = Math.max(0.1, activeLiqTableIndicator?.params.nearLevelPct ?? 0.5);
+  const liqTableHighlightNearLevels = (activeLiqTableIndicator?.params.highlightNearLevels ?? 1) >= 0.5;
 
   useEffect(() => {
     if (probEngDragRef.current) return;
@@ -1103,6 +1268,113 @@ export default function MiniChart({
     if (probEngWidgetStateEqual(current, probEngWidget)) return;
     onConfigChange({ ...configRef.current, probEngWidget: probEngWidget });
   }, [probEngWidget, onConfigChange]);
+
+  // Persist table widget positions to config
+  useEffect(() => {
+    onConfigChange({ ...configRef.current, miniTechTable: techTableWidget });
+  }, [techTableWidget, onConfigChange]);
+
+  useEffect(() => {
+    onConfigChange({ ...configRef.current, miniLiqTable: liqTableWidget });
+  }, [liqTableWidget, onConfigChange]);
+
+  // Technical table data fetching
+  useEffect(() => {
+    if (!sidecarPort || !symbol.trim() || !activeTechTableIndicator) {
+      setTechTableSnapshot(null);
+      techTableSnapshotCacheRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    const pullSnapshot = async () => {
+      try {
+        const sym = symbol.trim().toUpperCase();
+        const [raw1m, raw5m, raw15m, raw1d] = await Promise.all([
+          fetchTableBars(sidecarPort, sym, '1 min', '5 D', DIQ_TABLE_FETCH_LIMITS.oneMin),
+          fetchTableBars(sidecarPort, sym, '5 mins', '90 D', DIQ_TABLE_FETCH_LIMITS.fiveMin),
+          fetchTableBars(sidecarPort, sym, '15 mins', '270 D', DIQ_TABLE_FETCH_LIMITS.fifteenMin),
+          fetchTableBars(sidecarPort, sym, '1 day', '5 Y', DIQ_TABLE_FETCH_LIMITS.daily),
+        ]);
+        if (cancelled) return;
+        const latestTime = (items: Array<{ time: number }>) => items.length > 0 ? items[items.length - 1].time : 0;
+        const cacheKey = [sym, techTableFastLen, techTableSlowLen, techTableTrendLen, raw1m.length, latestTime(raw1m), raw5m.length, latestTime(raw5m), raw15m.length, latestTime(raw15m), raw1d.length, latestTime(raw1d)].join('|');
+        if (techTableSnapshotCacheRef.current?.key === cacheKey) {
+          setTechTableSnapshot(techTableSnapshotCacheRef.current.snapshot);
+          return;
+        }
+        await yieldTechnicalTableWork();
+        if (cancelled) return;
+        const bars1m = raw1m;
+        const bars5m = raw5m.length > 0 ? raw5m : tableResampleBars(bars1m, '5m');
+        const bars15m = raw15m.length > 0 ? raw15m : tableResampleBars(bars5m, '15m');
+        const bars1d = raw1d.length > 0 ? raw1d : tableResampleBars(bars15m, '1D');
+        const bars30m = tableResampleBars(bars15m, '30m');
+        const bars1h = tableResampleBars(bars15m, '1H');
+        const bars4h = tableResampleBars(bars15m, '4H');
+        const bars1w = tableResampleBars(bars1d, '1W');
+        await yieldTechnicalTableWork();
+        if (cancelled) return;
+        const rows = [
+          computeTechnicalTableRowFromBars('1m', bars1m, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('5m', bars5m, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('15m', bars15m, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('30m', bars30m, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('1H', bars1h, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('4H', bars4h, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('1D', bars1d, techTableFastLen, techTableSlowLen, techTableTrendLen),
+          computeTechnicalTableRowFromBars('1W', bars1w, techTableFastLen, techTableSlowLen, techTableTrendLen),
+        ];
+        let bullCount = 0, bearCount = 0, strengthSum = 0, strengthCount = 0, chopSum = 0, chopCount = 0, rsiSum = 0, rsiCount = 0, macdBull = 0, macdBear = 0;
+        for (const row of rows) {
+          if (row.trend === 1) bullCount += 1; else if (row.trend === -1) bearCount += 1;
+          if (Number.isFinite(row.strength)) { strengthSum += row.strength; strengthCount += 1; }
+          if (Number.isFinite(row.chop)) { chopSum += row.chop; chopCount += 1; }
+          if (Number.isFinite(row.rsiNow)) { rsiSum += row.rsiNow; rsiCount += 1; }
+          if (Number.isFinite(row.macdNow) && Number.isFinite(row.macdSignal)) { if (row.macdNow > row.macdSignal) macdBull += 1; else if (row.macdNow < row.macdSignal) macdBear += 1; }
+        }
+        const snapshot: TechnicalTableSnapshot = {
+          rows,
+          overallTrend: bullCount > bearCount ? 1 : bearCount > bullCount ? -1 : 0,
+          overallStrength: strengthCount > 0 ? strengthSum / strengthCount : NaN,
+          overallChop: chopCount > 0 ? chopSum / chopCount : NaN,
+          overallRsi: rsiCount > 0 ? rsiSum / rsiCount : NaN,
+          overallMacdState: macdBull > macdBear ? 1 : macdBear > macdBull ? -1 : 0,
+        };
+        if (!cancelled) { techTableSnapshotCacheRef.current = { key: cacheKey, snapshot }; setTechTableSnapshot(snapshot); }
+      } catch { if (!cancelled) setTechTableSnapshot(null); }
+    };
+    pullSnapshot();
+    const interval = window.setInterval(pullSnapshot, 60_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [activeTechTableIndicator?.id, sidecarPort, symbol, techTableFastLen, techTableSlowLen, techTableTrendLen]);
+
+  // Liquidity table data fetching
+  useEffect(() => {
+    if (!sidecarPort || !symbol.trim() || !activeLiqTableIndicator) {
+      setLiqTableSnapshot(null);
+      liqTableSnapshotCacheRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    const pullSnapshot = async () => {
+      try {
+        const sym = symbol.trim().toUpperCase();
+        const [bars15m, bars1d] = await Promise.all([
+          fetchTableBars(sidecarPort, sym, '15 mins', '270 D', DIQ_TABLE_FETCH_LIMITS.fifteenMin),
+          fetchTableBars(sidecarPort, sym, '1 day', '5 Y', DIQ_TABLE_FETCH_LIMITS.daily),
+        ]);
+        if (cancelled) return;
+        const latestTime = (items: Array<{ time: number }>) => items.length > 0 ? items[items.length - 1].time : 0;
+        const cacheKey = [sym, liqTableAtrLen, liqTableTargetAtr, liqTableNearPct, liqTableHighlightNearLevels ? 1 : 0, bars15m.length, latestTime(bars15m), bars1d.length, latestTime(bars1d)].join('|');
+        if (liqTableSnapshotCacheRef.current?.key === cacheKey) { setLiqTableSnapshot(liqTableSnapshotCacheRef.current.snapshot); return; }
+        const snapshot = computeLiquidityTableSnapshot(bars15m, bars1d, liqTableAtrLen, liqTableTargetAtr, liqTableNearPct, liqTableHighlightNearLevels);
+        if (!cancelled) { liqTableSnapshotCacheRef.current = snapshot ? { key: cacheKey, snapshot } : null; setLiqTableSnapshot(snapshot); }
+      } catch { if (!cancelled) setLiqTableSnapshot(null); }
+    };
+    pullSnapshot();
+    const interval = window.setInterval(pullSnapshot, 60_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [activeLiqTableIndicator?.id, sidecarPort, symbol, liqTableAtrLen, liqTableTargetAtr, liqTableNearPct, liqTableHighlightNearLevels]);
 
   useEffect(() => {
     setHighlightedIndicatorIndex(standardIndicators.length > 0 ? 0 : -1);
@@ -1727,9 +1999,209 @@ export default function MiniChart({
 
   useEffect(() => () => {
     probEngDragRef.current = null;
+    techTableDragRef.current = null;
+    techTableResizeRef.current = null;
+    liqTableDragRef.current = null;
+    liqTableResizeRef.current = null;
     document.body.style.userSelect = '';
     document.body.style.cursor = '';
   }, []);
+
+  // ── Table drag/resize handlers ─────────────────────────────────────
+
+  const clearTechTableDrag = useCallback((target?: HTMLDivElement | null) => {
+    const drag = techTableDragRef.current;
+    const captureTarget = target ?? drag?.target;
+    if (drag && captureTarget?.hasPointerCapture?.(drag.pointerId)) captureTarget.releasePointerCapture(drag.pointerId);
+    techTableDragRef.current = null;
+    setTechTableDragging(false);
+    if (!techTableResizeRef.current) { document.body.style.userSelect = ''; document.body.style.cursor = ''; }
+  }, []);
+
+  const clearTechTableResize = useCallback((target?: HTMLDivElement | null) => {
+    const resize = techTableResizeRef.current;
+    const captureTarget = target ?? resize?.target;
+    if (resize && captureTarget?.hasPointerCapture?.(resize.pointerId)) captureTarget.releasePointerCapture(resize.pointerId);
+    techTableResizeRef.current = null;
+    setTechTableResizing(false);
+    if (!techTableDragRef.current) { document.body.style.userSelect = ''; document.body.style.cursor = ''; }
+  }, []);
+
+  const clearLiqTableDrag = useCallback((target?: HTMLDivElement | null) => {
+    const drag = liqTableDragRef.current;
+    const captureTarget = target ?? drag?.target;
+    if (drag && captureTarget?.hasPointerCapture?.(drag.pointerId)) captureTarget.releasePointerCapture(drag.pointerId);
+    liqTableDragRef.current = null;
+    setLiqTableDragging(false);
+    if (!liqTableResizeRef.current) { document.body.style.userSelect = ''; document.body.style.cursor = ''; }
+  }, []);
+
+  const clearLiqTableResize = useCallback((target?: HTMLDivElement | null) => {
+    const resize = liqTableResizeRef.current;
+    const captureTarget = target ?? resize?.target;
+    if (resize && captureTarget?.hasPointerCapture?.(resize.pointerId)) captureTarget.releasePointerCapture(resize.pointerId);
+    liqTableResizeRef.current = null;
+    setLiqTableResizing(false);
+    if (!liqTableDragRef.current) { document.body.style.userSelect = ''; document.body.style.cursor = ''; }
+  }, []);
+
+  const handleTechTableHeaderPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (techTableWidget.locked || event.button !== 0) return;
+    const host = containerRef.current;
+    const widgetEl = event.currentTarget.parentElement as HTMLDivElement | null;
+    if (!host || !widgetEl || !chartLayout) return;
+    const hostRect = host.getBoundingClientRect();
+    const widgetRect = widgetEl.getBoundingClientRect();
+    techTableDragRef.current = { pointerId: event.pointerId, target: event.currentTarget, offsetX: event.clientX - widgetRect.left, offsetY: event.clientY - widgetRect.top, startClientX: event.clientX, startClientY: event.clientY, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grab';
+    setTechTableWidget((prev) => miniTableClamp({ ...prev, x: widgetRect.left - hostRect.left, y: widgetRect.top - hostRect.top }, MINI_TECH_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_TECH_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+  }, [techTableWidget, chartLayout]);
+
+  const handleTechTableHeaderPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = techTableDragRef.current;
+    const host = containerRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !host || !chartLayout) return;
+    const moveDistance = Math.hypot(event.clientX - drag.startClientX, event.clientY - drag.startClientY);
+    if (!drag.moved && moveDistance < MINI_TABLE_DRAG_THRESHOLD) return;
+    if (!drag.moved) { drag.moved = true; setTechTableDragging(true); document.body.style.cursor = 'grabbing'; }
+    const rect = host.getBoundingClientRect();
+    setTechTableWidget((prev) => miniTableClamp({ ...prev, x: event.clientX - rect.left - drag.offsetX, y: event.clientY - rect.top - drag.offsetY }, MINI_TECH_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_TECH_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+  }, [chartLayout]);
+
+  const handleTechTableHeaderPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (techTableDragRef.current?.pointerId !== event.pointerId) return;
+    clearTechTableDrag(event.currentTarget);
+  }, [clearTechTableDrag]);
+
+  const handleTechTableHeaderPointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (techTableDragRef.current?.pointerId !== event.pointerId) return;
+    clearTechTableDrag(event.currentTarget);
+  }, [clearTechTableDrag]);
+
+  const handleTechTableResizePointerDown = useCallback((corner: TechnicalTableResizeCorner, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (techTableWidget.locked || event.button !== 0) return;
+    const host = containerRef.current;
+    const widgetEl = event.currentTarget.parentElement as HTMLDivElement | null;
+    if (!host || !widgetEl || !chartLayout) return;
+    const hostRect = host.getBoundingClientRect();
+    const widgetRect = widgetEl.getBoundingClientRect();
+    techTableResizeRef.current = { pointerId: event.pointerId, target: event.currentTarget, startClientX: event.clientX, startClientY: event.clientY, startX: widgetRect.left - hostRect.left, startY: widgetRect.top - hostRect.top, startWidth: widgetRect.width, startHeight: widgetRect.height, corner, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = corner === 'top-right' || corner === 'bottom-left' ? 'nesw-resize' : 'nwse-resize';
+  }, [techTableWidget, chartLayout]);
+
+  const handleTechTableResizePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = techTableResizeRef.current;
+    const host = containerRef.current;
+    if (!resize || resize.pointerId !== event.pointerId || !host || !chartLayout) return;
+    const deltaX = event.clientX - resize.startClientX;
+    const deltaY = event.clientY - resize.startClientY;
+    if (!resize.moved && Math.max(Math.abs(deltaX), Math.abs(deltaY)) < MINI_TABLE_RESIZE_THRESHOLD) return;
+    if (!resize.moved) { resize.moved = true; setTechTableResizing(true); }
+    setTechTableWidget(miniTableResize({ ...techTableWidget, x: resize.startX, y: resize.startY, width: resize.startWidth, height: resize.startHeight }, resize.corner, deltaX, deltaY, MINI_TECH_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_TECH_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+  }, [techTableWidget, chartLayout]);
+
+  const handleTechTableResizePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (techTableResizeRef.current?.pointerId !== event.pointerId) return;
+    clearTechTableResize(event.currentTarget);
+  }, [clearTechTableResize]);
+
+  const handleTechTableResizePointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (techTableResizeRef.current?.pointerId !== event.pointerId) return;
+    clearTechTableResize(event.currentTarget);
+  }, [clearTechTableResize]);
+
+  const handleLiqTableHeaderPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (liqTableWidget.locked || event.button !== 0) return;
+    const host = containerRef.current;
+    const widgetEl = event.currentTarget.parentElement as HTMLDivElement | null;
+    if (!host || !widgetEl || !chartLayout) return;
+    const hostRect = host.getBoundingClientRect();
+    const widgetRect = widgetEl.getBoundingClientRect();
+    liqTableDragRef.current = { pointerId: event.pointerId, target: event.currentTarget, offsetX: event.clientX - widgetRect.left, offsetY: event.clientY - widgetRect.top, startClientX: event.clientX, startClientY: event.clientY, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grab';
+    setLiqTableWidget((prev) => miniTableClamp({ ...prev, x: widgetRect.left - hostRect.left, y: widgetRect.top - hostRect.top }, MINI_LIQ_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+  }, [liqTableWidget, chartLayout]);
+
+  const handleLiqTableHeaderPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = liqTableDragRef.current;
+    const host = containerRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !host || !chartLayout) return;
+    const moveDistance = Math.hypot(event.clientX - drag.startClientX, event.clientY - drag.startClientY);
+    if (!drag.moved && moveDistance < MINI_TABLE_DRAG_THRESHOLD) return;
+    if (!drag.moved) { drag.moved = true; setLiqTableDragging(true); document.body.style.cursor = 'grabbing'; }
+    const rect = host.getBoundingClientRect();
+    setLiqTableWidget((prev) => miniTableClamp({ ...prev, x: event.clientX - rect.left - drag.offsetX, y: event.clientY - rect.top - drag.offsetY }, MINI_LIQ_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+  }, [chartLayout]);
+
+  const handleLiqTableHeaderPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (liqTableDragRef.current?.pointerId !== event.pointerId) return;
+    clearLiqTableDrag(event.currentTarget);
+  }, [clearLiqTableDrag]);
+
+  const handleLiqTableHeaderPointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (liqTableDragRef.current?.pointerId !== event.pointerId) return;
+    clearLiqTableDrag(event.currentTarget);
+  }, [clearLiqTableDrag]);
+
+  const handleLiqTableResizePointerDown = useCallback((corner: TechnicalTableResizeCorner, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (liqTableWidget.locked || event.button !== 0) return;
+    const host = containerRef.current;
+    const widgetEl = event.currentTarget.parentElement as HTMLDivElement | null;
+    if (!host || !widgetEl || !chartLayout) return;
+    const hostRect = host.getBoundingClientRect();
+    const widgetRect = widgetEl.getBoundingClientRect();
+    liqTableResizeRef.current = { pointerId: event.pointerId, target: event.currentTarget, startClientX: event.clientX, startClientY: event.clientY, startX: widgetRect.left - hostRect.left, startY: widgetRect.top - hostRect.top, startWidth: widgetRect.width, startHeight: widgetRect.height, corner, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = corner === 'top-right' || corner === 'bottom-left' ? 'nesw-resize' : 'nwse-resize';
+  }, [liqTableWidget, chartLayout]);
+
+  const handleLiqTableResizePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = liqTableResizeRef.current;
+    const host = containerRef.current;
+    if (!resize || resize.pointerId !== event.pointerId || !host || !chartLayout) return;
+    const deltaX = event.clientX - resize.startClientX;
+    const deltaY = event.clientY - resize.startClientY;
+    if (!resize.moved && Math.max(Math.abs(deltaX), Math.abs(deltaY)) < MINI_TABLE_RESIZE_THRESHOLD) return;
+    if (!resize.moved) { resize.moved = true; setLiqTableResizing(true); }
+    setLiqTableWidget(miniTableResize({ ...liqTableWidget, x: resize.startX, y: resize.startY, width: resize.startWidth, height: resize.startHeight }, resize.corner, deltaX, deltaY, MINI_LIQ_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+  }, [liqTableWidget, chartLayout]);
+
+  const handleLiqTableResizePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (liqTableResizeRef.current?.pointerId !== event.pointerId) return;
+    clearLiqTableResize(event.currentTarget);
+  }, [clearLiqTableResize]);
+
+  const handleLiqTableResizePointerCancel = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (liqTableResizeRef.current?.pointerId !== event.pointerId) return;
+    clearLiqTableResize(event.currentTarget);
+  }, [clearLiqTableResize]);
+
+  useEffect(() => {
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (techTableDragRef.current?.pointerId === event.pointerId) clearTechTableDrag();
+      if (techTableResizeRef.current?.pointerId === event.pointerId) clearTechTableResize();
+      if (liqTableDragRef.current?.pointerId === event.pointerId) clearLiqTableDrag();
+      if (liqTableResizeRef.current?.pointerId === event.pointerId) clearLiqTableResize();
+    };
+    const handleBlur = () => { clearTechTableDrag(); clearTechTableResize(); clearLiqTableDrag(); clearLiqTableResize(); };
+    window.addEventListener('pointerup', handlePointerEnd, true);
+    window.addEventListener('pointercancel', handlePointerEnd, true);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('pointerup', handlePointerEnd, true);
+      window.removeEventListener('pointercancel', handlePointerEnd, true);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [clearTechTableDrag, clearTechTableResize, clearLiqTableDrag, clearLiqTableResize]);
 
   const draggableVolumePanes = chartLayout
     ? chartLayout.subPanes.flatMap((pane) => {
@@ -1807,7 +2279,7 @@ export default function MiniChart({
 
   return (
     <div
-      className="relative flex h-full w-full min-h-[200px] min-w-[240px] flex-col overflow-hidden rounded-none border border-white/[0.06] bg-panel"
+      className="relative flex h-full w-full min-h-[120px] min-w-[160px] flex-col overflow-hidden rounded-none border border-white/[0.06] bg-panel"
     >
       {chartNotice && (
         <div className="pointer-events-none absolute left-1/2 top-8 z-20 -translate-x-1/2">
@@ -1832,9 +2304,7 @@ export default function MiniChart({
           The outer div is intentionally NOT data-no-drag — the symbol/price area on the left
           is the drag handle for GridLayout moves. The right controls div is data-no-drag to
           prevent accidental drags from button/menu surfaces. */}
-      <div
-        className="flex h-9 shrink-0 select-none items-center justify-between border-b border-white/[0.10] bg-base px-2"
-      >
+      <div className="flex h-9 shrink-0 select-none items-center justify-between border-b border-white/[0.10] bg-base px-2">
         {/* Left: search + symbol + price */}
         <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
           <button
@@ -1890,7 +2360,7 @@ export default function MiniChart({
         <div className="flex items-center gap-0.5 shrink-0" data-no-drag>
           {!toolbarCollapsed && (<>
           {/* Timeframe buttons */}
-          {MINI_TIMEFRAMES.map((tf) => (
+          {visibleMiniTfs.map((tf) => (
             <button
               key={tf.value}
               onClick={() => { setTimeframeValue(tf.value); }}
@@ -1910,6 +2380,75 @@ export default function MiniChart({
               {tf.label}
             </button>
           ))}
+
+          {hiddenMiniTfs.length > 0 && (
+            <div className="relative" ref={timeframeMenuRef}>
+              <button
+                onClick={() => {
+                  setShowTimeframeMenu((v) => !v);
+                  setShowChartTypeMenu(false);
+                  setShowIndicatorMenu(false);
+                  setShowStrategyMenu(false);
+                }}
+                className="rounded-sm transition-colors duration-75 hover:bg-white/[0.06]"
+                style={{
+                  fontFamily: '"JetBrains Mono", monospace',
+                  fontSize: 11,
+                  padding: '2px 5px',
+                  borderRadius: 2,
+                  border: 'none',
+                  cursor: 'pointer',
+                  backgroundColor: activeHiddenTimeframe || showTimeframeMenu ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
+                  color: activeHiddenTimeframe ? '#3B82F6' : '#FFFFFF',
+                  lineHeight: 1,
+                }}
+                title="More timeframes"
+              >
+                🕒
+              </button>
+
+              {showTimeframeMenu && (
+                <div
+                  className="absolute z-50"
+                  style={{
+                    top: '100%',
+                    right: 0,
+                    marginTop: 2,
+                    backgroundColor: '#161B22',
+                    border: '1px solid #21262D',
+                    borderRadius: 4,
+                    padding: 2,
+                    minWidth: 64,
+                  }}
+                >
+                  {hiddenMiniTfs.map((tf) => (
+                    <button
+                      key={tf.value}
+                      onClick={() => {
+                        setTimeframeValue(tf.value);
+                        setShowTimeframeMenu(false);
+                      }}
+                      className="flex w-full items-center justify-between px-2 py-1 text-left hover:bg-[#1C2128]"
+                      style={{
+                        fontFamily: '"JetBrains Mono", monospace',
+                        fontSize: 10,
+                        color: timeframe === tf.value ? '#E6EDF3' : '#8B949E',
+                        border: 'none',
+                        background: 'none',
+                        cursor: 'pointer',
+                        borderRadius: 2,
+                      }}
+                    >
+                      <span>{tf.label}</span>
+                      {timeframe === tf.value && (
+                        <span style={{ color: '#1A56DB', fontSize: 8 }}>●</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="mx-0.5 h-3 w-px bg-white/[0.08]" />
 
@@ -2001,8 +2540,7 @@ export default function MiniChart({
               }}
               title="Indicators"
             >
-              <TrendingUp size={10} />
-              <span>Indicators</span>
+              <TrendingUp size={18} />
               {activeStandardIndicatorCount > 0 && (
                 <span style={{ fontSize: 8, color: '#60A5FA' }}>{activeStandardIndicatorCount}</span>
               )}
@@ -2153,8 +2691,7 @@ export default function MiniChart({
               }}
               title="Strategies"
             >
-              <BrainCircuit size={10} />
-              <span>Strategies</span>
+              <BrainCircuit size={14} />
               {activeStrategyCount > 0 && (
                 <span style={{ fontSize: 8, color: '#1A56DB' }}>{activeStrategyCount}</span>
               )}
@@ -2241,22 +2778,6 @@ export default function MiniChart({
             )}
           </div>
 
-          <button
-            onClick={() => engineRef.current?.resetZoom()}
-            className="flex items-center justify-center rounded-sm text-white transition-colors duration-75 hover:bg-white/[0.06] hover:text-white"
-            style={{
-              width: 16,
-              height: 16,
-              borderRadius: 2,
-              border: 'none',
-              background: 'transparent',
-              cursor: 'pointer',
-            }}
-            title="Reset zoom"
-          >
-            <RotateCcw size={13} />
-          </button>
-
           {source === 'tws' && (
             <div className="flex items-center gap-0.5 ml-1">
               <span
@@ -2313,25 +2834,6 @@ export default function MiniChart({
             <Save size={13} strokeWidth={2} />
           </button>
           */}
-
-          <button
-            onClick={() => setToolbarCollapsed(v => !v)}
-            className="rounded-sm p-0 text-white transition-colors duration-75 hover:bg-white/[0.06] hover:text-white"
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              width: 16, height: 16, padding: 0, border: 'none', cursor: 'pointer',
-              backgroundColor: toolbarCollapsed ? 'rgba(255,255,255,0.06)' : 'transparent',
-              color: '#FFFFFF', borderRadius: 2,
-            }}
-            title={toolbarCollapsed ? 'Show controls' : 'Compact mode'}
-          >
-            <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 11, lineHeight: 1 }}>
-              {toolbarCollapsed ? '▶' : '◀'}
-            </span>
-          </button>
-
-          {/* Separator */}
-          <div className="mx-px h-3 w-px bg-white/[0.08]" />
 
           <ComponentLinkMenu
             linkChannel={linkChannel}
@@ -3131,6 +3633,48 @@ export default function MiniChart({
             onToggleLock={() => {
               setProbEngWidget((prev) => ({ ...prev, locked: !prev.locked }));
             }}
+          />
+        )}
+        {chartLayout && activeTechTableIndicator && (
+          <DailyIQTechnicalTableOverlay
+            snapshot={techTableSnapshot}
+            widget={techTableWidget}
+            dragging={techTableDragging}
+            resizing={techTableResizing}
+            minWidth={MINI_TECH_TABLE_MIN_WIDTH}
+            maxWidth={MINI_TECH_TABLE_MAX_WIDTH}
+            minHeight={MINI_TECH_TABLE_MIN_HEIGHT}
+            maxHeight={MINI_TECH_TABLE_MAX_HEIGHT}
+            onHeaderPointerDown={handleTechTableHeaderPointerDown}
+            onHeaderPointerMove={handleTechTableHeaderPointerMove}
+            onHeaderPointerUp={handleTechTableHeaderPointerUp}
+            onHeaderPointerCancel={handleTechTableHeaderPointerCancel}
+            onResizePointerDown={handleTechTableResizePointerDown}
+            onResizePointerMove={handleTechTableResizePointerMove}
+            onResizePointerUp={handleTechTableResizePointerUp}
+            onResizePointerCancel={handleTechTableResizePointerCancel}
+            onToggleLock={() => setTechTableWidget((prev) => ({ ...prev, locked: !prev.locked }))}
+          />
+        )}
+        {chartLayout && activeLiqTableIndicator && (
+          <DailyIQLiquidityTableOverlay
+            snapshot={liqTableSnapshot}
+            widget={liqTableWidget}
+            dragging={liqTableDragging}
+            resizing={liqTableResizing}
+            minWidth={MINI_LIQ_TABLE_MIN_WIDTH}
+            maxWidth={MINI_TECH_TABLE_MAX_WIDTH}
+            minHeight={MINI_LIQ_TABLE_MIN_HEIGHT}
+            maxHeight={MINI_TECH_TABLE_MAX_HEIGHT}
+            onHeaderPointerDown={handleLiqTableHeaderPointerDown}
+            onHeaderPointerMove={handleLiqTableHeaderPointerMove}
+            onHeaderPointerUp={handleLiqTableHeaderPointerUp}
+            onHeaderPointerCancel={handleLiqTableHeaderPointerCancel}
+            onResizePointerDown={handleLiqTableResizePointerDown}
+            onResizePointerMove={handleLiqTableResizePointerMove}
+            onResizePointerUp={handleLiqTableResizePointerUp}
+            onResizePointerCancel={handleLiqTableResizePointerCancel}
+            onToggleLock={() => setLiqTableWidget((prev) => ({ ...prev, locked: !prev.locked }))}
           />
         )}
         <IndicatorLegend

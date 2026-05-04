@@ -4,7 +4,6 @@ import { Columns3, GripVertical, Search, X } from "lucide-react";
 import ComponentLinkMenu from "./ComponentLinkMenu";
 import SymbolSearchModal from "./SymbolSearchModal";
 import CircularGauge from "./CircularGauge";
-import { useWatchlist } from "../lib/watchlist";
 import { LOGO_SYMBOLS } from "../lib/logo-symbols";
 import type { HeatmapTile } from "../lib/heatmap-utils";
 import { formatMarketCap } from "../lib/market-data";
@@ -18,11 +17,6 @@ import {
 } from "../lib/ta-score-timeframes";
 
 const ROW_HEIGHT = 46;
-const MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"];
-const MINI_SCREENER_FILTER_KEY = "dailyiq.miniScreener.filter";
-const MINI_SCREENER_CUSTOM_KEY = "dailyiq.miniScreener.customSymbols";
-
-type MiniFilterType = "all" | "mag7" | "watchlist" | "custom";
 
 type BuiltInColumnId =
   | "symbol"
@@ -69,7 +63,7 @@ interface BuiltInColumnDef {
 }
 
 const BUILT_IN_COLUMNS: BuiltInColumnDef[] = [
-  { id: "symbol", label: "Symbol", width: 176, minWidth: 128, sortKey: "symbol", defaultVisible: true },
+  { id: "symbol", label: "Symbol", width: 176, minWidth: 96, sortKey: "symbol", defaultVisible: true },
   { id: "priceChange", label: "Price / Chg", width: 116, minWidth: 92, sortKey: "change", defaultVisible: true },
   { id: "mcap", label: "Mkt Cap", width: 100, minWidth: 76, sortKey: "mcap", defaultVisible: true },
   { id: "sentiment", label: "Sentiment", width: 92, minWidth: 72, sortKey: "sentiment", defaultVisible: true },
@@ -183,7 +177,6 @@ function MiniScreenerCard({
   onConfigChange,
   onSymbolSelect,
 }: MiniScreenerCardProps) {
-  const { symbols: watchlistSymbols } = useWatchlist();
   const tiles = useSp500HeatmapData();
   const containerRef = useRef<HTMLDivElement>(null);
   const colPickerRef = useRef<HTMLDivElement>(null);
@@ -198,15 +191,6 @@ function MiniScreenerCard({
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colPickerOpen, setColPickerOpen] = useState(false);
   const [symbolModalOpen, setSymbolModalOpen] = useState(false);
-  const [filterType, setFilterType] = useState<MiniFilterType>(() => {
-    const stored = localStorage.getItem(MINI_SCREENER_FILTER_KEY);
-    return (["all", "mag7", "watchlist", "custom"].includes(stored ?? "") ? stored : "all") as MiniFilterType;
-  });
-  const [customSymbols, setCustomSymbols] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem(MINI_SCREENER_CUSTOM_KEY) ?? "[]") as string[]; }
-    catch { return []; }
-  });
-  const [customDraft, setCustomDraft] = useState("");
   const [colDragState, setColDragState] = useState<ColumnDragState | null>(null);
   const [colInsertBeforeId, setColInsertBeforeId] = useState<ColumnId | null>(null);
   const headerCellRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -264,17 +248,7 @@ function MiniScreenerCard({
 
   const visibleTimeframes = useMemo(() => getVisibleTimeframes(visibleColumns), [visibleColumns]);
 
-  useEffect(() => {
-    localStorage.setItem(MINI_SCREENER_FILTER_KEY, filterType);
-    if (filterType === "custom") setCustomDraft(customSymbols.join(", "));
-  }, [filterType, customSymbols]);
-
-  const scoreSymbols = useMemo(() => {
-    if (filterType === "mag7") return MAG7;
-    if (filterType === "watchlist") return watchlistSymbols;
-    if (filterType === "custom") return customSymbols;
-    return tiles.map((t) => t.symbol);
-  }, [filterType, watchlistSymbols, customSymbols, tiles]);
+  const scoreSymbols = useMemo(() => tiles.map((t) => t.symbol), [tiles]);
   const technicals = useTechScores(scoreSymbols, TA_SCORE_TIMEFRAMES as unknown as string[]);
 
   useEffect(() => {
@@ -425,17 +399,7 @@ function MiniScreenerCard({
       };
     });
 
-    let filtered = enriched;
-    if (filterType === "mag7") {
-      const set = new Set(MAG7);
-      filtered = enriched.filter((r) => set.has(r.symbol));
-    } else if (filterType === "watchlist") {
-      const set = new Set(watchlistSymbols);
-      filtered = enriched.filter((r) => set.has(r.symbol));
-    } else if (filterType === "custom" && customSymbols.length > 0) {
-      const set = new Set(customSymbols);
-      filtered = enriched.filter((r) => set.has(r.symbol));
-    }
+    const filtered = enriched;
 
     const dir = sortDir === "asc" ? 1 : -1;
     filtered.sort((a, b) => {
@@ -478,7 +442,7 @@ function MiniScreenerCard({
     });
 
     return filtered;
-  }, [tiles, technicals, visibleTimeframes, sortDir, sortKey, filterType, watchlistSymbols, customSymbols]);
+  }, [tiles, technicals, visibleTimeframes, sortDir, sortKey]);
 
   const gridTemplateColumns = useMemo(
     () =>
@@ -520,29 +484,6 @@ function MiniScreenerCard({
                 </span>
               );
             })}
-          </div>
-          <div className="flex items-center gap-0.5 rounded-sm border border-white/[0.07] bg-white/[0.03] p-0.5">
-            {(
-              [
-                ["all", "All"],
-                ["mag7", "MAG 7"],
-                ["watchlist", "WL"],
-                ["custom", "Custom"],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setFilterType(key)}
-                className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[9px] font-medium tracking-wide transition-colors ${
-                  filterType === key
-                    ? "bg-blue/25 text-white"
-                    : "text-white/40 hover:bg-white/[0.05] hover:text-white/70"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -655,36 +596,6 @@ function MiniScreenerCard({
         </div>
       </div>
 
-      {filterType === "custom" && (
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-[#0f141b] px-2 py-1.5">
-          <input
-            type="text"
-            spellCheck={false}
-            className="flex-1 rounded-sm border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-white/80 placeholder:text-white/20 focus:border-blue/40 focus:outline-none"
-            placeholder="AAPL, MSFT, NVDA…"
-            value={customDraft}
-            onChange={(e) => setCustomDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                const syms = customDraft.split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
-                setCustomSymbols(syms);
-                localStorage.setItem(MINI_SCREENER_CUSTOM_KEY, JSON.stringify(syms));
-              }
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              const syms = customDraft.split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
-              setCustomSymbols(syms);
-              localStorage.setItem(MINI_SCREENER_CUSTOM_KEY, JSON.stringify(syms));
-            }}
-            className="rounded-sm bg-blue/20 px-2 py-0.5 font-mono text-[9px] text-blue hover:bg-blue/30"
-          >
-            Apply
-          </button>
-        </div>
-      )}
 
       <div ref={containerRef} className="min-h-0 flex-1 overflow-auto scrollbar-none">
         <div style={{ width: tableMinWidth, minWidth: "100%" }} className="min-h-full">
@@ -792,15 +703,15 @@ function MiniScreenerCard({
                   {visibleColumns.map((col) => {
                     if (col === "symbol") {
                       return (
-                        <div key={col} className="flex min-w-0 items-center gap-2 overflow-hidden px-1.5 py-2.5">
+                        <div key={col} className="flex min-w-0 items-center gap-2 px-1.5 py-2.5">
                           <div className="shrink-0">
                             <SymbolLogo symbol={row.symbol} />
                           </div>
-                          <div className="min-w-0 flex-1 overflow-hidden">
+                          <div className="min-w-0 flex-1">
                             <p className="truncate font-mono text-[13px] font-semibold leading-tight text-white/90">
                               {row.symbol}
                             </p>
-                            <p className="mt-0.5 truncate text-[11px] leading-snug text-white/60" title={row.name}>
+                            <p className="mt-0.5 break-words text-[11px] leading-snug text-white/60" title={row.name}>
                               {row.name}
                             </p>
                           </div>

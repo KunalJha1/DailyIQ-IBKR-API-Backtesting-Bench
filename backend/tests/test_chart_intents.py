@@ -188,6 +188,35 @@ class ChartIntentTests(unittest.TestCase):
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["bars"][-1]["time"], 1_000)
 
+    def test_historical_limit_window_respects_duration_cutoff(self) -> None:
+        with patch.object(historical.time, "time", return_value=1_700_000_000.0):
+            now_ms = int(historical.time.time() * 1000)
+            old_ms = now_ms - (365 * 24 * 60 * 60 * 1000)
+            recent_ms = now_ms - (2 * 24 * 60 * 60 * 1000)
+            with db_utils.sync_db_session(self.db_path) as conn:
+                historical._init_schema(conn)
+                historical._write_bars(
+                    conn,
+                    "MSFT",
+                    [
+                        {"time": old_ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 100},
+                        {"time": recent_ms, "open": 200.0, "high": 201.0, "low": 199.0, "close": 200.5, "volume": 100},
+                        {"time": now_ms, "open": 210.0, "high": 211.0, "low": 209.0, "close": 210.5, "volume": 100},
+                    ],
+                    bar_size="1m",
+                    source="cache",
+                )
+
+            result = historical.read_bars_window(
+                "MSFT",
+                bar_size="1m",
+                duration="30 D",
+                limit=3,
+            )
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual([bar["time"] for bar in result["bars"]], [recent_ms, now_ms])
+
 
 if __name__ == "__main__":
     unittest.main()

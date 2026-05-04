@@ -1,6 +1,6 @@
 /** 10 link channels, each with a distinct color */
 export const LINK_CHANNELS = [
-  { id: 1, color: "#3b82f6", label: "Blue" },
+  { id: 1, color: "#60a5fa", label: "Blue" },
   { id: 2, color: "#ef4444", label: "Red" },
   { id: 3, color: "#22c55e", label: "Green" },
   { id: 4, color: "#f59e0b", label: "Amber" },

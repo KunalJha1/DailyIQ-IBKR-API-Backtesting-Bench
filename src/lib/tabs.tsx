@@ -29,6 +29,7 @@ export type TabType =
   | "options"
   | "backtest"
   | "simulations"
+  | "model-trainer"
   | "heatmap"
   | "bias";
 
@@ -52,6 +53,7 @@ export const tabPresets: { type: TabType; title: string }[] = [
   { type: "options", title: "Options Analysis" },
   { type: "backtest", title: "Backtesting" },
   { type: "simulations", title: "Simulations" },
+  { type: "model-trainer", title: "Model Trainer" },
   { type: "heatmap", title: "Heatmap" },
   { type: "bias", title: "Market Bias" },
 ];

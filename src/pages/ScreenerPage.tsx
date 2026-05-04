@@ -11,8 +11,6 @@ import { open } from "@tauri-apps/api/shell";
 import { useSidecarPort } from "../lib/tws";
 import { useWatchlist } from "../lib/watchlist";
 import { formatMarketCap } from "../lib/market-data";
-import SymbolSearchModal from "../components/SymbolSearchModal";
-import { Search } from "lucide-react";
 import CircularGauge from "../components/CircularGauge";
 
 import { LOGO_SYMBOLS } from "../lib/logo-symbols";
@@ -107,7 +105,6 @@ type FilterType =
 const SCREENER_CUSTOM_STORAGE_KEY = "dailyiq.screener.customSymbols";
 const SCREENER_VISIBLE_TFS_STORAGE_KEY = "dailyiq.screener.visibleTimeframes";
 const SCREENER_COL_WIDTHS_KEY = "dailyiq.screener.columnWidths";
-const CUSTOM_SYMBOL_INPUT_LIMIT = 100;
 const CUSTOM_SCROLLBAR_SIZE = 10;
 const CUSTOM_SCROLLBAR_MIN_THUMB = 32;
 
@@ -189,20 +186,6 @@ function loadStoredCustomSymbols(): string[] {
   }
 }
 
-function parseSymbolsFromInput(text: string, limit = CUSTOM_SYMBOL_INPUT_LIMIT): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const part of text.split(/[\s,;\n]+/)) {
-    const s = part.trim().toUpperCase();
-    if (!s || s.length > 12) continue;
-    if (!/^[A-Z0-9.\-]+$/.test(s)) continue;
-    if (seen.has(s)) continue;
-    seen.add(s);
-    out.push(s);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
 
 const ALL_TIMEFRAMES: TaScoreTimeframe[] = [...TA_SCORE_TIMEFRAMES];
 const SCREENER_TIMEFRAMES: TaScoreTimeframe[] = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"];
@@ -373,18 +356,18 @@ const ScreenerTableRow = memo(function ScreenerTableRow({
       onClick={() => open(dailyiqInstrumentHref(row.sector, row.symbol))}
     >
       {/* Symbol */}
-      <td className="min-w-0 px-3 py-2 align-top" style={tw(colWidths.symbol)}>
-        <div className="flex min-w-0 items-start gap-2.5">
+      <td className="px-3 py-2 align-top" style={{ minWidth: colWidths.symbol }}>
+        <div className="flex items-start gap-2.5">
           <SymbolLogo symbol={row.symbol} />
-          <div className="min-w-0 flex-1 overflow-hidden">
-            <p className="truncate font-mono text-[15px] font-semibold leading-none text-white/90 transition-colors duration-[120ms] group-hover:text-blue">
+          <div className="min-w-0">
+            <p className="font-mono text-[15px] font-semibold leading-none text-white/90 transition-colors duration-[120ms] group-hover:text-blue">
               {row.symbol}
             </p>
-            <p className="mt-0.5 truncate text-[13px] leading-snug text-white/85" title={row.name}>
+            <p className="mt-0.5 text-[13px] leading-snug text-white/85">
               {row.name}
             </p>
             {row.sector && (
-              <p className="mt-0.5 truncate text-[12px] leading-snug text-white/55" title={row.sector}>
+              <p className="mt-0.5 text-[12px] leading-snug text-white/55">
                 {row.sector}
               </p>
             )}
@@ -487,11 +470,8 @@ function ScreenerPage() {
   const [visibleTfs, setVisibleTfs] = useState<TaScoreTimeframe[]>(loadStoredVisibleTimeframes);
   const [sortKey, setSortKey] = useState<SortKey>("verdict");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [searchModalOpen, setSearchModalOpen] = useState(false);
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
 
-  const [customSymbols, setCustomSymbols] = useState<string[]>(loadStoredCustomSymbols);
-  const [customDraft, setCustomDraft] = useState("");
+  const [customSymbols] = useState<string[]>(loadStoredCustomSymbols);
 
   // Virtual scroll
   const [visibleCount, setVisibleCount] = useState(VISIBLE_BATCH);
@@ -689,10 +669,6 @@ function ScreenerPage() {
   const filtered = useMemo(() => {
     let base = rows;
 
-    if (selectedSymbol) {
-      return base.filter((r) => r.symbol === selectedSymbol);
-    }
-
     if (filter === "watchlist") {
       const wl = new Set(watchlistSymbols);
       base = base.filter((r) => wl.has(r.symbol));
@@ -762,7 +738,6 @@ function ScreenerPage() {
     return base;
   }, [
     rows,
-    selectedSymbol,
     filter,
     watchlistSymbols,
     sortKey,
@@ -886,15 +861,7 @@ function ScreenerPage() {
     });
   };
 
-  const clearSearch = () => {
-    setSelectedSymbol(null);
-  };
 
-  useEffect(() => {
-    if (filter === "custom") {
-      setCustomDraft(customSymbols.join(", "));
-    }
-  }, [filter, customSymbols]);
 
   useEffect(() => {
     try {
@@ -910,31 +877,8 @@ function ScreenerPage() {
   // Reset visible count when filter/sort changes
   useEffect(() => {
     setVisibleCount(VISIBLE_BATCH);
-  }, [filter, sortKey, sortDir, selectedSymbol, customSymbols]);
+  }, [filter, sortKey, sortDir, customSymbols]);
 
-  const applyCustomUniverse = useCallback(() => {
-    const next = parseSymbolsFromInput(customDraft);
-    setCustomSymbols(next);
-    try {
-      localStorage.setItem(SCREENER_CUSTOM_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      /* ignore */
-    }
-    setSelectedSymbol(null);
-    setVisibleCount(VISIBLE_BATCH);
-  }, [customDraft]);
-
-  const clearCustomUniverse = useCallback(() => {
-    setCustomDraft("");
-    setCustomSymbols([]);
-    try {
-      localStorage.removeItem(SCREENER_CUSTOM_STORAGE_KEY);
-    } catch {
-      /* ignore */
-    }
-    setSelectedSymbol(null);
-    setVisibleCount(VISIBLE_BATCH);
-  }, []);
 
   // ── Render ───────────────────────────────────────────────────────
 
@@ -953,38 +897,6 @@ function ScreenerPage() {
             </span>
           </div>
 
-          {/* Search */}
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setSearchModalOpen(true)}
-              className="flex h-8 items-center gap-2 rounded-input border border-white/[0.08] bg-white/[0.04] px-3 font-mono text-[13px] text-white/40 transition-colors hover:border-white/[0.14] hover:bg-white/[0.07] hover:text-white/70"
-            >
-              <Search className="h-3.5 w-3.5 shrink-0" strokeWidth={1.8} />
-              {selectedSymbol ? (
-                <span className="text-white/80">{selectedSymbol}</span>
-              ) : (
-                <span>Search symbol...</span>
-              )}
-            </button>
-            {selectedSymbol && (
-              <button
-                onClick={clearSearch}
-                className="text-[13px] text-white/30 hover:text-white/60"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-          <SymbolSearchModal
-            isOpen={searchModalOpen}
-            onClose={() => setSearchModalOpen(false)}
-            onSelectSymbol={(sym) => {
-              setSelectedSymbol(sym);
-              setSearchModalOpen(false);
-            }}
-            title="Screener Search"
-            subtitle="Select a symbol to filter the screener"
-          />
         </div>
 
           {/* Filters row */}
@@ -994,9 +906,6 @@ function ScreenerPage() {
             {(
               [
                 ["all", "All"],
-                ["watchlist", "Watchlist"],
-                ["custom", "Custom"],
-                ["mag7", "MAG 7"],
                 ["movers", "Big Movers"],
                 ["bullish", "Bullish"],
                 ["bearish", "Bearish"],
@@ -1045,48 +954,6 @@ function ScreenerPage() {
           </div>
           </div>
 
-          {filter === "custom" && (
-            <div className="flex flex-col gap-1.5 border-t border-white/[0.06] bg-[#101722] px-3 py-2">
-            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-white/50">
-              Custom universe — comma, space, or newline (max {CUSTOM_SYMBOL_INPUT_LIMIT})
-            </span>
-            <div className="flex items-start gap-2">
-              <textarea
-                rows={2}
-                spellCheck={false}
-                className="min-h-[60px] flex-1 resize-y rounded-input border border-white/[0.08] bg-white/[0.04] px-3 py-2 font-mono text-[13px] text-white/80 placeholder:text-white/20 focus:border-blue/40 focus:outline-none"
-                placeholder="e.g. AAPL, MSFT, NVDA, SPY"
-                value={customDraft}
-                onChange={(e) => setCustomDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    applyCustomUniverse();
-                  }
-                }}
-              />
-              <div className="flex shrink-0 flex-col gap-1">
-                <button
-                  type="button"
-                  onClick={applyCustomUniverse}
-                  className="rounded-btn bg-blue/20 px-3 py-1.5 font-mono text-[12px] font-medium text-blue transition-colors hover:bg-blue/30"
-                >
-                  Apply
-                </button>
-                <button
-                  type="button"
-                  onClick={clearCustomUniverse}
-                  className="rounded-btn px-3 py-1.5 font-mono text-[12px] text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white/70"
-                >
-                  Clear
-                </button>
-              </div>
-            </div>
-            <p className="font-mono text-[11px] text-white/25">
-              Symbols register with the data worker for quotes; rows show pending until data arrives.
-            </p>
-            </div>
-          )}
         </div>
 
         {/* Table — fixed layout + min widths prevent cell overlap; drag column edges to resize (persisted). */}
@@ -1107,8 +974,8 @@ function ScreenerPage() {
             <thead className="sticky top-0 z-10 bg-[#131925]">
               <tr className="border-b border-white/[0.06]">
               <th
-                className="relative min-w-0 cursor-pointer overflow-hidden px-3 py-2 text-left"
-                style={{ width: colWidths.symbol, minWidth: colWidths.symbol, maxWidth: colWidths.symbol }}
+                className="relative cursor-pointer px-3 py-2 text-left"
+                style={{ minWidth: colWidths.symbol }}
                 onClick={() => handleSort("symbol")}
               >
                 <span className="flex min-w-0 items-center truncate pr-1 font-mono text-[12px] uppercase tracking-[0.14em] text-white">
@@ -1246,11 +1113,7 @@ function ScreenerPage() {
           {!loading && filtered.length === 0 && (
             <div className="flex h-40 items-center justify-center px-4 text-center">
               <p className="font-mono text-[13px] text-white/24">
-                {selectedSymbol
-                  ? `No data for ${selectedSymbol}`
-                  : filter === "custom" && customSymbols.length === 0
-                    ? "Add tickers above and click Apply to run a custom screener."
-                    : "No symbols match the current filter."}
+                No symbols match the current filter.
               </p>
             </div>
           )}

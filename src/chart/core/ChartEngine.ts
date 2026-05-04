@@ -1688,7 +1688,7 @@ export class ChartEngine {
 
   private renderSessionHighlights() {
     const tf = this.scaleX.timeframe;
-    if (tf === '1D' || tf === '1W' || tf === '1M') return;
+    if (getTimeframeMs(tf) >= 86_400_000) return;
     if (this.bars.length === 0) return;
 
     const start = Math.max(0, Math.floor(this.viewport.startIndex));
@@ -2143,7 +2143,9 @@ export class ChartEngine {
       } else {
         this.renderer.line(left, y, x2, y, lineColor, isActive ? lw + 0.75 : lw);
       }
-      this.renderer.textSmall(level.toFixed(3), x2 - 6, y - 8, lineColor, 'right');
+      const priceLabel = this.formatAxisPrice(price);
+      const labelText = `${level.toFixed(3)}  ${priceLabel}`;
+      this.renderer.textSmall(labelText, x2 - 6, y - 8, lineColor, 'right');
     }
     // Anchor handles for fib when hovered/dragged
     if (isActive) {

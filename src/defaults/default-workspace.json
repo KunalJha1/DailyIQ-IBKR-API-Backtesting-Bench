@@ -370,6 +370,18 @@
       }
     },
     {
+      "id": "ea2b7b6a-2e34-45ab-a8e1-0fd2e42aa3a4",
+      "title": "Model Trainer",
+      "type": "model-trainer",
+      "locked": true,
+      "linkChannel": 1,
+      "layout": {
+        "columns": 12,
+        "rowHeight": 40,
+        "components": []
+      }
+    },
+    {
       "id": "197ee2b9-c2d4-4a5e-84f4-a43d056a298b",
       "title": "Market Bias",
       "type": "bias",

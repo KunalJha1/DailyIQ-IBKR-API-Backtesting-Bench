@@ -31,6 +31,7 @@ type PollerState = {
   intervalId: number | null;
   fastIntervalId: number | null;
   stopTimeoutId: number | null;
+  debounceId: number | null;
   subscriberCount: number;
   inFlight: boolean;
   pendingFetch: boolean;
@@ -104,6 +105,7 @@ function getOrCreatePoller(sidecarPort: number): PollerState {
     intervalId: null,
     fastIntervalId: null,
     stopTimeoutId: null,
+    debounceId: null,
     subscriberCount: 0,
     inFlight: false,
     pendingFetch: false,
@@ -138,7 +140,12 @@ async function fetchScores(sidecarPort: number, poller: PollerState): Promise<vo
   try {
     poller.lastRequestKey = getTrackedKey(poller);
     const res = await fetch(
-      `http://127.0.0.1:${sidecarPort}/technicals/scores?symbols=${symbols.join(",")}&timeframes=${timeframes.join(",")}`,
+      `http://127.0.0.1:${sidecarPort}/technicals/scores`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols, timeframes }),
+      },
     );
     if (!res.ok) return;
     const rows = (await res.json()) as Array<Record<string, unknown>>;
@@ -206,22 +213,30 @@ async function fetchScores(sidecarPort: number, poller: PollerState): Promise<vo
 }
 
 function startFastPolling(sidecarPort: number, poller: PollerState): void {
-  const stopAt = Date.now() + FAST_POLL_DURATION_MS;
+  // Debounce: collapse multiple rapid calls (e.g. several components mounting
+  // in the same React render pass) into a single fetch.
+  if (poller.debounceId !== null) {
+    window.clearTimeout(poller.debounceId);
+  }
   if (poller.fastIntervalId !== null) {
     window.clearInterval(poller.fastIntervalId);
     poller.fastIntervalId = null;
   }
-  void fetchScores(sidecarPort, poller);
-  poller.fastIntervalId = window.setInterval(() => {
-    if (Date.now() >= stopAt) {
-      if (poller.fastIntervalId !== null) {
-        window.clearInterval(poller.fastIntervalId);
-        poller.fastIntervalId = null;
-      }
-      return;
-    }
+  poller.debounceId = window.setTimeout(() => {
+    poller.debounceId = null;
+    const stopAt = Date.now() + FAST_POLL_DURATION_MS;
     void fetchScores(sidecarPort, poller);
-  }, FAST_POLL_INTERVAL_MS);
+    poller.fastIntervalId = window.setInterval(() => {
+      if (Date.now() >= stopAt) {
+        if (poller.fastIntervalId !== null) {
+          window.clearInterval(poller.fastIntervalId);
+          poller.fastIntervalId = null;
+        }
+        return;
+      }
+      void fetchScores(sidecarPort, poller);
+    }, FAST_POLL_INTERVAL_MS);
+  }, 30);
 }
 
 function ensurePollerRunning(sidecarPort: number, poller: PollerState): void {
@@ -250,6 +265,10 @@ function stopPoller(sidecarPort: number, poller: PollerState): void {
   if (poller.stopTimeoutId !== null) {
     window.clearTimeout(poller.stopTimeoutId);
     poller.stopTimeoutId = null;
+  }
+  if (poller.debounceId !== null) {
+    window.clearTimeout(poller.debounceId);
+    poller.debounceId = null;
   }
   pollersByPort.delete(sidecarPort);
 }

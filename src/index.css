@@ -63,6 +63,16 @@
   background: transparent;
 }
 
+.scrollbar-dark::-webkit-scrollbar:horizontal {
+  height: 7px;
+  background: #0d1117;
+}
+
+.scrollbar-dark::-webkit-scrollbar-track:horizontal {
+  background: #0d1117;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
 .scrollbar-dark::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
@@ -74,6 +84,14 @@
 
 .scrollbar-dark::-webkit-scrollbar-thumb:horizontal {
   min-width: 36px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
+.scrollbar-dark::-webkit-scrollbar-thumb:horizontal:hover {
+  background: rgba(255, 255, 255, 0.40);
+  background-clip: padding-box;
 }
 
 .scrollbar-dark::-webkit-scrollbar-thumb:hover {
@@ -82,7 +100,98 @@
 }
 
 .scrollbar-dark::-webkit-scrollbar-corner {
+  background: #0d1117;
+}
+
+.liquidity-sweeps-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.24) #0d1117;
+  scrollbar-gutter: stable both-edges;
+  background-color: #0d1117;
+}
+
+.liquidity-sweeps-scrollbar::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+  background: #0d1117;
+}
+
+.liquidity-sweeps-scrollbar::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+.liquidity-sweeps-scrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid #0d1117;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
+.liquidity-sweeps-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
+  background-clip: padding-box;
+}
+
+.liquidity-sweeps-scrollbar::-webkit-scrollbar-corner {
+  background: #0d1117;
+}
+
+/* macOS-style thin overlay scrollbar */
+.scrollbar-mac {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.scrollbar-mac::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.scrollbar-mac::-webkit-scrollbar-track {
   background: transparent;
+}
+
+.scrollbar-mac::-webkit-scrollbar-track:horizontal {
+  background: #0d1117;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.scrollbar-mac::-webkit-scrollbar:horizontal {
+  height: 5px;
+  background: #0d1117;
+}
+
+.scrollbar-mac::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.0);
+  border-radius: 999px;
+  transition: background 0.18s ease;
+  min-height: 28px;
+  min-width: 28px;
+}
+
+.scrollbar-mac:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.scrollbar-mac::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.scrollbar-mac::-webkit-scrollbar-thumb:horizontal {
+  background: rgba(255, 255, 255, 0.0);
+  min-width: 32px;
+}
+
+.scrollbar-mac:hover::-webkit-scrollbar-thumb:horizontal {
+  background: rgba(255, 255, 255, 0.20);
+}
+
+.scrollbar-mac::-webkit-scrollbar-thumb:horizontal:hover {
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.scrollbar-mac::-webkit-scrollbar-corner {
+  background: #0d1117;
 }
 
 .scrollbar-panel {

@@ -20,7 +20,7 @@ def ensure_base_schema(conn: sqlite3.Connection) -> None:
             last_updated_utc TEXT
         )
     """)
-    for col in ("score_15m", "score_4h", "score_1d", "score_1w"):
+    for col in ("score_1m", "score_5m", "score_15m", "score_1h", "score_4h", "score_1d", "score_1w"):
         try:
             conn.execute(f"ALTER TABLE technical_scores ADD COLUMN {col} INTEGER")
         except Exception:

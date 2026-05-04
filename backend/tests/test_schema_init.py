@@ -77,6 +77,35 @@ class SchemaInitTests(unittest.TestCase):
 
         self.assertEqual(row, (None, None))
 
+    def test_existing_technical_scores_table_gets_all_timeframe_columns(self) -> None:
+        with db_utils.sync_db_session(self.db_path) as conn:
+            conn.execute("DROP TABLE technical_scores")
+            conn.execute("""
+                CREATE TABLE technical_scores (
+                    symbol TEXT PRIMARY KEY,
+                    score_1d INTEGER,
+                    last_updated_utc TEXT
+                )
+            """)
+        db_utils._schema_ready = False
+
+        with db_utils.sync_db_session(self.db_path) as conn:
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(technical_scores)").fetchall()
+            }
+
+        expected = {
+            "score_1m",
+            "score_5m",
+            "score_15m",
+            "score_1h",
+            "score_4h",
+            "score_1d",
+            "score_1w",
+        }
+        self.assertTrue(expected.issubset(cols), expected - cols)
+
 
 if __name__ == "__main__":
     unittest.main()

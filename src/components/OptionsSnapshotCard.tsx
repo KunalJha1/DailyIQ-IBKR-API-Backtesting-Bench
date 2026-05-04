@@ -214,7 +214,7 @@ function ExpiryPicker({ months, selected, onSelect }: ExpiryPickerProps) {
                     onClick={() => { onSelect(exp.expiration); setOpen(false); }}
                     className={`flex w-full items-center px-2.5 py-1 text-left font-mono text-[10px] transition-colors duration-75 ${
                       exp.expiration === selected
-                        ? "bg-[#1A56DB]/20 text-[#1A56DB]"
+                        ? "bg-[#1A56DB]/20 text-white"
                         : "text-white/70 hover:bg-white/[0.04] hover:text-white/90"
                     }`}
                   >
@@ -247,22 +247,42 @@ function OptionsSnapshotCard({
 
   const [searchOpen, setSearchOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const configRef = useRef(config);
+  configRef.current = config;
 
-  // Link channel subscription
+  // Link channel subscription — use configRef so changing expiry doesn't
+  // re-subscribe (linkBus.subscribe fires the callback immediately, which
+  // would reset expiration back to null on every expiry selection).
   useEffect(() => {
     if (!linkChannel) return;
     return linkBus.subscribe(linkChannel, (sym) => {
-      onConfigChange({ ...config, symbol: sym });
+      onConfigChange({ ...configRef.current, symbol: sym, expiration: null });
     });
-  }, [linkChannel, config, onConfigChange]);
+  }, [linkChannel, onConfigChange]);
 
   const { summary } = useOptionsSummary(symbol);
   const spot = summary?.underlyingPrice ?? null;
 
-  // Flatten all expirations; default to the nearest one
+  const todayStart = useMemo(() => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getTime();
+  }, []);
+
+  const filteredMonths = useMemo(
+    () =>
+      (summary?.months ?? [])
+        .map((m) => ({
+          ...m,
+          expirations: m.expirations.filter((e) => e.expiration >= todayStart),
+        }))
+        .filter((m) => m.expirations.length > 0),
+    [summary?.months, todayStart],
+  );
+
   const allExps = useMemo(
-    () => (summary?.months ?? []).flatMap((m) => m.expirations),
-    [summary?.months],
+    () => filteredMonths.flatMap((m) => m.expirations),
+    [filteredMonths],
   );
 
   const nearestExp = allExps[0]?.expiration ?? null;
@@ -360,7 +380,7 @@ function OptionsSnapshotCard({
               {symbol || "Symbol…"}
             </span>
           </button>
-          <span className="hidden truncate font-mono text-[9px] uppercase tracking-[0.16em] text-white/25 min-[360px]:inline">
+          <span className="hidden truncate text-[11px] font-medium text-white/80 min-[360px]:inline">
             Options Snapshot
           </span>
         </div>
@@ -369,7 +389,7 @@ function OptionsSnapshotCard({
           <ComponentLinkMenu linkChannel={linkChannel} onSetLinkChannel={onSetLinkChannel} />
           <button
             onClick={onClose}
-            className="flex h-5 w-5 items-center justify-center text-white/25 transition-colors duration-75 hover:text-white/60"
+            className="flex h-5 w-5 items-center justify-center text-white transition-colors duration-75 hover:text-white/60"
           >
             <X className="h-3 w-3" strokeWidth={2} />
           </button>
@@ -413,7 +433,7 @@ function OptionsSnapshotCard({
               {allExps.length > 0 ? (
                 <div className="mt-1">
                   <ExpiryPicker
-                    months={summary?.months ?? []}
+                    months={filteredMonths}
                     selected={selectedExpiry}
                     onSelect={commitExpiry}
                   />

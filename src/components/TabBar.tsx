@@ -15,6 +15,7 @@ import {
   Layers,
   History,
   Cpu,
+  BrainCircuit,
   Grid3X3,
   TrendingUp,
   type LucideIcon,
@@ -28,6 +29,7 @@ const TAB_TYPE_ICONS: Record<TabType, LucideIcon> = {
   options: Layers,
   backtest: History,
   simulations: Cpu,
+  "model-trainer": BrainCircuit,
   heatmap: Grid3X3,
   bias: TrendingUp,
 };

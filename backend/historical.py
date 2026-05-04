@@ -901,6 +901,7 @@ def _fill_daily_gaps_from_1m(
 def _read_cached_window(
     conn: sqlite3.Connection,
     symbol: str,
+    duration: str | None = None,
     ts_start: int | None = None,
     ts_end: int | None = None,
     limit: int | None = None,
@@ -913,6 +914,14 @@ def _read_cached_window(
     """
     conditions = ["symbol = ?"]
     params: list = [symbol]
+
+    if duration and ts_start is None:
+        is_daily_table = table in {"ohlcv_1d", "ohlcv_1w", "ohlcv_1d_bid", "ohlcv_1d_ask"}
+        fallback_days = MAX_DAILY_LOOKBACK_DAYS if is_daily_table else MAX_INTRADAY_LOOKBACK_DAYS
+        lookback_days = max(1, min(_duration_to_days(duration, fallback_days), fallback_days))
+        cutoff_ms = int((time.time() - lookback_days * 86400) * 1000)
+        conditions.append("ts >= ?")
+        params.append(cutoff_ms)
 
     if ts_start is not None:
         conditions.append("ts >= ?")
@@ -1422,6 +1431,7 @@ def read_bars_window(
     symbol: str,
     bar_size: str = "1m",
     what_to_show: str = "TRADES",
+    duration: str | None = None,
     ts_start: int | None = None,
     ts_end: int | None = None,
     limit: int | None = None,
@@ -1436,6 +1446,7 @@ def read_bars_window(
         _init_schema(conn)
         bars = _read_cached_window(
             conn, symbol,
+            duration=duration,
             ts_start=ts_start, ts_end=ts_end, limit=limit,
             table=table,
         )
@@ -1614,6 +1625,10 @@ async def get_historical_bars(
                     anchor_ts = last_ts_ms or (max(b["time"] for b in fetched_bars) if fetched_bars else None)
                     tws_dur = _incremental_tws_duration(anchor_ts, tws_default_dur, is_daily)
                     tws_bars = await fetch_from_tws(ib, symbol, tws_dur, tws_bar, what_to_show)
+                did_full_tws_fetch = False
+                if tws_last_ts is None and not fetched_bars:
+                    did_full_tws_fetch = bool(is_daily or force_deep)
+
                 if tws_bars:
                     fetch_source = "tws"
                     # TWS bars are authoritative: merge with DailyIQ seed if present
@@ -1632,7 +1647,7 @@ async def get_historical_bars(
                         f"TWS returned {len(tws_bars)} bars for {symbol}",
                         {"symbol": symbol, "source": "tws", "count": len(tws_bars), "duration": tws_dur},
                     )
-                    if last_ts_ms is None and tws_last_ts is None:
+                    if did_full_tws_fetch and last_ts_ms is None and tws_last_ts is None:
                         new_earliest = min(b["time"] for b in tws_bars)
                         if earliest_ts_ms is None or new_earliest >= earliest_ts_ms - 86400_000:
                             mark_depth_complete = True

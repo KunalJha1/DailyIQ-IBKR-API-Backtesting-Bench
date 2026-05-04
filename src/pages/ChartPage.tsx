@@ -4,6 +4,7 @@ import type { Timeframe, ChartType, ActiveIndicator, ScriptResult, YScaleMode, C
 import { ChartEngine } from '../chart/core/ChartEngine';
 import { useChartData } from '../chart/hooks/useChartData';
 import { useSidecarPort } from '../lib/tws';
+import { useQuoteData } from '../lib/use-market-data';
 import { linkBus } from '../lib/link-bus';
 import ChartCanvas from '../chart/components/ChartCanvas';
 import ChartToolbar from '../chart/components/ChartToolbar';
@@ -49,9 +50,8 @@ import {
   probEngPixelFromNorm,
 } from '../lib/probEngLayout';
 import { MASTER_PROMPT } from '../lib/master-prompt';
-import {
-  DIQ_TABLE_TIMEFRAMES,
-} from '../chart/indicators/overlays/dailyIQTechnicalTable.constants';
+import DailyIQTechnicalTableOverlay from '../chart/components/DailyIQTechnicalTableOverlay';
+import DailyIQLiquidityTableOverlay from '../chart/components/DailyIQLiquidityTableOverlay';
 
 type SplitLayout = ChartSplitLayout;
 
@@ -66,7 +66,6 @@ const PROBENG_WIDGET_WIDTH_DETAILED = 230;
 const PROBENG_WIDGET_HEADER_HEIGHT = 24;
 const PROBENG_WIDGET_EDGE_PADDING = 10;
 const PROBENG_WIDGET_DRAG_THRESHOLD = 4;
-const TECH_TABLE_HEADER_HEIGHT = 24;
 const TECH_TABLE_EDGE_PADDING = 10;
 const TECH_TABLE_DRAG_THRESHOLD = 4;
 const TECH_TABLE_RESIZE_THRESHOLD = 3;
@@ -564,117 +563,6 @@ function ProbEngFloatingWidget({
       </table>
     </div>
   );
-}
-
-function diqTrendText(value: number): string {
-  if (value === 1) return 'Bullish';
-  if (value === -1) return 'Bearish';
-  return 'Neutral';
-}
-
-const DIQ_TABLE_BULL_GREEN = '#166534';
-const DIQ_TABLE_BULL_GREEN_ALT = '#15803D';
-
-function diqTrendColor(value: number): string {
-  if (value === 1) return DIQ_TABLE_BULL_GREEN;
-  if (value === -1) return '#FF3D71';
-  return '#6B7280';
-}
-
-function diqStrengthText(score: number): string {
-  if (!Number.isFinite(score)) return '--';
-  if (score >= 0.6) return 'High';
-  if (score >= 0.25) return 'Medium';
-  return 'Low';
-}
-
-function diqStrengthColor(score: number): string {
-  if (!Number.isFinite(score)) return '#6B7280';
-  if (score >= 0.6) return DIQ_TABLE_BULL_GREEN;
-  if (score >= 0.25) return '#F59E0B';
-  return '#FB923C';
-}
-
-function diqStrengthTextColor(score: number): string {
-  if (!Number.isFinite(score)) return '#FFFFFF';
-  if (score >= 0.6) return '#FFFFFF';
-  return '#111827';
-}
-
-function diqChopText(angle: number): string {
-  if (!Number.isFinite(angle)) return '--';
-  if (angle >= 5) return 'Strong Up';
-  if (angle >= 3.57) return 'Up';
-  if (angle >= 2.14) return 'Med Up';
-  if (angle >= 0.71) return 'Weak Up';
-  if (angle <= -5) return 'Strong Down';
-  if (angle <= -3.57) return 'Down';
-  if (angle <= -2.14) return 'Med Down';
-  if (angle <= -0.71) return 'Weak Down';
-  return 'Chop';
-}
-
-function diqChopColor(angle: number): string {
-  if (!Number.isFinite(angle)) return '#6B7280';
-  if (angle >= 5) return '#26C6DA';
-  if (angle >= 3.57) return '#43A047';
-  if (angle >= 2.14) return '#A5D6A7';
-  if (angle >= 0.71) return '#009688';
-  if (angle <= -5) return '#D50000';
-  if (angle <= -3.57) return '#E91E63';
-  if (angle <= -2.14) return '#FF6D00';
-  if (angle <= -0.71) return '#FFB74D';
-  return '#FDD835';
-}
-
-function diqChopTextColor(angle: number): string {
-  if (!Number.isFinite(angle)) return '#FFFFFF';
-  if (angle >= 3.57) return '#FFFFFF';
-  if (angle <= -5) return '#FFFFFF';
-  if (angle <= -3.57) return '#FFFFFF';
-  return '#111827';
-}
-
-function diqRsiText(now: number, prev: number): string {
-  if (!Number.isFinite(now)) return '--';
-  const diff = Number.isFinite(prev) ? now - prev : 0;
-  const arrow = diff > 0.25 ? '↑' : diff < -0.25 ? '↓' : '→';
-  return `${now.toFixed(1)} ${arrow}`;
-}
-
-function diqRsiColor(now: number, prev: number): string {
-  if (!Number.isFinite(now)) return '#6B7280';
-  const diff = Number.isFinite(prev) ? now - prev : 0;
-  if (diff > 0.25 && now >= 55) return DIQ_TABLE_BULL_GREEN;
-  if (diff < -0.25 && now <= 45) return '#FF3D71';
-  if (Math.abs(diff) <= 0.25) return '#6B7280';
-  if (now > 60) return DIQ_TABLE_BULL_GREEN_ALT;
-  if (now < 40) return '#991B1B';
-  return '#F59E0B';
-}
-
-function diqMacdText(macdNow: number, signalNow: number, macdPrev: number, signalPrev: number): string {
-  if (!Number.isFinite(macdNow) || !Number.isFinite(signalNow)) return '--';
-  const bullCross = Number.isFinite(macdPrev) && Number.isFinite(signalPrev) && macdPrev <= signalPrev && macdNow > signalNow;
-  const bearCross = Number.isFinite(macdPrev) && Number.isFinite(signalPrev) && macdPrev >= signalPrev && macdNow < signalNow;
-  const diff = Number.isFinite(macdPrev) ? macdNow - macdPrev : 0;
-  const arrow = diff > 0 ? '↑' : diff < 0 ? '↓' : '→';
-  if (bullCross) return 'Bull X ↑';
-  if (bearCross) return 'Bear X ↓';
-  if (macdNow > signalNow) return `Bull ${arrow}`;
-  if (macdNow < signalNow) return `Bear ${arrow}`;
-  return 'Flat →';
-}
-
-function diqMacdColor(macdNow: number, signalNow: number, macdPrev: number, signalPrev: number): string {
-  if (!Number.isFinite(macdNow) || !Number.isFinite(signalNow)) return '#6B7280';
-  const bullCross = Number.isFinite(macdPrev) && Number.isFinite(signalPrev) && macdPrev <= signalPrev && macdNow > signalNow;
-  const bearCross = Number.isFinite(macdPrev) && Number.isFinite(signalPrev) && macdPrev >= signalPrev && macdNow < signalNow;
-  if (bullCross) return DIQ_TABLE_BULL_GREEN;
-  if (bearCross) return '#FF3D71';
-  if (macdNow > signalNow) return DIQ_TABLE_BULL_GREEN;
-  if (macdNow < signalNow) return '#FB923C';
-  return '#6B7280';
 }
 
 interface TechnicalTableRowSnapshot {
@@ -1326,688 +1214,6 @@ async function fetchTableBars(
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
 
-function DailyIQTechnicalTableOverlay({
-  snapshot,
-  widget,
-  dragging,
-  resizing,
-  onHeaderPointerDown,
-  onHeaderPointerMove,
-  onHeaderPointerUp,
-  onHeaderPointerCancel,
-  onResizePointerDown,
-  onResizePointerMove,
-  onResizePointerUp,
-  onResizePointerCancel,
-  onToggleLock,
-}: {
-  snapshot: TechnicalTableSnapshot | null;
-  widget: TechnicalTableWidgetState;
-  dragging: boolean;
-  resizing: boolean;
-  onHeaderPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onHeaderPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onHeaderPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onHeaderPointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (corner: TechnicalTableResizeCorner, event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onToggleLock: () => void;
-}) {
-  const [headerHovered, setHeaderHovered] = useState(false);
-  const rows = snapshot?.rows ?? DIQ_TABLE_TIMEFRAMES.map((tf) => ({
-    tf,
-    trend: NaN,
-    strength: NaN,
-    chop: NaN,
-    rsiNow: NaN,
-    rsiPrev: NaN,
-    macdNow: NaN,
-    macdSignal: NaN,
-    macdPrev: NaN,
-    macdSignalPrev: NaN,
-  }));
-
-  const overallTrend = snapshot?.overallTrend ?? NaN;
-  const overallStrength = snapshot?.overallStrength ?? NaN;
-  const overallChop = snapshot?.overallChop ?? NaN;
-  const overallRsi = snapshot?.overallRsi ?? NaN;
-  const overallMacdState = snapshot?.overallMacdState ?? NaN;
-  const overallMacdText = overallMacdState === 1 ? 'Bull' : overallMacdState === -1 ? 'Bear' : 'Flat';
-  const overallMacdColor = overallMacdState === 1 ? DIQ_TABLE_BULL_GREEN : overallMacdState === -1 ? '#FF3D71' : '#6B7280';
-  const showHeader = !widget.locked || headerHovered;
-  const widthScale = (widget.width - TECH_TABLE_MIN_WIDTH) / (TECH_TABLE_MAX_WIDTH - TECH_TABLE_MIN_WIDTH);
-  const heightScale = (widget.height - TECH_TABLE_MIN_HEIGHT) / (TECH_TABLE_MAX_HEIGHT - TECH_TABLE_MIN_HEIGHT);
-  const tableScale = Math.max(0, Math.min(1, (widthScale + heightScale) / 2));
-  const titleFontSize = 10 + (tableScale * 4);
-  const headerFontSize = 10 + (tableScale * 5);
-  const bodyFontSize = 10 + (tableScale * 5);
-  const headerPadY = 5 + (tableScale * 5);
-  const headerPadX = 7 + (tableScale * 7);
-  const bodyPadY = 4 + (tableScale * 5);
-  const bodyPadX = 7 + (tableScale * 6);
-  const overallPadY = 5 + (tableScale * 5);
-  const overallPadX = 7 + (tableScale * 7);
-  const headerCellPadding = `${headerPadY}px ${headerPadX}px`;
-  const bodyCellPadding = `${bodyPadY}px ${bodyPadX}px`;
-  const overallCellPadding = `${overallPadY}px ${overallPadX}px`;
-  const lockButtonSize = 16 + (tableScale * 8);
-  const gripSize = 12 + (tableScale * 6);
-  const handleSize = 14 + (tableScale * 8);
-  const resizeHandleInset = 3 + (tableScale * 2);
-  const cornerHandles: Array<{ corner: TechnicalTableResizeCorner; cursor: string; style: { left?: number; right?: number; top?: number; bottom?: number } }> = [
-    { corner: 'top-left', cursor: 'nwse-resize', style: { left: 0, top: 0 } },
-    { corner: 'top-right', cursor: 'nesw-resize', style: { right: 0, top: 0 } },
-    { corner: 'bottom-left', cursor: 'nesw-resize', style: { left: 0, bottom: 0 } },
-    { corner: 'bottom-right', cursor: 'nwse-resize', style: { right: 0, bottom: 0 } },
-  ];
-
-  return (
-    <div
-      onPointerEnter={() => setHeaderHovered(true)}
-      onPointerLeave={() => setHeaderHovered(false)}
-      style={{
-        position: 'absolute',
-        left: widget.x,
-        top: widget.y,
-        zIndex: 18,
-        pointerEvents: 'auto',
-        border: '1px solid rgba(255,255,255,0.12)',
-        backgroundColor: 'rgba(0,0,0,0.92)',
-        borderRadius: 8,
-        overflow: 'hidden',
-        boxShadow: dragging || resizing ? '0 16px 36px rgba(0,0,0,0.52)' : '0 10px 24px rgba(0,0,0,0.42)',
-        width: widget.width,
-        height: widget.height,
-        display: 'flex',
-        flexDirection: 'column',
-        transition: dragging || resizing ? 'none' : 'box-shadow 120ms ease-out',
-      }}
-    >
-      <div
-        onPointerDown={widget.locked ? undefined : onHeaderPointerDown}
-        onPointerMove={widget.locked ? undefined : onHeaderPointerMove}
-        onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
-        onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          height: TECH_TABLE_HEADER_HEIGHT,
-          zIndex: 2,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 8px 0 6px',
-          borderBottom: '1px solid rgba(255,255,255,0.12)',
-          fontSize: titleFontSize,
-          fontFamily: '"JetBrains Mono", monospace',
-          color: '#E6EDF3',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-          background: widget.locked
-            ? '#000000'
-            : dragging
-              ? 'linear-gradient(180deg, rgba(39,56,82,0.98) 0%, rgba(19,28,43,0.98) 100%)'
-              : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
-          cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
-          touchAction: widget.locked ? undefined : 'none',
-          opacity: showHeader ? 1 : 0,
-          pointerEvents: showHeader ? 'auto' : 'none',
-          transform: showHeader ? 'translateY(0)' : 'translateY(-100%)',
-          transition: 'opacity 120ms ease-out, transform 120ms ease-out',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          {!widget.locked && (
-            <span
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: gripSize,
-                height: gripSize,
-                borderRadius: 4,
-                color: dragging ? '#C7D2FE' : '#8B949E',
-                background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                flexShrink: 0,
-              }}
-            >
-              <GripHorizontal size={Math.max(8, gripSize - 6)} strokeWidth={1.7} />
-            </span>
-          )}
-          <span style={{ color: '#8B949E' }}>Technical Table</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <button
-            type="button"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleLock();
-            }}
-            style={{
-              border: '1px solid rgba(255,255,255,0.12)',
-              borderRadius: 4,
-              background: 'transparent',
-              color: '#E6EDF3',
-              width: lockButtonSize,
-              height: lockButtonSize,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-              fontSize: 11 + tableScale,
-              fontFamily: '"JetBrains Mono", monospace',
-              padding: 0,
-              cursor: 'pointer',
-            }}
-            title={widget.locked ? 'Unlock placement' : 'Lock placement'}
-            aria-label={widget.locked ? 'Unlock placement' : 'Lock placement'}
-          >
-            {widget.locked ? <Lock size={12} strokeWidth={1.5} /> : <Unlock size={12} strokeWidth={1.5} />}
-          </button>
-        </div>
-      </div>
-
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflow: 'hidden',
-          position: 'relative',
-          backgroundColor: '#1E2232',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-        }}
-      >
-          <table
-            style={{
-              width: '100%',
-              height: '100%',
-              borderCollapse: 'separate',
-              borderSpacing: 0,
-              fontSize: bodyFontSize,
-              fontFamily: '"JetBrains Mono", monospace',
-              color: '#E6EDF3',
-              backgroundColor: '#1E2232',
-              tableLayout: 'fixed',
-              userSelect: 'none',
-              WebkitUserSelect: 'none',
-            }}
-          >
-          <colgroup>
-            <col style={{ width: '18%' }} />
-            <col style={{ width: '16%' }} />
-            <col style={{ width: '16%' }} />
-            <col style={{ width: '20%' }} />
-            <col style={{ width: '15%' }} />
-            <col style={{ width: '15%' }} />
-          </colgroup>
-          <thead>
-            <tr>
-              {['Timeframe', 'Trend', 'Strength', 'Chop', 'RSI', 'MACD'].map((head) => (
-                <th
-                  key={head}
-                  style={{
-                    position: 'sticky',
-                    top: 0,
-                    zIndex: 1,
-                    padding: headerCellPadding,
-                    borderBottom: '1px solid rgba(255,255,255,0.14)',
-                    backgroundColor: '#1E2232',
-                    color: '#FFFFFF',
-                    textAlign: head === 'Timeframe' ? 'left' : 'center',
-                    fontWeight: 600,
-                    fontSize: headerFontSize,
-                    whiteSpace: 'nowrap',
-                    verticalAlign: 'middle',
-                  }}
-                >
-                  {head}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.tf}>
-                <td style={{ padding: bodyCellPadding, backgroundColor: '#141821', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{row.tf}</td>
-                <td style={{ padding: bodyCellPadding, backgroundColor: diqTrendColor(row.trend), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqTrendText(row.trend)}</td>
-                <td style={{ padding: bodyCellPadding, backgroundColor: diqStrengthColor(row.strength), color: diqStrengthTextColor(row.strength), textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqStrengthText(row.strength)}</td>
-                <td style={{ padding: bodyCellPadding, backgroundColor: diqChopColor(row.chop), color: diqChopTextColor(row.chop), textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqChopText(row.chop)}</td>
-                <td style={{ padding: bodyCellPadding, backgroundColor: diqRsiColor(row.rsiNow, row.rsiPrev), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqRsiText(row.rsiNow, row.rsiPrev)}</td>
-                <td style={{ padding: bodyCellPadding, backgroundColor: diqMacdColor(row.macdNow, row.macdSignal, row.macdPrev, row.macdSignalPrev), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqMacdText(row.macdNow, row.macdSignal, row.macdPrev, row.macdSignalPrev)}</td>
-              </tr>
-            ))}
-            <tr>
-              <td style={{ padding: overallCellPadding, backgroundColor: '#1E2232', color: '#FFFFFF', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>Overall</td>
-              <td style={{ padding: overallCellPadding, backgroundColor: diqTrendColor(overallTrend), color: '#FFFFFF', textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqTrendText(overallTrend)}</td>
-              <td style={{ padding: overallCellPadding, backgroundColor: diqStrengthColor(overallStrength), color: diqStrengthTextColor(overallStrength), textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqStrengthText(overallStrength)}</td>
-              <td style={{ padding: overallCellPadding, backgroundColor: diqChopColor(overallChop), color: diqChopTextColor(overallChop), textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{diqChopText(overallChop)}</td>
-              <td style={{ padding: overallCellPadding, backgroundColor: diqRsiColor(overallRsi, overallRsi), color: '#FFFFFF', textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{Number.isFinite(overallRsi) ? overallRsi.toFixed(1) : '--'}</td>
-              <td style={{ padding: overallCellPadding, backgroundColor: overallMacdColor, color: '#FFFFFF', textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>{overallMacdText}</td>
-            </tr>
-          </tbody>
-          </table>
-      </div>
-
-      {!widget.locked && (
-        <>
-          {cornerHandles.map(({ corner, cursor, style }) => (
-            <div
-              key={corner}
-              onPointerDown={(event) => onResizePointerDown(corner, event)}
-              onPointerMove={onResizePointerMove}
-              onPointerUp={onResizePointerUp}
-              onPointerCancel={onResizePointerCancel}
-              title={`Resize table from ${corner}`}
-              style={{
-                position: 'absolute',
-                width: handleSize,
-                height: handleSize,
-                cursor,
-                touchAction: 'none',
-                ...style,
-              }}
-            >
-              <div
-                style={{
-                  position: 'absolute',
-                  inset: 4,
-                  insetInline: resizeHandleInset,
-                  insetBlock: resizeHandleInset,
-                  borderRadius: 4,
-                  border: '1px solid rgba(255,255,255,0.18)',
-                  background: 'rgba(255,255,255,0.08)',
-                }}
-              />
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  );
-}
-
-function DailyIQLiquidityTableOverlay({
-  snapshot,
-  widget,
-  dragging,
-  resizing,
-  onHeaderPointerDown,
-  onHeaderPointerMove,
-  onHeaderPointerUp,
-  onHeaderPointerCancel,
-  onResizePointerDown,
-  onResizePointerMove,
-  onResizePointerUp,
-  onResizePointerCancel,
-  onToggleLock,
-}: {
-  snapshot: LiquidityTableSnapshot | null;
-  widget: TechnicalTableWidgetState;
-  dragging: boolean;
-  resizing: boolean;
-  onHeaderPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onHeaderPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onHeaderPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onHeaderPointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerDown: (corner: TechnicalTableResizeCorner, event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onResizePointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => void;
-  onToggleLock: () => void;
-}) {
-  const [headerHovered, setHeaderHovered] = useState(false);
-  const rows = snapshot?.rows ?? [
-    { highLabel: 'DH', highPrice: NaN, highSwept: false, highTarget: NaN, lowLabel: 'DL', lowPrice: NaN, lowSwept: false, lowTarget: NaN },
-    { highLabel: 'PDH', highPrice: NaN, highSwept: false, highTarget: NaN, lowLabel: 'PDL', lowPrice: NaN, lowSwept: false, lowTarget: NaN },
-    { highLabel: 'WH', highPrice: NaN, highSwept: false, highTarget: NaN, lowLabel: 'WL', lowPrice: NaN, lowSwept: false, lowTarget: NaN },
-    { highLabel: 'MH', highPrice: NaN, highSwept: false, highTarget: NaN, lowLabel: 'ML', lowPrice: NaN, lowSwept: false, lowTarget: NaN },
-    { highLabel: '52WH', highPrice: NaN, highSwept: false, highTarget: NaN, lowLabel: '52WL', lowPrice: NaN, lowSwept: false, lowTarget: NaN },
-  ];
-  const showHeader = !widget.locked || headerHovered;
-  const widthScale = (widget.width - TECH_TABLE_MIN_WIDTH) / (TECH_TABLE_MAX_WIDTH - TECH_TABLE_MIN_WIDTH);
-  const heightScale = (widget.height - TECH_TABLE_MIN_HEIGHT) / (TECH_TABLE_MAX_HEIGHT - TECH_TABLE_MIN_HEIGHT);
-  const tableScale = Math.max(0, Math.min(1, (widthScale + heightScale) / 2));
-  const titleFontSize = 9 + (tableScale * 3);
-  const topHeaderFontSize = 9 + (tableScale * 2);
-  const columnHeaderFontSize = 8 + (tableScale * 3);
-  const bodyFontSize = 9 + (tableScale * 3);
-  const headerPadY = 4 + (tableScale * 3);
-  const headerPadX = 6 + (tableScale * 4);
-  const bodyPadY = 3 + (tableScale * 3);
-  const bodyPadX = 5 + (tableScale * 4);
-  const headerCellPadding = `${headerPadY}px ${headerPadX}px`;
-  const bodyCellPadding = `${bodyPadY}px ${bodyPadX}px`;
-  const lockButtonSize = 16 + (tableScale * 8);
-  const gripSize = 12 + (tableScale * 6);
-  const handleSize = 14 + (tableScale * 8);
-  const resizeHandleInset = 3 + (tableScale * 2);
-  const closePrice = snapshot?.close ?? NaN;
-  const nearPct = snapshot?.nearPct ?? 0.005;
-  const highlightNearLevels = snapshot?.highlightNearLevels ?? true;
-  const atrDaily = snapshot?.atrDaily ?? NaN;
-  const targetAtrMult = snapshot?.targetAtrMult ?? 1;
-  const cornerHandles: Array<{ corner: TechnicalTableResizeCorner; cursor: string; style: { left?: number; right?: number; top?: number; bottom?: number } }> = [
-    { corner: 'top-left', cursor: 'nwse-resize', style: { left: 0, top: 0 } },
-    { corner: 'top-right', cursor: 'nesw-resize', style: { right: 0, top: 0 } },
-    { corner: 'bottom-left', cursor: 'nesw-resize', style: { left: 0, bottom: 0 } },
-    { corner: 'bottom-right', cursor: 'nwse-resize', style: { right: 0, bottom: 0 } },
-  ];
-
-  const isNear = (level: number) => (
-    highlightNearLevels
-    && Number.isFinite(level)
-    && level !== 0
-    && Number.isFinite(closePrice)
-    && Math.abs(closePrice - level) / Math.abs(level) <= nearPct
-  );
-  const priceText = (value: number) => Number.isFinite(value) ? value.toFixed(2) : '--';
-  const atrText = Number.isFinite(atrDaily) ? atrDaily.toFixed(2) : '--';
-  const targetAtrText = `${targetAtrMult.toFixed(2)} ATR`;
-  const sweepText = (didSweep: boolean, bullSide: boolean) => didSweep ? (bullSide ? 'Swept ↑' : 'Swept ↓') : 'Not Swept';
-  const sweepBg = (didSweep: boolean, bullSide: boolean) => !didSweep ? '#2D2D3C' : bullSide ? '#00C853' : '#FF3D71';
-  const targetBg = (didSweep: boolean, bullSide: boolean) => !didSweep ? '#2D2D3C' : bullSide ? '#00C853' : '#FF3D71';
-  const sweepTextColor = (didSweep: boolean, bullSide: boolean) => didSweep && bullSide ? '#000000' : '#FFFFFF';
-  const levelBg = (near: boolean) => near ? '#FF8C00' : '#141821';
-  const priceBg = (near: boolean) => near ? '#FFB43C' : '#232332';
-  const cellTextColor = (near: boolean) => near ? '#000000' : '#FFFFFF';
-
-  return (
-    <div
-      onPointerEnter={() => setHeaderHovered(true)}
-      onPointerLeave={() => setHeaderHovered(false)}
-      style={{
-        position: 'absolute',
-        left: widget.x,
-        top: widget.y,
-        zIndex: 18,
-        pointerEvents: 'auto',
-        border: '1px solid rgba(255,255,255,0.12)',
-        backgroundColor: 'rgba(0,0,0,0.92)',
-        borderRadius: 8,
-        overflow: 'hidden',
-        boxShadow: dragging || resizing ? '0 16px 36px rgba(0,0,0,0.52)' : '0 10px 24px rgba(0,0,0,0.42)',
-        width: widget.width,
-        height: widget.height,
-        display: 'flex',
-        flexDirection: 'column',
-        transition: dragging || resizing ? 'none' : 'box-shadow 120ms ease-out',
-      }}
-    >
-      <div
-        onPointerDown={widget.locked ? undefined : onHeaderPointerDown}
-        onPointerMove={widget.locked ? undefined : onHeaderPointerMove}
-        onPointerUp={widget.locked ? undefined : onHeaderPointerUp}
-        onPointerCancel={widget.locked ? undefined : onHeaderPointerCancel}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          height: TECH_TABLE_HEADER_HEIGHT,
-          zIndex: 2,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 8px 0 6px',
-          borderBottom: '1px solid rgba(255,255,255,0.12)',
-          fontSize: titleFontSize,
-          fontFamily: '"JetBrains Mono", monospace',
-          color: '#E6EDF3',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-          background: widget.locked
-            ? '#000000'
-            : dragging
-              ? 'linear-gradient(180deg, rgba(39,56,82,0.98) 0%, rgba(19,28,43,0.98) 100%)'
-              : 'linear-gradient(180deg, rgba(28,33,40,0.98) 0%, rgba(15,23,32,0.98) 100%)',
-          cursor: widget.locked ? 'default' : dragging ? 'grabbing' : 'grab',
-          touchAction: widget.locked ? undefined : 'none',
-          opacity: showHeader ? 1 : 0,
-          pointerEvents: showHeader ? 'auto' : 'none',
-          transform: showHeader ? 'translateY(0)' : 'translateY(-100%)',
-          transition: 'opacity 120ms ease-out, transform 120ms ease-out',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          {!widget.locked && (
-            <span
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: gripSize,
-                height: gripSize,
-                borderRadius: 4,
-                color: dragging ? '#C7D2FE' : '#8B949E',
-                background: dragging ? 'rgba(140,180,255,0.16)' : 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                flexShrink: 0,
-              }}
-            >
-              <GripHorizontal size={Math.max(8, gripSize - 6)} strokeWidth={1.7} />
-            </span>
-          )}
-          <span style={{ color: '#8B949E' }}>Liquidity Sweep Table</span>
-        </div>
-        <button
-          type="button"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleLock();
-          }}
-          style={{
-            border: '1px solid rgba(255,255,255,0.12)',
-            borderRadius: 4,
-            background: 'transparent',
-            color: '#E6EDF3',
-            width: lockButtonSize,
-            height: lockButtonSize,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            lineHeight: 1,
-            fontSize: 11 + tableScale,
-            fontFamily: '"JetBrains Mono", monospace',
-            padding: 0,
-            cursor: 'pointer',
-          }}
-          title={widget.locked ? 'Unlock placement' : 'Lock placement'}
-          aria-label={widget.locked ? 'Unlock placement' : 'Lock placement'}
-        >
-          {widget.locked ? <Lock size={12} strokeWidth={1.5} /> : <Unlock size={12} strokeWidth={1.5} />}
-        </button>
-      </div>
-
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflow: 'hidden',
-          position: 'relative',
-          backgroundColor: '#1E2232',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-        }}
-      >
-        <table
-          style={{
-            width: '100%',
-            height: '100%',
-            borderCollapse: 'separate',
-            borderSpacing: 0,
-            tableLayout: 'fixed',
-            fontSize: bodyFontSize,
-            fontFamily: '"JetBrains Mono", monospace',
-            color: '#E6EDF3',
-            backgroundColor: '#1E2232',
-          }}
-        >
-          <colgroup>
-            <col style={{ width: '15%' }} />
-            <col style={{ width: '12%' }} />
-            <col style={{ width: '12%' }} />
-            <col style={{ width: '11%' }} />
-            <col style={{ width: '15%' }} />
-            <col style={{ width: '12%' }} />
-            <col style={{ width: '12%' }} />
-            <col style={{ width: '11%' }} />
-          </colgroup>
-          <thead>
-            <tr>
-              <th
-                style={{
-                  padding: headerCellPadding,
-                  borderBottom: '1px solid rgba(255,255,255,0.14)',
-                  backgroundColor: '#3A3F52',
-                  color: '#FFFFFF',
-                  textAlign: 'center',
-                  fontWeight: 600,
-                  fontSize: topHeaderFontSize,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                ATR
-              </th>
-              <th
-                style={{
-                  padding: headerCellPadding,
-                  borderBottom: '1px solid rgba(255,255,255,0.14)',
-                  backgroundColor: '#FACC15',
-                  color: '#000000',
-                  textAlign: 'center',
-                  fontWeight: 600,
-                  fontSize: topHeaderFontSize,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {atrText}
-              </th>
-              <th style={{ padding: headerCellPadding, borderBottom: '1px solid rgba(255,255,255,0.14)', backgroundColor: 'transparent' }} />
-              <th
-                style={{
-                  padding: headerCellPadding,
-                  borderBottom: '1px solid rgba(255,255,255,0.14)',
-                  backgroundColor: 'transparent',
-                }}
-              />
-              <th
-                style={{
-                  padding: headerCellPadding,
-                  borderBottom: '1px solid rgba(255,255,255,0.14)',
-                  backgroundColor: '#3A3F52',
-                  color: '#FFFFFF',
-                  textAlign: 'center',
-                  fontWeight: 600,
-                  fontSize: topHeaderFontSize,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                ATR
-              </th>
-              <th
-                style={{
-                  padding: headerCellPadding,
-                  borderBottom: '1px solid rgba(255,255,255,0.14)',
-                  backgroundColor: '#FACC15',
-                  color: '#000000',
-                  textAlign: 'center',
-                  fontWeight: 600,
-                  fontSize: topHeaderFontSize,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {atrText}
-              </th>
-              <th style={{ padding: headerCellPadding, borderBottom: '1px solid rgba(255,255,255,0.14)', backgroundColor: 'transparent' }} />
-              <th style={{ padding: headerCellPadding, borderBottom: '1px solid rgba(255,255,255,0.14)', backgroundColor: 'transparent' }} />
-            </tr>
-            <tr>
-              {['LEVEL (H)', 'PRICE', 'SWEEP?', 'TP', 'LEVEL (L)', 'PRICE', 'SWEEP?', 'TP'].map((head) => (
-                <th
-                  key={head}
-                  style={{
-                    padding: headerCellPadding,
-                    borderBottom: '1px solid rgba(255,255,255,0.14)',
-                    backgroundColor: '#1E2232',
-                    color: '#FFFFFF',
-                    textAlign: 'center',
-                    fontWeight: 600,
-                    fontSize: columnHeaderFontSize,
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {head}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const highNear = isNear(row.highPrice);
-              const lowNear = isNear(row.lowPrice);
-                  return (
-                <tr key={`${row.highLabel}-${row.lowLabel}`}>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: levelBg(highNear), color: cellTextColor(highNear), textAlign: 'center', whiteSpace: 'nowrap' }}>{row.highLabel}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: priceBg(highNear), color: cellTextColor(highNear), textAlign: 'center', whiteSpace: 'nowrap' }}>{priceText(row.highPrice)}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: sweepBg(row.highSwept, false), color: sweepTextColor(row.highSwept, false), textAlign: 'center', whiteSpace: 'nowrap' }}>{sweepText(row.highSwept, false)}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: targetBg(row.highSwept, false), color: '#FFFFFF', textAlign: 'center', whiteSpace: 'pre-line', lineHeight: 1.15 }}>{`${priceText(row.highTarget)}\n${targetAtrText}`}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: levelBg(lowNear), color: cellTextColor(lowNear), textAlign: 'center', whiteSpace: 'nowrap' }}>{row.lowLabel}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: priceBg(lowNear), color: cellTextColor(lowNear), textAlign: 'center', whiteSpace: 'nowrap' }}>{priceText(row.lowPrice)}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: sweepBg(row.lowSwept, true), color: sweepTextColor(row.lowSwept, true), textAlign: 'center', whiteSpace: 'nowrap' }}>{sweepText(row.lowSwept, true)}</td>
-                  <td style={{ padding: bodyCellPadding, backgroundColor: targetBg(row.lowSwept, true), color: row.lowSwept ? '#000000' : '#FFFFFF', textAlign: 'center', whiteSpace: 'pre-line', lineHeight: 1.15 }}>{`${priceText(row.lowTarget)}\n${targetAtrText}`}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {!widget.locked && (
-        <>
-          {cornerHandles.map(({ corner, cursor, style }) => (
-            <div
-              key={corner}
-              onPointerDown={(event) => onResizePointerDown(corner, event)}
-              onPointerMove={onResizePointerMove}
-              onPointerUp={onResizePointerUp}
-              onPointerCancel={onResizePointerCancel}
-              title={`Resize table from ${corner}`}
-              style={{
-                position: 'absolute',
-                width: handleSize,
-                height: handleSize,
-                cursor,
-                touchAction: 'none',
-                ...style,
-              }}
-            >
-              <div
-                style={{
-                  position: 'absolute',
-                  inset: 4,
-                  insetInline: resizeHandleInset,
-                  insetBlock: resizeHandleInset,
-                  borderRadius: 4,
-                  border: '1px solid rgba(255,255,255,0.18)',
-                  background: 'rgba(255,255,255,0.08)',
-                }}
-              />
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  );
-}
-
 const LAYOUT_OPTIONS: { id: SplitLayout; label: string; cols: number; rows: number }[] = [
   { id: '1',  label: 'Single', cols: 1, rows: 1 },
   { id: '2h', label: '1 × 2',  cols: 2, rows: 1 },
@@ -2024,6 +1230,10 @@ function getSplitLayoutDimensions(layout: SplitLayout): { cols: number; rows: nu
 
 function getSplitPaneTabId(tabId: string | undefined, paneIndex: number): string {
   return paneIndex === 0 ? (tabId ?? 'chart') : `${tabId ?? 'chart'}-pane${paneIndex}`;
+}
+
+function cloneChartState(state: ChartState): ChartState {
+  return JSON.parse(JSON.stringify(state)) as ChartState;
 }
 
 function LayoutPicker({ current, onSelect, style }: { current: SplitLayout; onSelect: (l: SplitLayout) => void; style?: React.CSSProperties }) {
@@ -2242,6 +1452,11 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     [alerts, symbol],
   );
   useAlertEvaluator(bars, symbol, activeIndicators);
+
+  const liveQuote = useQuoteData('chart-toolbar', symbol);
+  const tickerQuote = liveQuote && liveQuote.last
+    ? { price: liveQuote.last, dollar: liveQuote.change, pct: liveQuote.changePct }
+    : null;
 
   const customStrategyResults = useMemo(() => {
     const next = new Map<string, CustomStrategyEvaluation>();
@@ -2601,23 +1816,36 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     yScaleMode,
   ]);
 
-  const seedSplitPaneStates = useCallback((nextLayout: SplitLayout) => {
+  const persistParentSplitLayout = useCallback((nextLayout: SplitLayout) => {
+    if (!tabId) return;
+    const currentState = engineRef.current
+      ? getCurrentChartState(false)
+      : (loadChartState(tabId) ?? getCurrentChartState(false));
+    saveChartState(tabId, { ...currentState, splitLayout: nextLayout });
+  }, [getCurrentChartState, tabId]);
+
+  const seedSplitPaneStates = useCallback((nextLayout: SplitLayout, overwriteExisting = false) => {
     if (!tabId || nextLayout === '1') return;
 
     const { cols, rows } = getSplitLayoutDimensions(nextLayout);
     const paneCount = cols * rows;
     if (paneCount <= 1) return;
 
-    saveChartState(tabId, getCurrentChartState(false));
-    const clonedState = getCurrentChartState(true);
+    const sourceState = loadChartState(getSplitPaneTabId(tabId, activeSplitPaneIndex))
+      ?? loadChartState(tabId)
+      ?? getCurrentChartState(true);
+    const clonedState = { ...cloneChartState(sourceState), indicatorPanelOpen: false, strategyPanelOpen: false, splitLayout: '1' as SplitLayout };
     for (let paneIndex = 1; paneIndex < paneCount; paneIndex += 1) {
+      if (!overwriteExisting && loadChartState(getSplitPaneTabId(tabId, paneIndex))) continue;
       saveChartState(getSplitPaneTabId(tabId, paneIndex), clonedState);
     }
-  }, [getCurrentChartState, tabId]);
+  }, [activeSplitPaneIndex, getCurrentChartState, tabId]);
 
   const handleSplitLayoutSelect = useCallback((nextLayout: SplitLayout) => {
     if (splitLayout === '1' && nextLayout !== '1') {
-      seedSplitPaneStates(nextLayout);
+      seedSplitPaneStates(nextLayout, true);
+    } else if (splitLayout !== '1' && nextLayout !== '1') {
+      seedSplitPaneStates(nextLayout, false);
     } else if (splitLayout !== '1' && nextLayout === '1' && tabId) {
       const nextState = loadChartState(tabId);
       if (nextState) {
@@ -2646,9 +1874,10 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         restoredIndicatorsRef.current = false;
       }
     }
+    persistParentSplitLayout(nextLayout);
     setSplitLayout(nextLayout);
     setSplitPickerOpen(false);
-  }, [seedSplitPaneStates, splitLayout, tabId]);
+  }, [persistParentSplitLayout, seedSplitPaneStates, splitLayout, tabId]);
 
   // Re-add persisted indicators once engine is ready
   useEffect(() => {
@@ -3987,6 +3216,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         compact={compact}
         symbol={symbol}
         onSymbolChange={handleSymbolChange}
+        tickerQuote={tickerQuote ?? undefined}
         timeframe={timeframe}
         onTimeframeChange={handleTimeframeChange}
         chartType={chartType}

@@ -69,6 +69,12 @@ function readShowExpandedInstructions(config: Record<string, unknown>): boolean 
   return raw;
 }
 
+function readShowInfoColumn(config: Record<string, unknown>): boolean {
+  const raw = config.showInfoColumn;
+  if (typeof raw !== "boolean") return true;
+  return raw;
+}
+
 function sourceLabel(source: string | null): string {
   if (source === "today") return "DH/DL";
   if (source === "prevDay") return "PDH/PDL";
@@ -148,7 +154,11 @@ function SymbolLogo({ symbol }: { symbol: string }) {
   );
 }
 
-const COL = "grid-cols-[16px_96px_minmax(0,1fr)_44px_108px]";
+function buildColTemplate(showInfo: boolean): string {
+  return showInfo
+    ? "grid-cols-[16px_minmax(0,96px)_minmax(0,1fr)_44px_minmax(88px,108px)]"
+    : "grid-cols-[16px_minmax(0,96px)_44px_minmax(88px,108px)]";
+}
 
 function LiquiditySweepDetectorCard({
   linkChannel,
@@ -162,6 +172,8 @@ function LiquiditySweepDetectorCard({
   const timeframe = readTimeframe(config);
   const lookbackBars = readLookbackBars(config);
   const showExpandedInstructions = readShowExpandedInstructions(config);
+  const showInfoColumn = readShowInfoColumn(config);
+  const COL = buildColTemplate(showInfoColumn);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statuses, setStatuses] = useState<Record<string, LiquiditySweepStatus>>({});
@@ -171,6 +183,7 @@ function LiquiditySweepDetectorCard({
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   // "asc" = most recent first, "desc" = oldest first, null = manual drag order
   const [agoSort, setAgoSort] = useState<"asc" | "desc" | null>(null);
+  const dragIndexRef = useRef<number | null>(null);
   const { quotes, status: quoteStatus } = useWatchlistData(symbols);
   const scrollRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
@@ -321,8 +334,10 @@ function LiquiditySweepDetectorCard({
 
   // Drag-and-drop handlers
   const handleDragStart = (baseIdx: number) => (e: React.DragEvent) => {
-    setAgoSort(null); // drop into manual order when user starts dragging
-    setDragIndex(baseIdx);
+    e.stopPropagation();
+    dragIndexRef.current = baseIdx;
+    // Defer visual state update to prevent WebKit from cancelling the drag on re-render
+    setTimeout(() => setDragIndex(baseIdx), 0);
     e.dataTransfer.effectAllowed = "move";
     const dragSymbol = symbols[baseIdx];
     if (dragSymbol) e.dataTransfer.setData("text/plain", dragSymbol);
@@ -330,26 +345,31 @@ function LiquiditySweepDetectorCard({
 
   const handleDragOver = (displayIdx: number) => (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     e.dataTransfer.dropEffect = "move";
     setDragOverIndex(displayIdx);
   };
 
-  const handleDrop = (displayIdx: number) => (e: React.DragEvent) => {
-    e.preventDefault();
-    if (dragIndex === null || dragIndex === displayIdx) {
-      setDragIndex(null);
-      setDragOverIndex(null);
-      return;
-    }
-    const next = [...symbols];
-    const [moved] = next.splice(dragIndex, 1);
-    next.splice(displayIdx, 0, moved);
-    persistConfig({ symbols: next });
-    setDragIndex(null);
+  const handleDragLeave = () => {
     setDragOverIndex(null);
   };
 
+  const handleDrop = (displayIdx: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const fromIdx = dragIndexRef.current;
+    dragIndexRef.current = null;
+    setDragIndex(null);
+    setDragOverIndex(null);
+    if (fromIdx === null || fromIdx === displayIdx) return;
+    const next = [...symbols];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(displayIdx, 0, moved);
+    persistConfig({ symbols: next });
+  };
+
   const handleDragEnd = () => {
+    dragIndexRef.current = null;
     setDragIndex(null);
     setDragOverIndex(null);
   };
@@ -409,6 +429,24 @@ function LiquiditySweepDetectorCard({
                     <span
                       className={`h-3.5 w-3.5 rounded-full bg-white transition-transform duration-100 ${
                         showExpandedInstructions ? "translate-x-4" : "translate-x-0"
+                      }`}
+                    />
+                  </span>
+                </button>
+                <button
+                  onClick={() => persistConfig({ showInfoColumn: !showInfoColumn })}
+                  className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-left transition-colors duration-75 hover:bg-white/[0.06]"
+                  title="Toggle info column"
+                >
+                  <span className="text-[11px] text-white/75">Info column</span>
+                  <span
+                    className={`inline-flex h-5 min-w-[36px] items-center rounded-full px-1 transition-colors duration-100 ${
+                      showInfoColumn ? "bg-blue/30" : "bg-white/[0.14]"
+                    }`}
+                  >
+                    <span
+                      className={`h-3.5 w-3.5 rounded-full bg-white transition-transform duration-100 ${
+                        showInfoColumn ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </span>
@@ -485,7 +523,7 @@ function LiquiditySweepDetectorCard({
       <div
         ref={scrollRef}
         data-no-drag
-        className="min-h-0 flex-1 overflow-auto scrollbar-none"
+        className="scrollbar-none min-h-0 flex-1 overflow-auto"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerEnd}
@@ -514,12 +552,12 @@ function LiquiditySweepDetectorCard({
             </div>
           </div>
         ) : (
-          <>
+          <div style={{ minWidth: "max(100%, max-content)" }}>
             {/* Column headers */}
             <div className={`grid ${COL} items-center gap-3 border-b border-white/[0.06] px-3 py-1.5`}>
               <div />
               <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-white/25">Symbol</div>
-              <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-white/25">Info</div>
+              {showInfoColumn ? <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-white/25">Info</div> : null}
               <button
                 onClick={cycleAgoSort}
                 className={`flex items-center gap-0.5 font-mono text-[9px] uppercase tracking-[0.12em] transition-colors duration-75 ${
@@ -565,6 +603,7 @@ function LiquiditySweepDetectorCard({
                   draggable={agoSort === null}
                   onDragStart={handleDragStart(baseIdx)}
                   onDragOver={handleDragOver(displayIdx)}
+                  onDragLeave={handleDragLeave}
                   onDrop={handleDrop(displayIdx)}
                   onDragEnd={handleDragEnd}
                   className={`grid ${COL} items-start gap-3 border-b px-3 py-2.5 transition-colors duration-75 ${
@@ -602,32 +641,34 @@ function LiquiditySweepDetectorCard({
                   </button>
 
                   {/* Description */}
-                  <button
-                    className="min-w-0 text-left"
-                    onClick={() => { if (linkChannel) linkBus.publish(linkChannel, symbol); }}
-                  >
-                    <p className="truncate text-[12px] text-white/74">
-                      {quote?.name ?? (symbolState === "error" ? "Unknown symbol" : "Loading...")}
-                    </p>
-                    {sweep.direction ? (
-                      <>
-                        {showExpandedInstructions ? (
-                          <>
-                            <p className="mt-0.5 font-mono text-[10px] text-white/40">
-                              {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
-                            </p>
-                            <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
-                              {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
-                            </p>
-                          </>
-                        ) : null}
-                      </>
-                    ) : showExpandedInstructions ? (
-                      <p className="mt-1 font-mono text-[10px] leading-[1.35] text-white/28">
-                        No active sweep in lookback window
+                  {showInfoColumn ? (
+                    <button
+                      className="min-w-0 text-left"
+                      onClick={() => { if (linkChannel) linkBus.publish(linkChannel, symbol); }}
+                    >
+                      <p className="truncate text-[12px] text-white/74">
+                        {quote?.name ?? (symbolState === "error" ? "Unknown symbol" : "Loading...")}
                       </p>
-                    ) : null}
-                  </button>
+                      {sweep.direction ? (
+                        <>
+                          {showExpandedInstructions ? (
+                            <>
+                              <p className="mt-0.5 font-mono text-[10px] text-white/40">
+                                {formatAge(sweep.eventTs)} &bull; {sourceLabel(sweep.source)}
+                              </p>
+                              <p className="mt-1 whitespace-normal break-words text-[10px] leading-[1.4] text-white/28">
+                                {sweepBlurb(sweep.direction, sweep.source, sweep.ageBars)}
+                              </p>
+                            </>
+                          ) : null}
+                        </>
+                      ) : showExpandedInstructions ? (
+                        <p className="mt-1 font-mono text-[10px] leading-[1.35] text-white/28">
+                          No active sweep in lookback window
+                        </p>
+                      ) : null}
+                    </button>
+                  ) : null}
 
                   {/* Ago column */}
                   <div className="flex items-start justify-center pt-1">
@@ -651,7 +692,7 @@ function LiquiditySweepDetectorCard({
                 </div>
               );
             })}
-          </>
+          </div>
         )}
       </div>
 

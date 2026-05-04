@@ -1105,7 +1105,7 @@ function IBKRPortfolioCard({ linkChannel, onSetLinkChannel, onClose, config, onC
             {error ? <p className="font-mono text-[10px] text-red/60">{error}</p> : null}
           </div>
         ) : (
-          <div className="min-w-max">
+          <div style={{ minWidth: "max(100%, max-content)" }}>
             {/* Header */}
             <div
               className="grid sticky top-0 z-10 border-b border-white/[0.06] bg-[#131925] text-[9px] uppercase tracking-[0.14em] text-white/28"

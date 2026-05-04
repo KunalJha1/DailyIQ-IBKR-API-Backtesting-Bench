@@ -11,15 +11,14 @@ import {
   Activity,
   Code,
   Search,
-  ZoomIn,
-  ZoomOut,
-  RotateCcw,
 } from 'lucide-react';
 import ComponentLinkMenu from '../../components/ComponentLinkMenu';
 import SymbolSearchModal from '../../components/SymbolSearchModal';
 import IndicatorPanel from './IndicatorPanel';
 import type { CustomStrategyDefinition, StrategyState } from '../customStrategies';
 import type { PersistedChartScript } from '../../lib/chart-state';
+
+const COMPACT_TIMEFRAME_DROPDOWN_VALUES = new Set<Timeframe>(['3D', '1W', '1M', '3M', '6M', '12M']);
 
 interface ChartToolbarProps {
   symbol: string;
@@ -67,6 +66,7 @@ interface ChartToolbarProps {
   onImportChart?: () => void;
   rightSlot?: React.ReactNode;
   compact?: boolean;
+  tickerQuote?: { price: number; dollar: number; pct: number };
 }
 
 export default function ChartToolbar({
@@ -108,22 +108,28 @@ export default function ChartToolbar({
   onLinkChannelChange,
   stopperPx: _stopperPx = 0,
   onStopperPxChange: _onStopperPxChange,
-  onZoomIn,
-  onZoomOut,
-  onZoomReset,
+  onZoomIn: _onZoomIn,
+  onZoomOut: _onZoomOut,
+  onZoomReset: _onZoomReset,
   onExportChart: _onExportChart,
   onImportChart: _onImportChart,
   rightSlot,
   compact = false,
+  tickerQuote,
 }: ChartToolbarProps) {
   const [chartTypeOpen, setChartTypeOpen] = useState(false);
+  const [timeframeOpen, setTimeframeOpen] = useState(false);
   const [symbolSearchOpen, setSymbolSearchOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const timeframeRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setChartTypeOpen(false);
+      }
+      if (timeframeRef.current && !timeframeRef.current.contains(e.target as Node)) {
+        setTimeframeOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -140,6 +146,13 @@ export default function ChartToolbar({
       case 'volume-weighted': return <BarChart3 size={14} />;
     }
   };
+  const visibleTimeframes = compact
+    ? TIMEFRAMES.filter((tf) => !COMPACT_TIMEFRAME_DROPDOWN_VALUES.has(tf.value))
+    : TIMEFRAMES;
+  const hiddenTimeframes = compact
+    ? TIMEFRAMES.filter((tf) => COMPACT_TIMEFRAME_DROPDOWN_VALUES.has(tf.value))
+    : [];
+  const hiddenTimeframeActive = hiddenTimeframes.some((tf) => tf.value === timeframe);
 
   return (
     <div className="flex items-center gap-1 px-2 h-[36px] border-b border-border-default bg-panel shrink-0">
@@ -150,9 +163,22 @@ export default function ChartToolbar({
         title="Click to search for a different symbol"
       >
         <Search size={12} className="text-text-muted" />
-        <span className="font-mono text-[11px] text-text-primary">
+        <span className="font-mono text-[11px] text-text-primary font-semibold">
           {symbol}
         </span>
+        {tickerQuote && (
+          <>
+            <span className="font-mono text-[11px] text-text-primary ml-1">
+              {tickerQuote.price.toFixed(2)}
+            </span>
+            <span className={`font-mono text-[10px] ml-0.5 ${tickerQuote.dollar >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+              {tickerQuote.dollar >= 0 ? '+' : ''}{tickerQuote.dollar.toFixed(2)}
+            </span>
+            <span className={`font-mono text-[10px] ${tickerQuote.pct >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+              ({tickerQuote.pct >= 0 ? '+' : ''}{tickerQuote.pct.toFixed(2)}%)
+            </span>
+          </>
+        )}
       </button>
 
       <SymbolSearchModal
@@ -167,7 +193,7 @@ export default function ChartToolbar({
 
       {/* Timeframes */}
       <div className="flex items-center gap-0.5 mx-1">
-        {TIMEFRAMES.map((tf) => (
+        {visibleTimeframes.map((tf) => (
           <button
             key={tf.value}
             onClick={() => onTimeframeChange(tf.value)}
@@ -180,6 +206,42 @@ export default function ChartToolbar({
             {tf.label}
           </button>
         ))}
+        {hiddenTimeframes.length > 0 && (
+          <div className="relative" ref={timeframeRef}>
+            <button
+              onClick={() => setTimeframeOpen((open) => !open)}
+              className={`px-1.5 py-0.5 text-[10px] font-mono rounded-btn transition-colors duration-120
+                ${hiddenTimeframeActive || timeframeOpen
+                  ? 'text-[#3B82F6] bg-[#3B82F6]/10'
+                  : 'text-text-primary hover:text-white hover:bg-hover'
+                }`}
+              title="More timeframes"
+            >
+              🕒
+            </button>
+            {timeframeOpen && (
+              <div className="absolute top-full right-0 mt-1 bg-panel border border-border-default rounded-btn py-1 z-50 min-w-[64px]">
+                {hiddenTimeframes.map((tf) => (
+                  <button
+                    key={tf.value}
+                    onClick={() => {
+                      onTimeframeChange(tf.value);
+                      setTimeframeOpen(false);
+                    }}
+                    className={`flex w-full items-center justify-between px-2 py-1 text-left text-[10px] font-mono transition-colors duration-120
+                      ${timeframe === tf.value
+                        ? 'text-blue bg-blue/10'
+                        : 'text-text-secondary hover:text-text-primary hover:bg-hover'
+                      }`}
+                  >
+                    <span>{tf.label}</span>
+                    {timeframe === tf.value && <span className="text-[8px] text-blue">●</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="w-px h-4 bg-border-default" />
@@ -272,35 +334,6 @@ export default function ChartToolbar({
           mode="strategy"
         />
       </div>
-
-      <div className="w-px h-4 bg-border-default" />
-
-      {/* Zoom controls */}
-      <div className="flex items-center gap-1 mx-1">
-        <button
-          onClick={onZoomOut}
-          className="p-1 text-white hover:text-white hover:bg-hover rounded-btn transition-colors duration-120"
-          title="Zoom out"
-        >
-          <ZoomOut size={12} />
-        </button>
-        <button
-          onClick={onZoomIn}
-          className="p-1 text-white hover:text-white hover:bg-hover rounded-btn transition-colors duration-120"
-          title="Zoom in"
-        >
-          <ZoomIn size={12} />
-        </button>
-        <button
-          onClick={onZoomReset}
-          className="p-1 text-white hover:text-white hover:bg-hover rounded-btn transition-colors duration-120"
-          title="Reset zoom"
-        >
-          <RotateCcw size={12} />
-        </button>
-      </div>
-
-      <div className="w-px h-4 bg-border-default" />
 
       {/* Script button */}
       <button

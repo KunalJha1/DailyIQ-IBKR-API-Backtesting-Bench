@@ -2972,6 +2972,23 @@ def create_app() -> FastAPI:
         )
         return rows
 
+    class TechScoresPayload(BaseModel):
+        symbols: list[str] = []
+        timeframes: list[str] = []
+        include_indicators: bool = False
+
+    @app.post("/technicals/scores")
+    async def post_technical_scores(payload: TechScoresPayload):
+        """POST variant of /technicals/scores — accepts symbols/timeframes in the
+        request body to avoid query-string length limits for large symbol lists."""
+        sym_list = [s.strip().upper() for s in payload.symbols if s.strip()]
+        tf_list = [tf.strip().lower() for tf in payload.timeframes if tf.strip()]
+        return await get_technical_scores(
+            symbols=",".join(sym_list),
+            timeframes=",".join(tf_list),
+            include_indicators=payload.include_indicators,
+        )
+
     @app.get("/technicals/indicators")
     async def get_technical_indicators(symbols: str = "", indicators: str = "[]"):
         if not symbols:
@@ -3229,6 +3246,7 @@ def create_app() -> FastAPI:
                 symbol,
                 db_bar_size,
                 what_to_show,
+                requested_duration,
                 ts_start,
                 ts_end,
                 limit,
@@ -3282,6 +3300,7 @@ def create_app() -> FastAPI:
                 symbol,
                 db_bar_size,
                 what_to_show,
+                requested_duration,
                 ts_start,
                 ts_end,
                 limit,
