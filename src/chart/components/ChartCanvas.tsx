@@ -62,6 +62,7 @@ interface ChartCanvasProps {
   alerts?: ChartAlert[];
   onAddAlert?: (price: number, symbol: string) => void;
   onDeleteAlert?: (alertId: string) => void;
+  volumeWeightedColors?: { up: string; down: string };
   children?: React.ReactNode;
 }
 
@@ -90,6 +91,7 @@ export default function ChartCanvas({
   alerts = [],
   onAddAlert,
   onDeleteAlert,
+  volumeWeightedColors,
   children,
 }: ChartCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -217,6 +219,14 @@ export default function ChartCanvas({
   useEffect(() => {
     engineRef.current?.setChartType(chartType);
   }, [chartType, engineRef]);
+
+  // Update volume-weighted candle colors
+  useEffect(() => {
+    engineRef.current?.setVolumeWeightedColors(
+      volumeWeightedColors?.up ?? null,
+      volumeWeightedColors?.down ?? null,
+    );
+  }, [volumeWeightedColors, engineRef]);
 
   // Update timeframe
   useEffect(() => {

@@ -180,7 +180,12 @@ export class VolumeWeightedRenderer {
       return;
     }
 
-    const totalWeight = visibleWeight + blankBarsOnRight;
+    // Scale blank space by average visible bar weight so the front buffer occupies
+    // the same proportion of the chart as it does for regular candles, regardless
+    // of whether current volume is above or below the EMA.
+    const numVisibleSlots = (end - start) - leftTrim - rightTrim;
+    const avgVisibleWeight = numVisibleSlots > 0 ? visibleWeight / numVisibleSlots : 1;
+    const totalWeight = visibleWeight + blankBarsOnRight * avgVisibleWeight;
     if (totalWeight <= 0) {
       viewport.clearVariableBarLayout();
       return;
@@ -200,10 +205,18 @@ export class VolumeWeightedRenderer {
     viewport.setVariableBarLayout(start, lefts, widths);
   }
 
-  render(renderer: Renderer, viewport: Viewport, bars: OHLCVBar[]) {
+  render(
+    renderer: Renderer,
+    viewport: Viewport,
+    bars: OHLCVBar[],
+    options: { upColor?: string; downColor?: string } = {},
+  ) {
     const start = Math.max(0, Math.floor(viewport.startIndex));
     const end = Math.min(bars.length, Math.ceil(viewport.endIndex));
     if (start >= end) return;
+
+    const upColor = options.upColor ?? COLORS.green;
+    const downColor = options.downColor ?? COLORS.red;
 
     const barW = viewport.barWidth;
     const candleGap = Math.min(MAX_CANDLE_GAP_PX, Math.max(MIN_CANDLE_GAP_PX, barW * 0.12));
@@ -213,7 +226,7 @@ export class VolumeWeightedRenderer {
       const cx = viewport.barToPixelX(i);
       const slotWidth = viewport.getBarSlotWidth(i);
       const bullish = bar.close >= bar.open;
-      const color = bullish ? COLORS.green : COLORS.red;
+      const color = bullish ? upColor : downColor;
 
       const yHigh = viewport.priceToPixelY(bar.high);
       const yLow = viewport.priceToPixelY(bar.low);
@@ -222,14 +235,36 @@ export class VolumeWeightedRenderer {
 
       const bodyTop = Math.min(yOpen, yClose);
       const bodyH = Math.max(1, Math.abs(yOpen - yClose));
-
       const bodyWidth = Math.max(1, Math.min(slotWidth * BAR_BODY_RATIO, slotWidth - candleGap));
+      const halfW = bodyWidth / 2;
 
-      // Wick — fixed 1px, always full height/low range
+      // Wick — crisp 1px line
       renderer.line(cx, yHigh, cx, yLow, color, 1);
 
-      // Body — solid fill, width encodes volume relative to 200 EMA
-      renderer.rect(cx - bodyWidth / 2, bodyTop, bodyWidth, bodyH, color);
+      // Body fill — semi-transparent so wicks through wide bars stay readable
+      const fillAlpha = 0.82;
+      renderer.rect(cx - halfW, bodyTop, bodyWidth, bodyH, hexToRgba(color, fillAlpha));
+
+      // Crisp border on the body for definition at all widths
+      if (bodyWidth >= 3) {
+        renderer.rectStroke(cx - halfW, bodyTop, bodyWidth, bodyH, color, 1);
+      }
     }
   }
+}
+
+function hexToRgba(color: string, alpha: number): string {
+  // Already rgba — rewrite the alpha component
+  const rgbaMatch = color.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (rgbaMatch) return `rgba(${rgbaMatch[1]},${rgbaMatch[2]},${rgbaMatch[3]},${alpha})`;
+
+  // 6-digit hex
+  const hex = color.replace('#', '');
+  if (hex.length === 6) {
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  return color;
 }

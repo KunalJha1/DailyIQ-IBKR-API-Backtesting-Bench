@@ -12,6 +12,10 @@
   "tauri": {
     "allowlist": {
       "all": false,
+      "http": {
+        "all": true,
+        "scope": ["https://dailyiq.me/**", "https://*.supabase.co/**"]
+      },
       "shell": {
         "open": true,
         "execute": true,

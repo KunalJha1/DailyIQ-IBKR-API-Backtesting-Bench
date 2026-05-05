@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, User, Mail, Lock } from "lucide-react";
 import { useAuth } from "../../lib/auth";
+import { apiFetch } from "../../lib/api";
 
 const DAILYIQ_URL = import.meta.env.VITE_DAILYIQ_URL ?? "https://dailyiq.me";
 
@@ -39,7 +40,7 @@ export default function SignUp() {
     }
     setSubmitting(true);
     try {
-      const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-signup`, {
+      const res = await apiFetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, password }),

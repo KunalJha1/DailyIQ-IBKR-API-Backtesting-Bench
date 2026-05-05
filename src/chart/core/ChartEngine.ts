@@ -30,6 +30,7 @@ import { Crosshair } from '../interaction/Crosshair';
 import { Tooltip } from '../interaction/Tooltip';
 import { indicatorRegistry } from '../indicators/registry';
 import { computeIndicator, recomputeIndicatorTail } from '../indicators/compute';
+import { computeVolumeProfile } from '../indicators/volume/volumeProfile';
 import { detectActiveFvgZones } from '../indicators/shared/ictSmc';
 import type { ScriptResult } from '../types';
 import type { Timeframe } from '../types';
@@ -139,6 +140,8 @@ export class ChartEngine {
   private destroyed = false;
   private liveMode = false;
   private stopperPx = 0;
+  private volumeWeightedUpColor: string | null = null;
+  private volumeWeightedDownColor: string | null = null;
   private subPaneHeightOverrides: Map<string, number> = new Map();
   private subPaneScaleModes: Map<string, YScaleMode> = new Map();
   private collapsedPanes: Set<string> = new Set();
@@ -164,6 +167,7 @@ export class ChartEngine {
   private dragEndpoint: 'start' | 'end' | 'whole' = 'whole';
   private hoveredDrawingId: string | null = null;
   private volumeProfileHitAreas: Map<string, { left: number; right: number; top: number; bottom: number }> = new Map();
+  private _vpSessionCache = new Map<string, number[][]>();
   private hoveredVolumeProfileId: string | null = null;
   private selectedDrawingId: string | null = null;
   private _onTextPlacementRequest: ((anchor: DrawingAnchor) => void) | null = null;
@@ -250,6 +254,7 @@ export class ChartEngine {
     const prevLength = this.bars.length;
     const wasLatestVisible = this.viewport.isLatestBarInViewport();
     const preservedRightBlankBars = wasLatestVisible ? this.viewport.getVisibleRightBlankBars() : 0;
+    this._vpSessionCache.clear();
     this.bars = bars;
     this.lastNotifiedViewportStart = null;
     this.lastNotifiedViewportEnd = null;
@@ -280,6 +285,7 @@ export class ChartEngine {
     const prevLength = this.bars.length;
     const wasLatestVisible = this.viewport.isLatestBarInViewport();
     const preservedRightBlankBars = wasLatestVisible ? this.viewport.getVisibleRightBlankBars() : 0;
+    this._vpSessionCache.clear();
     this.bars = bars;
 
     this.viewport.setRightOffsetBars(this.computeRightOffsetBars());
@@ -334,6 +340,12 @@ export class ChartEngine {
 
   setChartType(type: ChartType) {
     this.chartType = type;
+    this.markDirty();
+  }
+
+  setVolumeWeightedColors(upColor: string | null, downColor: string | null) {
+    this.volumeWeightedUpColor = upColor;
+    this.volumeWeightedDownColor = downColor;
     this.markDirty();
   }
 
@@ -1098,8 +1110,20 @@ export class ChartEngine {
     }
   }
 
+  private static readonly VP_COLOR_DEFAULTS: Record<string, string> = {
+    upVolume:     '#00C853',
+    downVolume:   '#FF3D71',
+    valueAreaUp:  '#006B2E',
+    valueAreaDown: '#8C1125',
+    poc:          '#F59E0B',
+  };
+
   private computeSingleIndicator(ind: ActiveIndicator) {
     if (ind.name === 'Volume Profile') {
+      // Backfill color keys that didn't exist when this indicator was first saved
+      for (const [key, def] of Object.entries(ChartEngine.VP_COLOR_DEFAULTS)) {
+        if (!(key in ind.colors)) ind.colors[key] = def;
+      }
       const bars = this.getVolumeProfileBars();
       ind.data = computeIndicator(ind.name, bars, { ...ind.params, ...ind.textParams } as Record<string, number>);
       return;
@@ -1242,7 +1266,10 @@ export class ChartEngine {
           this.heikinAshi.render(this.renderer, this.viewport, this.bars);
           break;
         case 'volume-weighted':
-          this.volumeWeightedRenderer.render(this.renderer, this.viewport, this.bars);
+          this.volumeWeightedRenderer.render(this.renderer, this.viewport, this.bars, {
+            upColor: this.volumeWeightedUpColor ?? undefined,
+            downColor: this.volumeWeightedDownColor ?? undefined,
+          });
           break;
         case 'bar':
           this.barRenderer.render(this.renderer, this.viewport, this.bars);
@@ -1697,8 +1724,6 @@ export class ChartEngine {
 
     const chartTop = this.viewport.chartTop;
     const chartHeight = this.viewport.chartHeight;
-    const barWidth = this.viewport.barWidth;
-    const halfBar = barWidth / 2;
     const barDurationMs = getTimeframeMs(tf);
     const intervals: Array<{ session: ExtendedSession; left: number; right: number }> = [];
 
@@ -1707,12 +1732,13 @@ export class ChartEngine {
       const segments = this.getExtendedSessionSegmentsForBar(bar.time, barDurationMs);
       if (segments.length === 0) continue;
       const cx = this.viewport.barToPixelX(i);
-      const left = cx - halfBar;
+      const slotWidth = this.viewport.getBarSlotWidth(i);
+      const left = cx - slotWidth / 2;
       for (const segment of segments) {
         intervals.push({
           session: segment.session,
-          left: left + barWidth * segment.startRatio,
-          right: left + barWidth * segment.endRatio,
+          left: left + slotWidth * segment.startRatio,
+          right: left + slotWidth * segment.endRatio,
         });
       }
     }
@@ -2762,120 +2788,196 @@ export class ChartEngine {
     clipTop: number,
     clipBottom: number,
   ) {
-    const prices = ind.data[0] ?? [];
-    const totalVolumes = ind.data[1] ?? [];
-    const upVolumes = ind.data[2] ?? [];
-    const downVolumes = ind.data[3] ?? [];
-    const bins = Math.min(prices.length, totalVolumes.length);
-    if (bins === 0) return;
-    const profileBars = this.getVolumeProfileBars();
-    if (profileBars.length === 0) return;
-
-    let maxVolume = 0;
-    let pocIndex = -1;
-    for (let i = 0; i < bins; i++) {
-      if (!isNaN(totalVolumes[i]) && totalVolumes[i] > maxVolume) {
-        maxVolume = totalVolumes[i];
-        pocIndex = i;
-      }
-    }
-    if (!(maxVolume > 0)) return;
-
-    let minPrice = Infinity;
-    let maxPrice = -Infinity;
-    for (let i = 0; i < profileBars.length; i++) {
-      if (profileBars[i].low < minPrice) minPrice = profileBars[i].low;
-      if (profileBars[i].high > maxPrice) maxPrice = profileBars[i].high;
-    }
-    if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice)) return;
-
     const chartAreaWidth = this.width - PRICE_AXIS_WIDTH;
     const maxProfileWidth = Math.max(30, Math.min(chartAreaWidth * 0.26, 156));
-    const anchorX = 8;
-    const drawColor = ind.colors?.volumes ?? indicatorRegistry[ind.name].outputs[1]?.color ?? COLORS.blue;
-    const upColor = ind.colors?.upVolume ?? '#00C853';
-    const downColor = ind.colors?.downVolume ?? '#FF3D71';
-    const barDividerColor = this.withAlpha('#08111F', 0.88);
-    const solidFillColor = this.withAlpha(drawColor, 0.88);
-    const upFillColor = this.withAlpha(upColor, 0.9);
-    const downFillColor = this.withAlpha(downColor, 0.88);
-    const pocStrokeColor = this.withAlpha('#F8FAFC', 0.95);
-    const profileRange = maxPrice - minPrice;
-    const binSize = profileRange > 0 ? profileRange / bins : 0;
-    const gutterPx = 1;
+
+    // Resolve colors once
+    const upColor     = ind.colors?.upVolume     ?? '#00C853';
+    const downColor   = ind.colors?.downVolume   ?? '#FF3D71';
+    const vaUpColor   = ind.colors?.valueAreaUp   ?? '#006B2E';
+    const vaDownColor = ind.colors?.valueAreaDown ?? '#8C1125';
+    const pocColor    = ind.colors?.poc           ?? '#F59E0B';
+
+    const colorSet = {
+      upFill:     this.withAlpha(upColor,     0.82),
+      downFill:   this.withAlpha(downColor,   0.80),
+      vaUpFill:   this.withAlpha(vaUpColor,   0.90),
+      vaDownFill: this.withAlpha(vaDownColor, 0.88),
+      divider:    this.withAlpha('#08111F', 0.75),
+      pocColor:   this.withAlpha(pocColor, 0.95),
+    };
+
+    const bins = Math.max(1, Math.round(ind.params.bins ?? 24));
+    const timeframeMs = getTimeframeMs(String(this.scaleX.timeframe));
+    const isDaily = timeframeMs >= 86_400_000;
+
+    if (isDaily) {
+      // Single profile spanning all bars
+      const data = this.getOrComputeVPSession(0, this.bars.length - 1, bins);
+      if (data) {
+        const anchorX = 8;
+        const maxDrawnWidth = this.renderOneVolumeProfileSession(data, anchorX, toY, clipTop, clipBottom, colorSet, maxProfileWidth);
+        if (maxDrawnWidth > 0) {
+          this.renderer.line(anchorX, clipTop, anchorX, clipBottom, this.withAlpha('#94A3B8', 0.30), 1);
+          this.volumeProfileHitAreas.set(ind.id, {
+            left: Math.max(0, anchorX - 4),
+            right: Math.min(chartAreaWidth, anchorX + maxDrawnWidth + 6),
+            top: clipTop, bottom: clipBottom,
+          });
+        }
+      }
+      return;
+    }
+
+    // Intraday: render one VP per regular trading session
+    const sessions = this.getSessionBoundaries();
+    if (sessions.length === 0) return;
+
+    const vpStart = Math.max(0, Math.floor(this.viewport.startIndex));
+    const vpEnd   = Math.min(this.bars.length - 1, Math.ceil(this.viewport.endIndex));
+
+    let overallHitLeft = Infinity;
+    let overallHitRight = -Infinity;
+
+    for (const session of sessions) {
+      // Skip sessions entirely outside the visible viewport
+      if (session.end < vpStart || session.regularStart > vpEnd) continue;
+
+      const data = this.getOrComputeVPSession(session.regularStart, session.end, bins);
+      if (!data) continue;
+
+      // Anchor X: pixel position of the session's first regular-session bar,
+      // clamped to the left chart edge so the profile is always visible.
+      const rawAnchorX = this.viewport.barToPixelX(session.regularStart);
+      const anchorX = Math.max(0, Math.round(rawAnchorX - this.viewport.barWidth / 2));
+
+      const maxDrawnWidth = this.renderOneVolumeProfileSession(data, anchorX, toY, clipTop, clipBottom, colorSet, maxProfileWidth);
+      if (maxDrawnWidth > 0) {
+        this.renderer.line(anchorX, clipTop, anchorX, clipBottom, this.withAlpha('#94A3B8', 0.25), 1);
+        overallHitLeft  = Math.min(overallHitLeft,  anchorX);
+        overallHitRight = Math.max(overallHitRight, anchorX + maxDrawnWidth + 6);
+      }
+    }
+
+    if (overallHitRight > overallHitLeft) {
+      this.volumeProfileHitAreas.set(ind.id, {
+        left:   Math.max(0, overallHitLeft - 4),
+        right:  Math.min(chartAreaWidth, overallHitRight),
+        top:    clipTop,
+        bottom: clipBottom,
+      });
+    }
+  }
+
+  private getOrComputeVPSession(startIdx: number, endIdx: number, bins: number): number[][] | null {
+    if (startIdx > endIdx || startIdx < 0 || endIdx >= this.bars.length) return null;
+    const key = `${startIdx}:${endIdx}:${bins}`;
+    const cached = this._vpSessionCache.get(key);
+    if (cached) return cached;
+    const sessionBars = this.bars.slice(startIdx, endIdx + 1);
+    const data = computeVolumeProfile(sessionBars, { bins });
+    this._vpSessionCache.set(key, data);
+    return data;
+  }
+
+  /** Renders one session's VP and returns the maximum bar width drawn (0 if nothing drawn). */
+  private renderOneVolumeProfileSession(
+    data: number[][],
+    anchorX: number,
+    toY: (price: number) => number,
+    clipTop: number,
+    clipBottom: number,
+    colors: { upFill: string; downFill: string; vaUpFill: string; vaDownFill: string; divider: string; pocColor: string },
+    maxProfileWidth: number,
+  ): number {
+    const prices       = data[0] ?? [];
+    const totalVolumes = data[1] ?? [];
+    const upVolumes    = data[2] ?? [];
+    const downVolumes  = data[3] ?? [];
+    const bins = Math.min(prices.length, totalVolumes.length);
+    if (bins === 0) return 0;
+
+    // POC + totals
+    let maxVolume = 0, pocIndex = -1, totalVol = 0;
+    for (let i = 0; i < bins; i++) {
+      const v = totalVolumes[i];
+      if (!isNaN(v) && v > 0) {
+        totalVol += v;
+        if (v > maxVolume) { maxVolume = v; pocIndex = i; }
+      }
+    }
+    if (!(maxVolume > 0)) return 0;
+
+    // Value area (70% of volume expanding from POC)
+    const inVA = new Uint8Array(bins);
+    if (pocIndex >= 0) {
+      inVA[pocIndex] = 1;
+      let vaVol = totalVolumes[pocIndex];
+      let lo = pocIndex, hi = pocIndex;
+      const vaTarget = totalVol * 0.70;
+      while (vaVol < vaTarget && (lo > 0 || hi < bins - 1)) {
+        const vUp   = hi + 1 < bins ? (totalVolumes[hi + 1] || 0) : 0;
+        const vDown = lo - 1 >= 0   ? (totalVolumes[lo - 1] || 0) : 0;
+        if (vUp >= vDown && hi + 1 < bins) { hi++; inVA[hi] = 1; vaVol += totalVolumes[hi]; }
+        else if (lo > 0)                   { lo--; inVA[lo] = 1; vaVol += totalVolumes[lo]; }
+        else if (hi + 1 < bins)            { hi++; inVA[hi] = 1; vaVol += totalVolumes[hi]; }
+        else break;
+      }
+    }
+
+    // Bin height in price units
+    const halfBin = bins >= 2 ? (prices[1] - prices[0]) / 2 : 0;
 
     let maxDrawnWidth = 0;
-    let minDrawnY = Infinity;
-    let maxDrawnY = -Infinity;
+    const gutterPx = 1;
 
     for (let i = 0; i < bins; i++) {
       const total = totalVolumes[i];
       if (isNaN(total) || total <= 0) continue;
 
-      const binLow = profileRange > 0 ? minPrice + (i * binSize) : minPrice;
-      const binHigh = profileRange > 0 ? minPrice + ((i + 1) * binSize) : maxPrice;
-      const yLow = toY(binLow);
-      const yHigh = toY(binHigh);
-      const rawTopY = Math.min(yLow, yHigh);
-      const rawBottomY = Math.max(yLow, yHigh);
+      const binLow  = prices[i] - halfBin;
+      const binHigh = prices[i] + halfBin;
+      const yA = toY(binLow), yB = toY(binHigh);
+      const rawTopY    = Math.min(yA, yB);
+      const rawBottomY = Math.max(yA, yB);
       if (rawBottomY < clipTop || rawTopY > clipBottom) continue;
 
-      const cellTop = Math.max(clipTop, Math.round(rawTopY));
+      const cellTop    = Math.max(clipTop,    Math.round(rawTopY));
       const cellBottom = Math.min(clipBottom, Math.round(rawBottomY));
-      let topY = cellTop + gutterPx;
+      let topY    = cellTop    + gutterPx;
       let bottomY = cellBottom - gutterPx;
-      if (bottomY <= topY) {
-        topY = cellTop;
-        bottomY = Math.max(cellTop + 1, cellBottom);
-      }
-      const binHeight = Math.max(1, bottomY - topY);
-      const width = Math.max(1, Math.round((total / maxVolume) * maxProfileWidth));
-      const leftX = anchorX;
-      const up = Number.isFinite(upVolumes[i]) ? upVolumes[i] : NaN;
-      const down = Number.isFinite(downVolumes[i]) ? downVolumes[i] : NaN;
-      const splitSum = (Number.isFinite(up) ? up : 0) + (Number.isFinite(down) ? down : 0);
+      if (bottomY <= topY) { topY = cellTop; bottomY = Math.max(cellTop + 1, cellBottom); }
+      const binH = Math.max(1, bottomY - topY);
+      const w    = Math.max(1, Math.round((total / maxVolume) * maxProfileWidth));
 
-      if (splitSum > 0) {
-        const downWidth = Math.round(width * ((Number.isFinite(down) ? down : 0) / splitSum));
-        const upWidth = width - downWidth;
-        if (downWidth > 0) this.renderer.rect(leftX, topY, downWidth, binHeight, downFillColor);
-        if (upWidth > 0) this.renderer.rect(leftX + downWidth, topY, upWidth, binHeight, upFillColor);
+      const up      = Number.isFinite(upVolumes[i])   ? upVolumes[i]   : 0;
+      const down    = Number.isFinite(downVolumes[i]) ? downVolumes[i] : 0;
+      const splitSm = up + down;
+      const isVA    = inVA[i] === 1;
+
+      if (splitSm > 0) {
+        const dw = Math.round(w * (down / splitSm));
+        const uw = w - dw;
+        if (dw > 0) this.renderer.rect(anchorX,      topY, dw, binH, isVA ? colors.vaDownFill : colors.downFill);
+        if (uw > 0) this.renderer.rect(anchorX + dw, topY, uw, binH, isVA ? colors.vaUpFill   : colors.upFill);
       } else {
-        this.renderer.rect(leftX, topY, width, binHeight, solidFillColor);
+        this.renderer.rect(anchorX, topY, w, binH, isVA ? colors.vaUpFill : colors.upFill);
       }
-      if (binHeight >= 2 && width >= 2) {
-        this.renderer.rectStroke(leftX, topY, width, binHeight, barDividerColor, 1);
+      if (binH >= 2 && w >= 2) {
+        this.renderer.rectStroke(anchorX, topY, w, binH, colors.divider, 1);
       }
-      if (i === pocIndex && binHeight >= 2) {
-        this.renderer.rectStroke(leftX, topY, width, binHeight, pocStrokeColor, 1);
-      }
-
-      maxDrawnWidth = Math.max(maxDrawnWidth, width);
-      minDrawnY = Math.min(minDrawnY, topY);
-      maxDrawnY = Math.max(maxDrawnY, bottomY);
+      maxDrawnWidth = Math.max(maxDrawnWidth, w);
     }
 
-    if (maxDrawnWidth > 0 && Number.isFinite(minDrawnY) && Number.isFinite(maxDrawnY)) {
-      this.renderer.line(anchorX, clipTop, anchorX, clipBottom, this.withAlpha('#94A3B8', 0.35), 1);
-      const hitArea = {
-        left: Math.max(0, anchorX - 4),
-        right: Math.min(chartAreaWidth, anchorX + maxDrawnWidth + 6),
-        top: Math.max(clipTop, minDrawnY - 4),
-        bottom: Math.min(clipBottom, maxDrawnY + 4),
-      };
-      this.volumeProfileHitAreas.set(ind.id, hitArea);
-      if (this.hoveredVolumeProfileId === ind.id) {
-        const strokeColor = this.withAlpha('#93C5FD', 0.55);
-        this.renderer.rectStroke(
-          hitArea.left,
-          hitArea.top,
-          Math.max(1, hitArea.right - hitArea.left),
-          Math.max(1, hitArea.bottom - hitArea.top),
-          strokeColor,
-          1,
-        );
-      }
+    // POC line — computed directly from price so it draws even when the bin is scrolled off screen
+    // POC line: use the price directly via toY — the canvas clip region handles
+    // out-of-bounds Y, so no logical range check needed here.
+    if (pocIndex >= 0 && maxDrawnWidth > 0) {
+      const pocY = Math.round(toY(prices[pocIndex]));
+      this.renderer.line(anchorX, pocY, anchorX + maxProfileWidth, pocY, colors.pocColor, 2);
     }
+
+    return maxDrawnWidth;
   }
 
   private estimateLiquidityTickSize(): number {
@@ -2913,8 +3015,39 @@ export class ChartEngine {
     if (this.bars.length === 0) return this.bars;
     const timeframeMs = getTimeframeMs(String(this.scaleX.timeframe));
     if (timeframeMs >= 86_400_000) return this.bars;
-    const sessionStart = this.getCurrentDayStartIndex();
-    return this.bars.slice(sessionStart);
+    const sessions = this.getSessionBoundaries();
+    if (sessions.length === 0) return this.bars;
+    return this.bars.slice(sessions[sessions.length - 1].regularStart);
+  }
+
+  private static readonly MARKET_OPEN_MIN = 9 * 60 + 30; // 9:30 AM ET
+
+  private getSessionBoundaries(): Array<{ regularStart: number; end: number }> {
+    const bars = this.bars;
+    if (bars.length === 0) return [];
+    const sessions: Array<{ regularStart: number; end: number }> = [];
+    let dayStart = 0;
+
+    for (let i = 1; i <= bars.length; i++) {
+      const atEnd = i === bars.length;
+      const newDay = !atEnd && !sameEtDay(bars[i].time, bars[dayStart].time);
+      if (!newDay && !atEnd) continue;
+
+      const dayEnd = i - 1;
+      // Find first bar at or after 9:30 AM ET
+      let regularStart = dayStart;
+      for (let j = dayStart; j < i; j++) {
+        const p = etDatePartsFromMs(bars[j].time);
+        if (p.hour * 60 + p.minute >= ChartEngine.MARKET_OPEN_MIN) {
+          regularStart = j;
+          break;
+        }
+      }
+      sessions.push({ regularStart, end: dayEnd });
+      dayStart = i;
+    }
+
+    return sessions;
   }
 
   private liquiditySourceName(code: number, isBull: boolean): string {

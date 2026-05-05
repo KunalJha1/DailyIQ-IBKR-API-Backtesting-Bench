@@ -70,6 +70,8 @@ function DashboardPageComponent(_props: { tabId?: string }) {
   layoutRef.current = layout;
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const dashboardViewportRef = useRef<HTMLDivElement>(null);
+  const [dashboardCanvasSize, setDashboardCanvasSize] = useState<{ width: number; height: number } | null>(null);
 
   const depsRef = useRef({
     activeTabId,
@@ -99,6 +101,36 @@ function DashboardPageComponent(_props: { tabId?: string }) {
     miniChartConfigByIdRef.current.clear();
     symbolSelectByIdRef.current.clear();
   }, [activeTabId, updateComponent, removeComponent, setComponentLinkChannel]);
+
+  useLayoutEffect(() => {
+    const el = dashboardViewportRef.current;
+    if (!el) return;
+
+    const updateCanvasSize = () => {
+      const rect = el.getBoundingClientRect();
+      const width = Math.floor(rect.width);
+      const height = Math.floor(rect.height);
+      if (width < 100 || height < 100) return;
+
+      setDashboardCanvasSize((prev) => {
+        if (!prev) return { width, height };
+        const nextWidth = Math.max(prev.width, width);
+        const nextHeight = Math.max(prev.height, height);
+        if (nextWidth === prev.width && nextHeight === prev.height) return prev;
+        return { width: nextWidth, height: nextHeight };
+      });
+    };
+
+    updateCanvasSize();
+    const observer = new ResizeObserver(updateCanvasSize);
+    observer.observe(el);
+    window.addEventListener("resize", updateCanvasSize);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateCanvasSize);
+    };
+  }, []);
 
   const getOnConfigChange = useCallback((id: string) => {
     let fn = configChangeByIdRef.current.get(id);
@@ -539,11 +571,13 @@ function DashboardPageComponent(_props: { tabId?: string }) {
         )}
       </div>
 
-      <div className="flex-1 overflow-hidden">
+      <div ref={dashboardViewportRef} className="min-h-0 min-w-0 flex-1 overflow-hidden">
         <div
           style={{
-            width: `${100 / zoom}%`,
-            height: `${100 / zoom}%`,
+            width: dashboardCanvasSize ? dashboardCanvasSize.width / zoom : `${100 / zoom}%`,
+            height: dashboardCanvasSize ? dashboardCanvasSize.height / zoom : `${100 / zoom}%`,
+            minWidth: `${100 / zoom}%`,
+            minHeight: `${100 / zoom}%`,
             transform: `scale(${zoom})`,
             transformOrigin: "top left",
           }}

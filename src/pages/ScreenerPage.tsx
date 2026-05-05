@@ -105,8 +105,6 @@ type FilterType =
 const SCREENER_CUSTOM_STORAGE_KEY = "dailyiq.screener.customSymbols";
 const SCREENER_VISIBLE_TFS_STORAGE_KEY = "dailyiq.screener.visibleTimeframes";
 const SCREENER_COL_WIDTHS_KEY = "dailyiq.screener.columnWidths";
-const CUSTOM_SCROLLBAR_SIZE = 10;
-const CUSTOM_SCROLLBAR_MIN_THUMB = 32;
 
 /** Resizable column widths (Market Screener table). TA timeframe columns share `ta`. */
 interface ScreenerColWidths {
@@ -477,14 +475,6 @@ function ScreenerPage() {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_BATCH);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const tableScrollRef = useRef<HTMLDivElement>(null);
-  const [scrollMetrics, setScrollMetrics] = useState({
-    clientHeight: 0,
-    clientWidth: 0,
-    scrollHeight: 0,
-    scrollLeft: 0,
-    scrollTop: 0,
-    scrollWidth: 0,
-  });
 
   const [colWidths, setColWidths] = useState<ScreenerColWidths>(() => loadStoredColWidths());
 
@@ -524,19 +514,6 @@ function ScreenerPage() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
   };
-
-  const updateScrollMetrics = useCallback(() => {
-    const node = tableScrollRef.current;
-    if (!node) return;
-    setScrollMetrics({
-      clientHeight: node.clientHeight,
-      clientWidth: node.clientWidth,
-      scrollHeight: node.scrollHeight,
-      scrollLeft: node.scrollLeft,
-      scrollTop: node.scrollTop,
-      scrollWidth: node.scrollWidth,
-    });
-  }, []);
 
   // ── Data fetching ────────────────────────────────────────────────
 
@@ -751,93 +728,6 @@ function ScreenerPage() {
     [filtered, visibleCount],
   );
 
-  useEffect(() => {
-    const node = tableScrollRef.current;
-    if (!node) return;
-
-    const frame = requestAnimationFrame(updateScrollMetrics);
-    const resizeObserver = new ResizeObserver(updateScrollMetrics);
-    resizeObserver.observe(node);
-
-    return () => {
-      cancelAnimationFrame(frame);
-      resizeObserver.disconnect();
-    };
-  }, [updateScrollMetrics, visibleRows.length, visibleTfs.length, screenerTableMinWidth, loading, filter]);
-
-  const hasVerticalScroll = scrollMetrics.scrollHeight > scrollMetrics.clientHeight + 1;
-  const hasHorizontalScroll = scrollMetrics.scrollWidth > scrollMetrics.clientWidth + 1;
-  const verticalTrackHeight = Math.max(
-    0,
-    scrollMetrics.clientHeight - (hasHorizontalScroll ? CUSTOM_SCROLLBAR_SIZE : 0),
-  );
-  const horizontalTrackWidth = Math.max(
-    0,
-    scrollMetrics.clientWidth - (hasVerticalScroll ? CUSTOM_SCROLLBAR_SIZE : 0),
-  );
-  const verticalThumbHeight = hasVerticalScroll
-    ? Math.min(
-        verticalTrackHeight,
-        Math.max(CUSTOM_SCROLLBAR_MIN_THUMB, (verticalTrackHeight * scrollMetrics.clientHeight) / scrollMetrics.scrollHeight),
-      )
-    : 0;
-  const horizontalThumbWidth = hasHorizontalScroll
-    ? Math.min(
-        horizontalTrackWidth,
-        Math.max(CUSTOM_SCROLLBAR_MIN_THUMB, (horizontalTrackWidth * scrollMetrics.clientWidth) / scrollMetrics.scrollWidth),
-      )
-    : 0;
-  const verticalThumbTop =
-    hasVerticalScroll && scrollMetrics.scrollHeight > scrollMetrics.clientHeight
-      ? (scrollMetrics.scrollTop / (scrollMetrics.scrollHeight - scrollMetrics.clientHeight)) *
-        Math.max(0, verticalTrackHeight - verticalThumbHeight)
-      : 0;
-  const horizontalThumbLeft =
-    hasHorizontalScroll && scrollMetrics.scrollWidth > scrollMetrics.clientWidth
-      ? (scrollMetrics.scrollLeft / (scrollMetrics.scrollWidth - scrollMetrics.clientWidth)) *
-        Math.max(0, horizontalTrackWidth - horizontalThumbWidth)
-      : 0;
-
-  const handleCustomScrollbarMouseDown = (
-    axis: "x" | "y",
-    e: ReactMouseEvent<HTMLDivElement>,
-  ) => {
-    const node = tableScrollRef.current;
-    if (!node) return;
-
-    e.preventDefault();
-    const startPointer = axis === "y" ? e.clientY : e.clientX;
-    const startScroll = axis === "y" ? node.scrollTop : node.scrollLeft;
-    const trackTravel =
-      axis === "y"
-        ? verticalTrackHeight - verticalThumbHeight
-        : horizontalTrackWidth - horizontalThumbWidth;
-    const scrollTravel =
-      axis === "y"
-        ? node.scrollHeight - node.clientHeight
-        : node.scrollWidth - node.clientWidth;
-
-    if (trackTravel <= 0 || scrollTravel <= 0) return;
-
-    const onMove = (ev: MouseEvent) => {
-      const pointer = axis === "y" ? ev.clientY : ev.clientX;
-      const nextScroll = startScroll + ((pointer - startPointer) / trackTravel) * scrollTravel;
-      if (axis === "y") {
-        node.scrollTop = nextScroll;
-      } else {
-        node.scrollLeft = nextScroll;
-      }
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      updateScrollMetrics();
-    };
-
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  };
-
   // ── Handlers ─────────────────────────────────────────────────────
 
   const handleSort = (key: SortKey) => {
@@ -960,7 +850,6 @@ function ScreenerPage() {
         <div className="relative min-h-0 flex-1 bg-[#10151c]">
           <div
             ref={tableScrollRef}
-            onScroll={updateScrollMetrics}
             className="scrollbar-none h-full overflow-auto"
           >
           <table
@@ -1118,36 +1007,6 @@ function ScreenerPage() {
             </div>
           )}
           </div>
-
-          {hasVerticalScroll && (
-            <div
-              className="absolute right-0 top-0 z-20 w-2.5 bg-[#10151c]"
-              style={{ bottom: hasHorizontalScroll ? CUSTOM_SCROLLBAR_SIZE : 0 }}
-            >
-              <div
-                className="absolute left-0.5 right-0.5 cursor-pointer rounded-full bg-white/25 transition-colors hover:bg-white/40"
-                style={{ height: verticalThumbHeight, top: verticalThumbTop }}
-                onMouseDown={(e) => handleCustomScrollbarMouseDown("y", e)}
-              />
-            </div>
-          )}
-
-          {hasHorizontalScroll && (
-            <div
-              className="absolute bottom-0 left-0 z-20 h-2.5 bg-[#10151c]"
-              style={{ right: hasVerticalScroll ? CUSTOM_SCROLLBAR_SIZE : 0 }}
-            >
-              <div
-                className="absolute bottom-0.5 top-0.5 cursor-pointer rounded-full bg-white/25 transition-colors hover:bg-white/40"
-                style={{ left: horizontalThumbLeft, width: horizontalThumbWidth }}
-                onMouseDown={(e) => handleCustomScrollbarMouseDown("x", e)}
-              />
-            </div>
-          )}
-
-          {hasVerticalScroll && hasHorizontalScroll && (
-            <div className="absolute bottom-0 right-0 z-20 h-2.5 w-2.5 bg-[#10151c]" />
-          )}
         </div>
       </div>
     </div>

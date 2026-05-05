@@ -4866,7 +4866,7 @@
       "sector": "Financials",
       "industry": "Capital Markets",
       "exchange": "NASDAQ",
-      "sp500_weight": null,
+      "sp500_weight": 0.00000000000001,
       "enabled": true,
       "theme": "#16A34A",
       "groups": [

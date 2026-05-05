@@ -10,6 +10,7 @@ import { open } from "@tauri-apps/api/shell";
 import { invoke } from "@tauri-apps/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { isTauriRuntime } from "./platform";
+import { apiFetch } from "./api";
 
 const SESSION_KEY = "dailyiq-terminal-session";
 const DAILYIQ_URL = import.meta.env.VITE_DAILYIQ_URL ?? "https://dailyiq.me";
@@ -85,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Fetch the Google OAuth URL from DailyIQ backend
     let authUrl: string;
     try {
-      const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-google-url`);
+      const res = await apiFetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-google-url`);
       const data = await res.json();
       if (!res.ok || !data.url) throw new Error(data.detail || "Failed to get OAuth URL");
       // Replace the redirect_uri port in case it differs
@@ -106,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       handled = true;
       setLoading(true);
       try {
-        const res = await fetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-google-exchange`, {
+        const res = await apiFetch(`${DAILYIQ_URL}/api-proxy/auth/terminal-google-exchange`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ code }),

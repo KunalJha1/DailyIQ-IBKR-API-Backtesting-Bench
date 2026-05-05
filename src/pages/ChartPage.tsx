@@ -1288,6 +1288,9 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
   const [symbol, setSymbol] = useState(initialState.symbol);
   const [timeframe, setTimeframe] = useState<Timeframe>(initialState.timeframe);
   const [chartType, setChartType] = useState<ChartType>(initialState.chartType);
+  const [volumeWeightedColors, setVolumeWeightedColors] = useState<{ up: string; down: string }>(
+    initialState.volumeWeightedColors ?? { up: '#00C853', down: '#FF3D71' },
+  );
   const [linkChannel, setLinkChannel] = useState<number | null>(initialState.linkChannel);
   const [stopperPx, setStopperPx] = useState<number>(initialState.stopperPx);
   const [tooltipFields, setTooltipFields] = useState<Record<string, boolean>>(
@@ -1758,8 +1761,9 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       legendCollapsed,
       subPaneState,
       splitLayout,
+      volumeWeightedColors,
     });
-  }, [tabId, symbol, timeframe, chartType, yScaleMode, linkChannel, activeIndicators, stopperPx, indicatorColorDefaults, activeScriptSources, activeScriptIds, customStrategies, activeCustomStrategyIds, probEngWidget, technicalTableWidget, liquidityTableWidget, tooltipFields, indicatorPanelOpen, strategyPanelOpen, legendCollapsed, splitLayout, serializeIndicators, getEngineSubPaneState, persisted?.subPaneState, chartSubPaneLayoutKey]);
+  }, [tabId, symbol, timeframe, chartType, yScaleMode, linkChannel, activeIndicators, stopperPx, indicatorColorDefaults, activeScriptSources, activeScriptIds, customStrategies, activeCustomStrategyIds, probEngWidget, technicalTableWidget, liquidityTableWidget, tooltipFields, indicatorPanelOpen, strategyPanelOpen, legendCollapsed, splitLayout, volumeWeightedColors, serializeIndicators, getEngineSubPaneState, persisted?.subPaneState, chartSubPaneLayoutKey]);
 
   const getCurrentChartState = useCallback((closePanels = false): ChartState => {
     const engineIndicators = engineRef.current?.getActiveIndicators();
@@ -1789,6 +1793,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
       legendCollapsed,
       subPaneState: getEngineSubPaneState() ?? persisted?.subPaneState,
       splitLayout,
+      volumeWeightedColors,
     };
   }, [
     activeCustomStrategyIds,
@@ -1813,6 +1818,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     liquidityTableWidget,
     timeframe,
     tooltipFields,
+    volumeWeightedColors,
     yScaleMode,
   ]);
 
@@ -3221,6 +3227,8 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         onTimeframeChange={handleTimeframeChange}
         chartType={chartType}
         onChartTypeChange={handleChartTypeChange}
+        volumeWeightedColors={volumeWeightedColors}
+        onVolumeWeightedColorsChange={setVolumeWeightedColors}
         onIndicatorPanelToggle={() => {
           setStrategyPanelOpen(false);
           setIndicatorPanelOpen(!indicatorPanelOpen);
@@ -3320,6 +3328,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           alerts={chartAlerts}
           onAddAlert={handleAddAlert}
           onDeleteAlert={removeAlert}
+          volumeWeightedColors={volumeWeightedColors}
         >
           {dragState && chartLayout && (
             <>

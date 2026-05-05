@@ -11,6 +11,7 @@ import {
   Activity,
   Code,
   Search,
+  Settings2,
 } from 'lucide-react';
 import ComponentLinkMenu from '../../components/ComponentLinkMenu';
 import SymbolSearchModal from '../../components/SymbolSearchModal';
@@ -67,6 +68,8 @@ interface ChartToolbarProps {
   rightSlot?: React.ReactNode;
   compact?: boolean;
   tickerQuote?: { price: number; dollar: number; pct: number };
+  volumeWeightedColors?: { up: string; down: string };
+  onVolumeWeightedColorsChange?: (colors: { up: string; down: string }) => void;
 }
 
 export default function ChartToolbar({
@@ -116,12 +119,16 @@ export default function ChartToolbar({
   rightSlot,
   compact = false,
   tickerQuote,
+  volumeWeightedColors = { up: '#00C853', down: '#FF3D71' },
+  onVolumeWeightedColorsChange,
 }: ChartToolbarProps) {
   const [chartTypeOpen, setChartTypeOpen] = useState(false);
   const [timeframeOpen, setTimeframeOpen] = useState(false);
   const [symbolSearchOpen, setSymbolSearchOpen] = useState(false);
+  const [volSettingsOpen, setVolSettingsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const timeframeRef = useRef<HTMLDivElement>(null);
+  const volSettingsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -130,6 +137,9 @@ export default function ChartToolbar({
       }
       if (timeframeRef.current && !timeframeRef.current.contains(e.target as Node)) {
         setTimeframeOpen(false);
+      }
+      if (volSettingsRef.current && !volSettingsRef.current.contains(e.target as Node)) {
+        setVolSettingsOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -276,6 +286,80 @@ export default function ChartToolbar({
           </div>
         )}
       </div>
+
+      {/* Vol Weighted settings gear — only shown when that chart type is active */}
+      {chartType === 'volume-weighted' && (
+        <div className="relative" ref={volSettingsRef}>
+          <button
+            onClick={() => setVolSettingsOpen((v) => !v)}
+            className={`flex items-center justify-center w-6 h-6 rounded-btn transition-colors duration-120 ${
+              volSettingsOpen
+                ? 'text-blue bg-blue/10'
+                : 'text-text-muted hover:text-text-primary hover:bg-hover'
+            }`}
+            title="Vol Weighted settings"
+          >
+            <Settings2 size={12} />
+          </button>
+          {volSettingsOpen && (
+            <div className="absolute top-full left-0 mt-1 bg-panel border border-border-default rounded-md py-2 px-3 z-50 w-[188px] shadow-lg">
+              <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider mb-2">Vol Weighted</p>
+              <div className="flex flex-col gap-2.5">
+                {/* Value Up */}
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono text-text-secondary">Value Up</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer group">
+                    <span className="text-[9px] font-mono text-text-muted group-hover:text-text-secondary transition-colors">
+                      {volumeWeightedColors.up.toUpperCase()}
+                    </span>
+                    <div
+                      className="w-5 h-5 rounded border border-white/20 group-hover:border-white/40 transition-colors overflow-hidden"
+                      style={{ background: volumeWeightedColors.up }}
+                    >
+                      <input
+                        type="color"
+                        value={volumeWeightedColors.up}
+                        onChange={(e) => onVolumeWeightedColorsChange?.({ ...volumeWeightedColors, up: e.target.value })}
+                        className="opacity-0 w-full h-full cursor-pointer"
+                        style={{ transform: 'scale(2)' }}
+                      />
+                    </div>
+                  </label>
+                </div>
+                {/* Value Down */}
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono text-text-secondary">Value Down</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer group">
+                    <span className="text-[9px] font-mono text-text-muted group-hover:text-text-secondary transition-colors">
+                      {volumeWeightedColors.down.toUpperCase()}
+                    </span>
+                    <div
+                      className="w-5 h-5 rounded border border-white/20 group-hover:border-white/40 transition-colors overflow-hidden"
+                      style={{ background: volumeWeightedColors.down }}
+                    >
+                      <input
+                        type="color"
+                        value={volumeWeightedColors.down}
+                        onChange={(e) => onVolumeWeightedColorsChange?.({ ...volumeWeightedColors, down: e.target.value })}
+                        className="opacity-0 w-full h-full cursor-pointer"
+                        style={{ transform: 'scale(2)' }}
+                      />
+                    </div>
+                  </label>
+                </div>
+                <div className="border-t border-border-default pt-1.5">
+                  <button
+                    onClick={() => onVolumeWeightedColorsChange?.({ up: '#00C853', down: '#FF3D71' })}
+                    className="text-[9px] font-mono text-text-muted hover:text-text-secondary transition-colors"
+                  >
+                    Reset to defaults
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="w-px h-4 bg-border-default" />
 

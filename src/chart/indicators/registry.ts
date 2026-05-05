@@ -801,11 +801,15 @@ export const indicatorRegistry: Record<string, IndicatorMeta> = {
     category: 'volume',
     defaultParams: { bins: 24 },
     paramLabels: { bins: 'Bins' },
+    legendSwatchKeys: ['upVolume', 'downVolume', 'valueAreaUp', 'valueAreaDown', 'poc'],
     outputs: [
       { key: 'prices', label: 'Price Levels', color: C[0], style: 'histogram' },
       { key: 'volumes', label: 'Volume', color: C[5], style: 'histogram' },
       { key: 'upVolume', label: 'Up Volume', color: '#00C853', style: 'histogram' },
       { key: 'downVolume', label: 'Down Volume', color: '#FF3D71', style: 'histogram' },
+      { key: 'valueAreaUp', label: 'Value Area Up', color: '#006B2E', style: 'histogram' },
+      { key: 'valueAreaDown', label: 'Value Area Down', color: '#8C1125', style: 'histogram' },
+      { key: 'poc', label: 'POC', color: '#F59E0B', style: 'line' },
     ],
   },
 };

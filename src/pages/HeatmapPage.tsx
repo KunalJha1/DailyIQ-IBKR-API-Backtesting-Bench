@@ -473,6 +473,8 @@ function HeatmapPage() {
                 const showSymbol = forceLabel || (rect.w > 28 && rect.h > 14);
                 const showMetric = forceLabel || (rect.w > 42 && rect.h > 26);
                 const showName = area > 12000 || (rect.w > 110 && rect.h > 52);
+                const showLogo = rect.w >= 64 && rect.h >= 64;
+                const logoSize = Math.min(28, Math.floor(Math.min(rect.w, rect.h) * 0.35));
                 const metricValue = getTileMetricValue(rect.data, metricMode);
                 const isUnknown = rect.data.status === "pending" || metricValue == null;
 
@@ -494,6 +496,17 @@ function HeatmapPage() {
                   >
                     {showSymbol ? (
                       <div className="flex h-full flex-col items-center justify-center px-0.5 text-center">
+                        {showLogo ? (
+                          <img
+                            src={`https://assets.parqet.com/logos/symbol/${rect.data.symbol}?format=svg`}
+                            alt=""
+                            width={logoSize}
+                            height={logoSize}
+                            className="mb-1 rounded-full object-contain"
+                            style={{ width: logoSize, height: logoSize }}
+                            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                          />
+                        ) : null}
                         <span className="truncate font-sans text-[11px] font-semibold leading-none text-white">
                           {rect.data.symbol}
                         </span>

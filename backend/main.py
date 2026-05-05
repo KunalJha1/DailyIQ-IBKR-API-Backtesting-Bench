@@ -196,6 +196,16 @@ _sp500_heatmap_cache_lock: asyncio.Lock | None = None
 _sp500_heatmap_cache_payload: dict | None = None
 _sp500_heatmap_cache_time: float = 0.0
 
+CUSTOM_HEATMAP_CACHE_TTL_S = 10.0
+_custom_heatmap_cache_lock: asyncio.Lock | None = None
+# keyed by frozenset of symbols → (payload, monotonic_time)
+_custom_heatmap_cache: dict[frozenset, tuple[dict, float]] = {}
+
+ETF_HEATMAP_CACHE_TTL_S = 15.0
+_etf_heatmap_cache_lock: asyncio.Lock | None = None
+# keyed by ETF symbol → (payload, monotonic_time)
+_etf_heatmap_cache: dict[str, tuple[dict, float]] = {}
+
 
 async def _ensure_pool_configured(pool: ConnectionPool) -> bool:
     """Probe TWS ports and configure the pool if not yet set up. Returns True if configured."""
@@ -1427,10 +1437,13 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         global _portfolio_cache_lock, _sp500_heatmap_cache_lock, _portfolio_last_good
+        global _custom_heatmap_cache_lock, _etf_heatmap_cache_lock
         # Create asyncio primitives inside the running event loop to avoid
         # "Future attached to a different loop" errors on Windows (ProactorEventLoop).
         _portfolio_cache_lock = asyncio.Lock()
         _sp500_heatmap_cache_lock = asyncio.Lock()
+        _custom_heatmap_cache_lock = asyncio.Lock()
+        _etf_heatmap_cache_lock = asyncio.Lock()
         try:
             persisted = await run_db(load_persisted_ibkr_portfolio_snapshot)
         except Exception:
@@ -2552,6 +2565,14 @@ def create_app() -> FastAPI:
     @app.get("/heatmap/custom")
     async def get_custom_heatmap(symbols: str = ""):
         sym_list = _parse_heatmap_symbol_query(symbols)
+        cache_key = frozenset(sym_list)
+        now = time.monotonic()
+
+        if _custom_heatmap_cache_lock is not None and sym_list:
+            async with _custom_heatmap_cache_lock:
+                cached = _custom_heatmap_cache.get(cache_key)
+                if cached is not None and (now - cached[1]) < CUSTOM_HEATMAP_CACHE_TTL_S:
+                    return cached[0]
 
         def _read():
             if not sym_list:
@@ -2587,13 +2608,21 @@ def create_app() -> FastAPI:
                 return tiles
 
         tiles = await run_db(_read)
-        return {
+        payload = {
             "asOf": int(time.time() * 1000),
             "universe": "custom",
             "requested": len(sym_list),
             "count": len(tiles),
             "tiles": tiles,
         }
+        if _custom_heatmap_cache_lock is not None and sym_list:
+            async with _custom_heatmap_cache_lock:
+                # Evict old entries if cache grows large (keep most recent 50 key sets)
+                if len(_custom_heatmap_cache) >= 50:
+                    oldest = min(_custom_heatmap_cache, key=lambda k: _custom_heatmap_cache[k][1])
+                    del _custom_heatmap_cache[oldest]
+                _custom_heatmap_cache[cache_key] = (payload, time.monotonic())
+        return payload
 
     @app.get("/heatmap/etf/{etf_symbol}")
     async def get_etf_heatmap(etf_symbol: str):
@@ -2601,6 +2630,13 @@ def create_app() -> FastAPI:
         holdings = etf_holdings.get(sym)
         if not holdings:
             raise HTTPException(status_code=404, detail=f"ETF '{sym}' not found or has no holdings.")
+
+        now = time.monotonic()
+        if _etf_heatmap_cache_lock is not None:
+            async with _etf_heatmap_cache_lock:
+                cached = _etf_heatmap_cache.get(sym)
+                if cached is not None and (now - cached[1]) < ETF_HEATMAP_CACHE_TTL_S:
+                    return cached[0]
 
         # Build weight map: holding symbol → weight_pct
         weight_map = {h["symbol"]: h["weight_pct"] for h in holdings}
@@ -2643,13 +2679,17 @@ def create_app() -> FastAPI:
                 return tiles
 
         tiles = await run_db(_read)
-        return {
+        payload = {
             "asOf": int(time.time() * 1000),
             "universe": "etf",
             "etfSymbol": sym,
             "count": len(tiles),
             "tiles": tiles,
         }
+        if _etf_heatmap_cache_lock is not None:
+            async with _etf_heatmap_cache_lock:
+                _etf_heatmap_cache[sym] = (payload, time.monotonic())
+        return payload
 
     # ── Heatmap Groups (CRUD) ──────────────────────────────────────────────────
 

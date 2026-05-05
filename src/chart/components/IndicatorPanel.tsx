@@ -42,7 +42,7 @@ const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   SMA: 'Trend-following moving average',
   EMA: 'Faster-reacting moving average',
   'EMA Ribbon 5/20/200': 'Three-line EMA structure ribbon',
-  'DailyIQ Technical Table': 'Multi-timeframe technical table with trend, strength, chop, RSI, and MACD summary',
+  'DailyIQ Technical Table': 'Multi-timeframe trend summary',
   'Bollinger Bands': 'Volatility bands around a moving average',
   VWAP: 'Average price weighted by volume',
   Ichimoku: 'Multi-component trend & momentum system',
@@ -57,9 +57,9 @@ const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   'MACD Crossover': 'Buy/sell on MACD-signal line crossovers',
   'ADL Crossover': 'Buy/sell when ADL crosses above/below its SMA smoothing line',
   'Structure Breaks': 'Pivot break markers for bullish and bearish structure breaks',
-  'Dailyiq Liquitity Sweep': 'DailyIQ liquidity sweep zones with simplified labels and action callouts',
-  'Liquidity Sweep (ICT/SMC)': 'DailyIQ liquidity sweep zones with simplified labels and action callouts',
-  'DailyIQ Liquidity Sweep Table': 'Floating liquidity table with DH/DL, prior period levels, sweep state, and ATR targets',
+  'DailyIQ Liquitity Sweep': 'DailyIQ liquidity sweep zones with simplified labels and action callouts',
+  'DailyIQ Liquidity Sweep (ICT/SMC)': 'DailyIQ liquidity sweep zones with simplified labels and action callouts',
+  'DailyIQ Liquidity Sweep Table': 'DailyIQ liquidity table with DH/DL, prior period levels, etc.',
   FVG: 'Standalone fair value gap rectangles with auto-clear when used',
   'FVG Momentum': 'Latest fair value gap boundaries with pullback/rejection markers',
   'Gap Zones': 'Highlights simple gap-up and gap-down price voids on the chart',
@@ -306,7 +306,7 @@ export default function IndicatorPanel({
 
       {/* Categories */}
       <div
-        className="scrollbar-panel"
+        className="scrollbar-none"
         style={{
           maxHeight: 380,
           overflowY: 'auto',

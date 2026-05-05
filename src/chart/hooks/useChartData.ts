@@ -161,6 +161,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
   const [pendingViewportShift, setPendingViewportShift] = useState(0);
   const [updateMode, setUpdateMode] = useState<'full' | 'tail'>('full');
   const [tailChangeOffset, setTailChangeOffset] = useState(0);
+  const [tailChangeStartTime, setTailChangeStartTime] = useState<number | null>(null);
   const requestIdRef = useRef(0);
   // Keep a ref to rawBars for async access without stale closures
   const rawBarsRef = useRef<OHLCVBar[]>([]);
@@ -236,6 +237,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
     panFetchingRef.current = false;
     setUpdateMode('full');
     setTailChangeOffset(0);
+    setTailChangeStartTime(null);
     setPendingViewportShift(0);
     viewportAnchorRef.current = null;
 
@@ -293,6 +295,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
         const bars = parseBars(payload);
 
         setUpdateMode('full');
+        setTailChangeStartTime(null);
         if (bars.length > 0) {
           const trimmed = useDaily ? bars : trimIntradayTail(bars);
           setRawBars(trimmed);
@@ -355,6 +358,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           const next = mergeBarsByTime(rawBarsRef.current, trimmed);
           const nextTrimmed = useDaily ? next : trimIntradayTail(next);
           setUpdateMode('full');
+          setTailChangeStartTime(null);
           setRawBars(nextTrimmed);
           setRawBarSize(cfg.rawBarSize);
           setSource((payload.source as 'tws' | 'dailyiq' | 'yahoo' | 'cache') || 'yahoo');
@@ -426,6 +430,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
           const canTail = canUseTailUpdate(prevBars, nextBars, offset);
           setRawBars(nextBars);
           setTailChangeOffset(canTail ? offset : 0);
+          setTailChangeStartTime(canTail ? nextBars[offset]?.time ?? null : null);
           setUpdateMode(canTail ? 'tail' : 'full');
           setRawBarSize(cfg.rawBarSize);
           setSource(pack.source);
@@ -480,6 +485,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
             }
           }
           setUpdateMode('full');
+          setTailChangeStartTime(null);
           setRawBars(nextRawBars);
         }
       } catch {
@@ -618,6 +624,7 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
               }
             }
             setUpdateMode('full');
+            setTailChangeStartTime(null);
             setRawBars(nextRawBars);
           }
         } catch {
@@ -636,11 +643,33 @@ export function useChartData({ symbol, timeframe, sidecarPort }: UseChartDataOpt
     return [];
   }, [rawBars, rawBarSize, timeframe]);
 
+  const displayTailChangeOffset = useMemo(() => {
+    if (updateMode !== 'tail' || tailChangeStartTime == null || bars.length === 0) {
+      return tailChangeOffset;
+    }
+
+    const previousDisplayBars = displayBarsRef.current;
+    if (previousDisplayBars.length === 0) return 0;
+
+    let offset = bars.findIndex((bar, index) => {
+      const nextStart = bars[index + 1]?.time ?? Infinity;
+      return bar.time <= tailChangeStartTime && tailChangeStartTime < nextStart;
+    });
+    if (offset === -1) {
+      offset = bars.findIndex(bar => bar.time >= tailChangeStartTime);
+      if (offset === -1) offset = bars.length - 1;
+    }
+
+    return canUseTailUpdate(previousDisplayBars, bars, Math.max(0, offset))
+      ? Math.max(0, offset)
+      : 0;
+  }, [bars, updateMode, tailChangeOffset, tailChangeStartTime]);
+
   displayBarsRef.current = bars;
 
   const onViewportShiftApplied = useCallback(() => {
     setPendingViewportShift(0);
   }, []);
 
-  return { bars, loading, isStale, source, datasetKey, onViewportChange, pendingViewportShift, onViewportShiftApplied, updateMode, tailChangeOffset };
+  return { bars, loading, isStale, source, datasetKey, onViewportChange, pendingViewportShift, onViewportShiftApplied, updateMode, tailChangeOffset: displayTailChangeOffset };
 }

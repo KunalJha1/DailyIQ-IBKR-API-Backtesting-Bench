@@ -70,6 +70,7 @@ export interface ChartState {
   legendCollapsed?: boolean;
   subPaneState?: SubPaneStateSnapshot;
   splitLayout?: ChartSplitLayout;
+  volumeWeightedColors?: { up: string; down: string };
 }
 
 const KEY_PREFIX = "chart-state:";
@@ -299,6 +300,13 @@ export function loadChartState(tabId: string): ChartState | null {
         : false,
       subPaneState: parseSubPaneState((parsed as { subPaneState?: unknown }).subPaneState),
       splitLayout: parseSplitLayout((parsed as { splitLayout?: unknown }).splitLayout),
+      volumeWeightedColors: (() => {
+        const vwc = (parsed as { volumeWeightedColors?: unknown }).volumeWeightedColors;
+        if (isRecord(vwc) && typeof vwc.up === "string" && typeof vwc.down === "string") {
+          return { up: vwc.up, down: vwc.down };
+        }
+        return undefined;
+      })(),
       probEngWidget: isRecord((parsed as { probEngWidget?: unknown }).probEngWidget)
         ? (() => {
             const pw = (parsed as { probEngWidget?: unknown }).probEngWidget as Record<string, unknown>;
