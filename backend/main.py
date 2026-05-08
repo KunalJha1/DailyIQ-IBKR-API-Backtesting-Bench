@@ -1,20 +1,24 @@
 """DailyIQ Sidecar — FastAPI HTTP API for DB-backed market data."""
 
+import os
 import sys
 
-# Fix asyncio event loop policy on Windows before any event loop is created.
-# ib_insync requires SelectorEventLoop; Python 3.8+ defaults to ProactorEventLoop
-# on Windows which causes connectivity issues in the PyInstaller bundle.
-if sys.platform == "win32":
+# Default to ProactorEventLoop on Windows — its IOCP-backed I/O scales far better
+# under the load of our concurrent pollers + frontend keep-alive sockets, and
+# starvation of /healthz under SelectorEventLoop is what triggered the watchdog
+# restart loop on Windows clients. Modern ib_insync runs fine on Proactor; if a
+# regression surfaces in the IBKR path, set DAILYIQ_FORCE_SELECTOR_LOOP=1 to
+# fall back to the old behaviour.
+if sys.platform == "win32" and os.environ.get("DAILYIQ_FORCE_SELECTOR_LOOP") == "1":
     import asyncio as _asyncio
     _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
 
 import argparse
 import asyncio
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
-import os
 import threading
 import time
 import uuid
@@ -28,6 +32,7 @@ from urllib.request import urlopen
 from dotenv import load_dotenv
 load_dotenv()
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1281,7 +1286,7 @@ DAILYIQ_UNIVERSE_SCORES_REFRESH_S = 900
 DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE = 200
 DAILYIQ_SENTIMENT_UNIVERSE_REFRESH_S = 300
 DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE = 100
-DAILYIQ_SENTIMENT_UNIVERSE_BATCH_PAUSE_S = 0.1
+DAILYIQ_SENTIMENT_UNIVERSE_BATCH_PAUSE_S = 1.0
 _DAILYIQ_BAR_SECONDS: dict[str, int] = {
     "1m": 60,
     "5m": 300,
@@ -1445,6 +1450,22 @@ def create_app() -> FastAPI:
         _sp500_heatmap_cache_lock = asyncio.Lock()
         _custom_heatmap_cache_lock = asyncio.Lock()
         _etf_heatmap_cache_lock = asyncio.Lock()
+
+        # Bound the default executor so the pollers can't drown out request
+        # handlers and starve the event loop thread.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=16, thread_name_prefix="dailyiq-io")
+        )
+
+        # Single shared async HTTP client for all poller traffic. Built here so
+        # it's bound to the running loop. Limits keep us under DailyIQ rate
+        # limits and prevent the connection pool from ballooning.
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=2.0, read=10.0, write=10.0, pool=2.0),
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+        )
+        _app.state.dailyiq_http_client = http_client
         try:
             persisted = await run_db(load_persisted_ibkr_portfolio_snapshot)
         except Exception:
@@ -1643,8 +1664,10 @@ def create_app() -> FastAPI:
                     await asyncio.sleep(30)
 
         # Fire-and-forget: pre-warm DailyIQ quotes for watchlist symbols so the
-        # frontend sees snapshots immediately on first load.
+        # frontend sees snapshots immediately on first load. Delayed so we don't
+        # collide with first-paint requests during cold start.
         async def _startup_quote_warmup() -> None:
+            await asyncio.sleep(10)
             try:
                 watchlist_syms = await run_db(read_watchlist_symbols)
                 if not watchlist_syms:
@@ -1654,25 +1677,22 @@ def create_app() -> FastAPI:
                     len(watchlist_syms),
                     ", ".join(watchlist_syms[:10]),
                 )
-                from dailyiq_provider import fetch_watchlist_quotes_from_dailyiq_concurrent
-                loop = asyncio.get_event_loop()
+                from dailyiq_provider import fetch_watchlist_quotes_from_dailyiq_async
 
-                # Concurrent quote snapshots — populates dailyiq_cache so
-                # /market/snapshots returns immediately on first poll.
-                quotes = await loop.run_in_executor(
-                    None,
-                    fetch_watchlist_quotes_from_dailyiq_concurrent,
-                    watchlist_syms,
+                quotes = await fetch_watchlist_quotes_from_dailyiq_async(
+                    http_client, watchlist_syms
                 )
                 logger.info("[Warmup] Fetched %d DailyIQ quotes", len(quotes))
             except Exception as exc:
                 logger.warning("[Warmup] DailyIQ quote pre-warm failed: %s", exc)
 
         async def _dailyiq_universe_scores_refresh_loop() -> None:
-            await asyncio.sleep(12)
+            # Stagger so all pollers don't fire at the same tick post-startup.
+            await asyncio.sleep(25)
+            sem = asyncio.Semaphore(8)
             while True:
                 try:
-                    from dailyiq_provider import fetch_scores_batch_from_dailyiq
+                    from dailyiq_provider import fetch_scores_batch_from_dailyiq_async
 
                     watchlist_syms = await run_db(read_watchlist_symbols)
                     symbols = _ordered_enabled_symbols(ticker_metadata, watchlist_syms)
@@ -1681,16 +1701,28 @@ def create_app() -> FastAPI:
                         continue
 
                     logger.info("[ScoresRefresh] Fetching DailyIQ scores for %d symbols", len(symbols))
-                    loop = asyncio.get_event_loop()
+
+                    chunks = [
+                        symbols[i:i + DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE]
+                        for i in range(0, len(symbols), DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE)
+                    ]
+
+                    async def _fetch_chunk(chunk: list[str]) -> dict | None:
+                        async with sem:
+                            return await fetch_scores_batch_from_dailyiq_async(
+                                http_client, chunk
+                            )
+
+                    results = await asyncio.gather(
+                        *(_fetch_chunk(c) for c in chunks), return_exceptions=True
+                    )
+
                     total_updated = 0
-                    for i in range(0, len(symbols), DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE):
-                        chunk = symbols[i:i + DAILYIQ_UNIVERSE_SCORES_BATCH_SIZE]
-                        scores = await loop.run_in_executor(
-                            None, fetch_scores_batch_from_dailyiq, chunk
-                        )
-                        if scores:
-                            updated = await run_db(_write_dailyiq_scores, scores)
-                            total_updated += updated
+                    for scores in results:
+                        if isinstance(scores, Exception) or not scores:
+                            continue
+                        updated = await run_db(_write_dailyiq_scores, scores)
+                        total_updated += updated
 
                     logger.info("[ScoresRefresh] Updated scores for %d symbols", total_updated)
                     await asyncio.sleep(DAILYIQ_UNIVERSE_SCORES_REFRESH_S)
@@ -1699,12 +1731,13 @@ def create_app() -> FastAPI:
                     await asyncio.sleep(60)
 
         async def _dailyiq_universe_sentiment_refresh_loop() -> None:
-            await asyncio.sleep(8)
+            await asyncio.sleep(40)
+            sem = asyncio.Semaphore(8)
             while True:
                 try:
                     from dailyiq_provider import (
                         fetch_sentiment_scores_from_cache,
-                        fetch_watchlist_quotes_from_dailyiq_concurrent,
+                        fetch_watchlist_quotes_from_dailyiq_async,
                         queue_sentiment_score_refresh,
                     )
 
@@ -1718,16 +1751,14 @@ def create_app() -> FastAPI:
                         "[SentimentWarmup] Refreshing DailyIQ sentiment/quotes for %d symbol(s)",
                         len(symbols),
                     )
-                    loop = asyncio.get_event_loop()
                     refreshed_count = 0
                     fallback_queued = 0
                     for i in range(0, len(symbols), DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE):
                         chunk = symbols[i:i + DAILYIQ_SENTIMENT_UNIVERSE_BATCH_SIZE]
-                        quotes = await loop.run_in_executor(
-                            None,
-                            fetch_watchlist_quotes_from_dailyiq_concurrent,
-                            chunk,
-                        )
+                        async with sem:
+                            quotes = await fetch_watchlist_quotes_from_dailyiq_async(
+                                http_client, chunk
+                            )
                         refreshed_count += len(quotes)
 
                         score_map = await run_db(fetch_sentiment_scores_from_cache, chunk)
@@ -1761,6 +1792,10 @@ def create_app() -> FastAPI:
             await pool.disconnect_all()
             scorer.stop()
             options_worker.stop()
+            try:
+                await http_client.aclose()
+            except Exception:
+                pass
 
     app = FastAPI(lifespan=lifespan)
 

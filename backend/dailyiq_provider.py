@@ -9,6 +9,7 @@ Timeframe support for bars: 1m, 5m, 15m, 1h, 4h, 1d, 1w.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,9 +17,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import requests
+
+if TYPE_CHECKING:
+    import httpx
 
 from db_utils import sync_db_session, execute_one_tx_with_retry
 from debug_bus import emit_debug_event
@@ -321,6 +325,157 @@ def _dailyiq_post_json(
         finally:
             with _inflight_lock:
                 _inflight_keys.pop(cache_key, None)
+
+
+async def _dailyiq_post_json_async(
+    client: "httpx.AsyncClient",
+    endpoint: str,
+    json_body: dict | None = None,
+    ttl_s: float = CACHE_TTL_SNAPSHOT,
+    timeout: float = HTTP_TIMEOUT,
+) -> dict | None:
+    """Async POST. Same cache contract as `_dailyiq_post_json` but does not block
+    the event loop: HTTP via httpx, cache reads/writes off-loaded with `to_thread`.
+    """
+    base = _base_url()
+    if not base:
+        emit_debug_event(
+            "dailyiq",
+            "missing_api_key",
+            "DailyIQ request skipped: API key missing",
+            {"endpoint": endpoint},
+        )
+        return None
+
+    parts = [f"POST:{endpoint}"]
+    if json_body:
+        parts.append(json.dumps(json_body, sort_keys=True, separators=(",", ":")))
+    cache_key = ":".join(parts)
+
+    cached = await asyncio.to_thread(_read_cache, cache_key, ttl_s)
+    if cached is not None:
+        emit_debug_event(
+            "dailyiq",
+            "cache_hit",
+            f"DailyIQ cache hit: {endpoint}",
+            {"endpoint": endpoint, "cacheKey": cache_key},
+        )
+        return cached
+
+    url = f"{base}/{endpoint.lstrip('/')}"
+    emit_debug_event(
+        "dailyiq",
+        "http_request",
+        f"POST /v1/.../{endpoint}",
+        {"endpoint": endpoint, "json": json_body or {}, "timeout": timeout},
+    )
+    try:
+        r = await client.post(url, json=json_body or {}, timeout=timeout)
+        if r.status_code == 429:
+            logger.warning("DailyIQ rate limited on %s — backing off", endpoint)
+            return None
+        if r.status_code != 200:
+            logger.warning("DailyIQ %s returned %d", endpoint, r.status_code)
+            return None
+        data = r.json()
+        await asyncio.to_thread(_write_cache, cache_key, data)
+        emit_debug_event(
+            "dailyiq",
+            "http_success",
+            f"DailyIQ success: {endpoint}",
+            {"endpoint": endpoint, "status": 200},
+        )
+        return data
+    except Exception as exc:
+        # httpx.HTTPError, json decode errors, anything else — log and degrade.
+        logger.warning("DailyIQ async request failed for %s: %s", endpoint, exc)
+        emit_debug_event(
+            "dailyiq",
+            "http_exception",
+            f"DailyIQ async request exception: {endpoint}",
+            {"endpoint": endpoint, "error": str(exc)},
+        )
+        return None
+
+
+async def fetch_watchlist_quotes_from_dailyiq_async(
+    client: "httpx.AsyncClient",
+    symbols: Sequence[str],
+) -> list[dict]:
+    """Async sibling of `fetch_watchlist_quotes_from_dailyiq` — does not block
+    the event loop on the network call."""
+    sanitized = [(sym or "").strip().upper() for sym in symbols if (sym or "").strip()]
+    if not sanitized:
+        return []
+
+    data = await _dailyiq_post_json_async(
+        client,
+        "price/batch",
+        json_body={"symbols": sanitized},
+        ttl_s=CACHE_TTL_SNAPSHOT,
+        timeout=HTTP_TIMEOUT_QUOTE,
+    )
+    if not isinstance(data, dict):
+        return []
+
+    quotes: list[dict] = []
+    pending_sentiment: list[tuple[str, int | None]] = []
+    for sym in sanitized:
+        item = data.get(sym)
+        if not isinstance(item, dict):
+            continue
+        q = _quote_from_dailyiq_price_payload(sym, item)
+        if q and q.get("last"):
+            pending_sentiment.append((sym, q.get("sentimentScore")))
+            quotes.append(q)
+
+    if pending_sentiment:
+        def _flush() -> None:
+            for sym, score in pending_sentiment:
+                _write_sentiment_score_cache(sym, score)
+        await asyncio.to_thread(_flush)
+    return quotes
+
+
+async def fetch_scores_batch_from_dailyiq_async(
+    client: "httpx.AsyncClient",
+    symbols: Sequence[str],
+) -> dict[str, dict[str, int | None]]:
+    """Async sibling of `fetch_scores_batch_from_dailyiq`."""
+    sanitized = [(sym or "").strip().upper() for sym in symbols if (sym or "").strip()]
+    if not sanitized:
+        return {}
+
+    data = await _dailyiq_post_json_async(
+        client,
+        "scores/batch",
+        json_body={"symbols": sanitized},
+        ttl_s=CACHE_TTL_SCORES,
+    )
+    if not isinstance(data, dict):
+        return {}
+
+    def _int_or_none(v) -> int | None:
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    result: dict[str, dict[str, int | None]] = {}
+    for sym in sanitized:
+        item = data.get(sym)
+        if not isinstance(item, dict):
+            continue
+        result[sym] = {
+            "score_5m": _int_or_none(item.get("score5m")),
+            "score_15m": _int_or_none(item.get("score15m")),
+            "score_1d": _int_or_none(item.get("score1d")),
+            "score_1w": _int_or_none(item.get("score1w")),
+            "sentiment_score": _int_or_none(item.get("sentimentScore")),
+        }
+    return result
 
 
 def signal_chart_view(symbol: str) -> None:

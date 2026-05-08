@@ -7,6 +7,7 @@ pandas
 numpy
 scipy
 requests
+httpx
 python-dotenv
 psutil
 llama-cpp-python

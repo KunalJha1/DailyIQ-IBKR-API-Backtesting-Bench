@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -892,6 +892,39 @@ fn shutdown_app_runtime(
     });
 }
 
+/// Pipe a child's stdout/stderr through reader threads that:
+///   1. Append every line to `supervisor.log` (with a prefix), so logs survive
+///      regardless of whether a console is attached.
+///   2. Mirror the line to the parent process's own stdout/stderr, so `npm run
+///      tauri dev` shows uvicorn output live (Windows debug builds keep a
+///      console; macOS / Linux always do).
+fn attach_child_log_forwarders(
+    app_handle: &AppHandle,
+    child: &mut Child,
+    prefix: &'static str,
+) {
+    if let Some(stdout) = child.stdout.take() {
+        let handle = app_handle.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                println!("[{}] {}", prefix, line);
+                append_supervisor_log(&handle, &format!("[{} stdout] {}", prefix, line));
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let handle = app_handle.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                eprintln!("[{}] {}", prefix, line);
+                append_supervisor_log(&handle, &format!("[{} stderr] {}", prefix, line));
+            }
+        });
+    }
+}
+
 fn spawn_dev_python(
     app_handle: &AppHandle,
     script_path: &PathBuf,
@@ -925,7 +958,11 @@ fn spawn_dev_python(
 
     let parent_pid = std::process::id().to_string();
 
-    let child = if venv_python.exists() {
+    // Always pipe child stdio so we can both tee to supervisor.log and mirror
+    // to the parent terminal. Without piping, on Windows release the inherited
+    // handles are invalid (no console) and the output is lost; even in dev,
+    // CREATE_NO_WINDOW combined with inherited handles can mask uvicorn logs.
+    let mut child = if venv_python.exists() {
         {
             #[allow(unused_mut)]
             let mut cmd = Command::new(&venv_python);
@@ -933,7 +970,9 @@ fn spawn_dev_python(
                 .current_dir(cwd)
                 .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
                 .env("DAILYIQ_PARENT_PID", &parent_pid)
-                .env("PYTHONUNBUFFERED", "1");
+                .env("PYTHONUNBUFFERED", "1")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
@@ -950,7 +989,9 @@ fn spawn_dev_python(
                 .current_dir(cwd)
                 .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
                 .env("DAILYIQ_PARENT_PID", &parent_pid)
-                .env("PYTHONUNBUFFERED", "1");
+                .env("PYTHONUNBUFFERED", "1")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
@@ -967,7 +1008,9 @@ fn spawn_dev_python(
                     .current_dir(cwd)
                     .env("DAILYIQ_DATA_DIR", app_data.to_string_lossy().to_string())
                     .env("DAILYIQ_PARENT_PID", &parent_pid)
-                    .env("PYTHONUNBUFFERED", "1");
+                    .env("PYTHONUNBUFFERED", "1")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
                 #[cfg(target_os = "windows")]
                 {
                     use std::os::windows::process::CommandExt;
@@ -977,6 +1020,25 @@ fn spawn_dev_python(
             })
             .map_err(|e| format!("Failed to spawn Python process: {}", e))?
     };
+
+    let log_prefix: &'static str = if script_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.contains("worker_watchlist"))
+        .unwrap_or(false)
+    {
+        "watchlist-worker"
+    } else if script_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.contains("worker_valuations"))
+        .unwrap_or(false)
+    {
+        "valuation-worker"
+    } else {
+        "sidecar"
+    };
+    attach_child_log_forwarders(app_handle, &mut child, log_prefix);
 
     Ok(ManagedChild::System(child))
 }
@@ -999,13 +1061,26 @@ fn spawn_bundled_sidecar(
     // Drain the event stream in a background thread so stdout/stderr pipes never
     // fill up. Set the exited flag when the process terminates so the watchdog
     // can detect crashes (previously has_exited always returned false for sidecars).
+    // Forward each line to supervisor.log + the parent terminal so production
+    // logs survive even when no console is attached.
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = Arc::clone(&exited);
+    let log_handle = app_handle.clone();
+    let prefix = binary_name.to_string();
     std::thread::spawn(move || {
         let mut rx = rx;
         while let Some(event) = rx.blocking_recv() {
-            if let CommandEvent::Terminated(_) = event {
-                break;
+            match event {
+                CommandEvent::Stdout(line) => {
+                    println!("[{}] {}", prefix, line);
+                    append_supervisor_log(&log_handle, &format!("[{} stdout] {}", prefix, line));
+                }
+                CommandEvent::Stderr(line) => {
+                    eprintln!("[{}] {}", prefix, line);
+                    append_supervisor_log(&log_handle, &format!("[{} stderr] {}", prefix, line));
+                }
+                CommandEvent::Terminated(_) => break,
+                _ => {}
             }
         }
         exited_clone.store(true, Ordering::Relaxed);
@@ -1080,28 +1155,61 @@ fn do_spawn_sidecar(app_handle: &AppHandle, state: &SidecarState) -> Result<u16,
     Err("Sidecar failed to become ready within 30s".to_string())
 }
 
-/// True when `GET /healthz` returns HTTP 200 (used by watchdog, not just process liveness).
-fn probe_sidecar_http_health(port: u16) -> bool {
+/// Why a `/healthz` probe failed (or `Ok` if it succeeded). The watchdog logs
+/// the variant so we can tell a true crash from a transient event-loop stall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthProbe {
+    Ok,
+    BadAddr,
+    ConnectFailed,
+    WriteFailed,
+    ReadTimeout,
+    Non200,
+}
+
+impl HealthProbe {
+    fn is_ok(self) -> bool {
+        matches!(self, HealthProbe::Ok)
+    }
+    fn label(self) -> &'static str {
+        match self {
+            HealthProbe::Ok => "ok",
+            HealthProbe::BadAddr => "bad-addr",
+            HealthProbe::ConnectFailed => "connect-failed",
+            HealthProbe::WriteFailed => "write-failed",
+            HealthProbe::ReadTimeout => "read-timeout",
+            HealthProbe::Non200 => "non-200",
+        }
+    }
+}
+
+/// Returns `Ok` when `GET /healthz` returns HTTP 200, otherwise the failure
+/// mode (used by watchdog, not just process liveness).
+fn probe_sidecar_http_health(port: u16) -> HealthProbe {
     let addr: SocketAddr = match format!("127.0.0.1:{}", port).parse() {
         Ok(a) => a,
-        Err(_) => return false,
+        Err(_) => return HealthProbe::BadAddr,
     };
     let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(_) => return HealthProbe::ConnectFailed,
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
     let request = "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return HealthProbe::WriteFailed;
     }
     let mut buf = [0u8; 384];
     match stream.read(&mut buf) {
         Ok(n) if n > 0 => {
             let head = String::from_utf8_lossy(&buf[..n]);
-            head.contains(" 200 ") || head.contains("200 OK")
+            if head.contains(" 200 ") || head.contains("200 OK") {
+                HealthProbe::Ok
+            } else {
+                HealthProbe::Non200
+            }
         }
-        _ => false,
+        _ => HealthProbe::ReadTimeout,
     }
 }
 
@@ -1435,7 +1543,8 @@ fn main() {
                     }
 
                     if let Some(port) = port_snapshot {
-                        if probe_sidecar_http_health(port) {
+                        let probe = probe_sidecar_http_health(port);
+                        if probe.is_ok() {
                             health_fail_streak = 0;
                             update_backend_status(&state, |status| {
                                 status.state = "healthy".to_string();
@@ -1451,18 +1560,69 @@ fn main() {
                                 continue;
                             }
                             health_fail_streak += 1;
+                            append_supervisor_log(
+                                &watchdog_handle,
+                                &format!(
+                                    "Watchdog: /healthz probe {} (streak={}, port={})",
+                                    probe.label(),
+                                    health_fail_streak,
+                                    port
+                                ),
+                            );
                             update_backend_status(&state, |status| {
                                 status.state = "unhealthy".to_string();
                                 status.sidecar_port = Some(port);
                                 status.last_restart_reason = Some(format!(
-                                    "healthz failed {} times",
+                                    "healthz {} ({} consecutive)",
+                                    probe.label(),
                                     health_fail_streak
                                 ));
                             });
                             if health_fail_streak >= WATCHDOG_FAILS_BEFORE_RESTART {
+                                // Liveness gate: don't tear down a process that's still
+                                // alive on the back of a single transient stall. Only
+                                // restart when the process has actually exited OR a
+                                // confirming probe also fails.
+                                let process_alive = {
+                                    let mut guard = state.child.lock().unwrap();
+                                    match guard.as_mut() {
+                                        Some(child) => !child.has_exited(),
+                                        None => false,
+                                    }
+                                };
+                                let confirm = if process_alive {
+                                    std::thread::sleep(Duration::from_millis(500));
+                                    probe_sidecar_http_health(port)
+                                } else {
+                                    HealthProbe::ConnectFailed
+                                };
+                                if process_alive && confirm.is_ok() {
+                                    append_supervisor_log(
+                                        &watchdog_handle,
+                                        "Watchdog: confirming probe succeeded; deferring restart",
+                                    );
+                                    health_fail_streak = 0;
+                                    update_backend_status(&state, |status| {
+                                        status.state = "healthy".to_string();
+                                        status.sidecar_port = Some(port);
+                                        status.last_healthy_at = Some(now_ms());
+                                    });
+                                    continue;
+                                }
                                 eprintln!(
-                                    "Watchdog: sidecar HTTP /healthz failed {} times; forcing full backend restart...",
-                                    health_fail_streak
+                                    "Watchdog: sidecar HTTP /healthz failed {} times ({}/{}); forcing full backend restart...",
+                                    health_fail_streak,
+                                    probe.label(),
+                                    confirm.label(),
+                                );
+                                append_supervisor_log(
+                                    &watchdog_handle,
+                                    &format!(
+                                        "Watchdog: forcing restart (initial={}, confirm={}, process_alive={})",
+                                        probe.label(),
+                                        confirm.label(),
+                                        process_alive
+                                    ),
                                 );
                                 health_fail_streak = 0;
                                 if ensure_backend_stack_running(
