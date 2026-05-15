@@ -378,8 +378,10 @@ const MINI_TECH_TABLE_MIN_WIDTH = 240;
 const MINI_TECH_TABLE_MAX_WIDTH = 480;
 const MINI_TECH_TABLE_MIN_HEIGHT = 150;
 const MINI_TECH_TABLE_MAX_HEIGHT = 360;
-const MINI_LIQ_TABLE_MIN_WIDTH = 280;
-const MINI_LIQ_TABLE_MIN_HEIGHT = 160;
+const MINI_LIQ_TABLE_MIN_WIDTH = 400;
+const MINI_LIQ_TABLE_MAX_WIDTH = 700;
+const MINI_LIQ_TABLE_MIN_HEIGHT = 270;
+const MINI_LIQ_TABLE_MAX_HEIGHT = 520;
 const MINI_TABLE_EDGE_PADDING = 4;
 const MINI_TABLE_DRAG_THRESHOLD = 4;
 const MINI_TABLE_RESIZE_THRESHOLD = 3;
@@ -850,6 +852,28 @@ export default function MiniChart({
     () => alerts.filter((alert) => alert.symbol === symbol),
     [alerts, symbol],
   );
+
+  const mergedLiqTableSnapshot = useMemo(() => {
+    if (!liqTableSnapshot) return null;
+    if (!techTableSnapshot) return liqTableSnapshot;
+    const techRows = techTableSnapshot.rows;
+    const bull = techRows.filter((r) => r.trend === 1).length;
+    const bear = techRows.filter((r) => r.trend === -1).length;
+    const rsiVals = techRows.map((r) => r.rsiNow).filter(Number.isFinite);
+    const rsiAvg = rsiVals.length > 0 ? rsiVals.reduce((a, b) => a + b, 0) / rsiVals.length : NaN;
+    const macdBull = techRows.filter((r) => Number.isFinite(r.macdNow) && Number.isFinite(r.macdSignal) && r.macdNow > r.macdSignal).length;
+    const macdBear = techRows.filter((r) => Number.isFinite(r.macdNow) && Number.isFinite(r.macdSignal) && r.macdNow < r.macdSignal).length;
+    return {
+      ...liqTableSnapshot,
+      technicalRows: techRows,
+      overallBull: bull,
+      overallBear: bear,
+      overallRsiAvg: rsiAvg,
+      overallMacdBull: macdBull,
+      overallMacdBear: macdBear,
+    };
+  }, [liqTableSnapshot, techTableSnapshot]);
+
   useAlertEvaluator(bars, symbol, activeIndicators);
 
   // Initialize ChartEngine
@@ -1324,13 +1348,14 @@ export default function MiniChart({
           computeTechnicalTableRowFromBars('1D', bars1d, techTableFastLen, techTableSlowLen, techTableTrendLen),
           computeTechnicalTableRowFromBars('1W', bars1w, techTableFastLen, techTableSlowLen, techTableTrendLen),
         ];
-        let bullCount = 0, bearCount = 0, strengthSum = 0, strengthCount = 0, chopSum = 0, chopCount = 0, rsiSum = 0, rsiCount = 0, macdBull = 0, macdBear = 0;
+        let bullCount = 0, bearCount = 0, strengthSum = 0, strengthCount = 0, chopSum = 0, chopCount = 0, rsiSum = 0, rsiCount = 0, macdBull = 0, macdBear = 0, volMomBull = 0, volMomBear = 0;
         for (const row of rows) {
           if (row.trend === 1) bullCount += 1; else if (row.trend === -1) bearCount += 1;
           if (Number.isFinite(row.strength)) { strengthSum += row.strength; strengthCount += 1; }
           if (Number.isFinite(row.chop)) { chopSum += row.chop; chopCount += 1; }
           if (Number.isFinite(row.rsiNow)) { rsiSum += row.rsiNow; rsiCount += 1; }
           if (Number.isFinite(row.macdNow) && Number.isFinite(row.macdSignal)) { if (row.macdNow > row.macdSignal) macdBull += 1; else if (row.macdNow < row.macdSignal) macdBear += 1; }
+          if (row.volMom === 1) volMomBull += 1; else if (row.volMom === -1) volMomBear += 1;
         }
         const snapshot: TechnicalTableSnapshot = {
           rows,
@@ -1339,6 +1364,7 @@ export default function MiniChart({
           overallChop: chopCount > 0 ? chopSum / chopCount : NaN,
           overallRsi: rsiCount > 0 ? rsiSum / rsiCount : NaN,
           overallMacdState: macdBull > macdBear ? 1 : macdBear > macdBull ? -1 : 0,
+          overallVolMom: volMomBull > volMomBear ? 1 : volMomBear > volMomBull ? -1 : 0,
         };
         if (!cancelled) { techTableSnapshotCacheRef.current = { key: cacheKey, snapshot }; setTechTableSnapshot(snapshot); }
       } catch { if (!cancelled) setTechTableSnapshot(null); }
@@ -2126,7 +2152,7 @@ export default function MiniChart({
     event.currentTarget.setPointerCapture(event.pointerId);
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'grab';
-    setLiqTableWidget((prev) => miniTableClamp({ ...prev, x: widgetRect.left - hostRect.left, y: widgetRect.top - hostRect.top }, MINI_LIQ_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+    setLiqTableWidget((prev) => miniTableClamp({ ...prev, x: widgetRect.left - hostRect.left, y: widgetRect.top - hostRect.top }, MINI_LIQ_TABLE_MIN_WIDTH, MINI_LIQ_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_LIQ_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
   }, [liqTableWidget, chartLayout]);
 
   const handleLiqTableHeaderPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2137,7 +2163,7 @@ export default function MiniChart({
     if (!drag.moved && moveDistance < MINI_TABLE_DRAG_THRESHOLD) return;
     if (!drag.moved) { drag.moved = true; setLiqTableDragging(true); document.body.style.cursor = 'grabbing'; }
     const rect = host.getBoundingClientRect();
-    setLiqTableWidget((prev) => miniTableClamp({ ...prev, x: event.clientX - rect.left - drag.offsetX, y: event.clientY - rect.top - drag.offsetY }, MINI_LIQ_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+    setLiqTableWidget((prev) => miniTableClamp({ ...prev, x: event.clientX - rect.left - drag.offsetX, y: event.clientY - rect.top - drag.offsetY }, MINI_LIQ_TABLE_MIN_WIDTH, MINI_LIQ_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_LIQ_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
   }, [chartLayout]);
 
   const handleLiqTableHeaderPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2172,7 +2198,7 @@ export default function MiniChart({
     const deltaY = event.clientY - resize.startClientY;
     if (!resize.moved && Math.max(Math.abs(deltaX), Math.abs(deltaY)) < MINI_TABLE_RESIZE_THRESHOLD) return;
     if (!resize.moved) { resize.moved = true; setLiqTableResizing(true); }
-    setLiqTableWidget(miniTableResize({ ...liqTableWidget, x: resize.startX, y: resize.startY, width: resize.startWidth, height: resize.startHeight }, resize.corner, deltaX, deltaY, MINI_LIQ_TABLE_MIN_WIDTH, MINI_TECH_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_TECH_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
+    setLiqTableWidget(miniTableResize({ ...liqTableWidget, x: resize.startX, y: resize.startY, width: resize.startWidth, height: resize.startHeight }, resize.corner, deltaX, deltaY, MINI_LIQ_TABLE_MIN_WIDTH, MINI_LIQ_TABLE_MAX_WIDTH, MINI_LIQ_TABLE_MIN_HEIGHT, MINI_LIQ_TABLE_MAX_HEIGHT, chartLayout, host.offsetWidth, host.offsetHeight));
   }, [liqTableWidget, chartLayout]);
 
   const handleLiqTableResizePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -3660,14 +3686,14 @@ export default function MiniChart({
         )}
         {chartLayout && activeLiqTableIndicator && (
           <DailyIQLiquidityTableOverlay
-            snapshot={liqTableSnapshot}
+            snapshot={mergedLiqTableSnapshot}
             widget={liqTableWidget}
             dragging={liqTableDragging}
             resizing={liqTableResizing}
             minWidth={MINI_LIQ_TABLE_MIN_WIDTH}
-            maxWidth={MINI_TECH_TABLE_MAX_WIDTH}
+            maxWidth={MINI_LIQ_TABLE_MAX_WIDTH}
             minHeight={MINI_LIQ_TABLE_MIN_HEIGHT}
-            maxHeight={MINI_TECH_TABLE_MAX_HEIGHT}
+            maxHeight={MINI_LIQ_TABLE_MAX_HEIGHT}
             onHeaderPointerDown={handleLiqTableHeaderPointerDown}
             onHeaderPointerMove={handleLiqTableHeaderPointerMove}
             onHeaderPointerUp={handleLiqTableHeaderPointerUp}

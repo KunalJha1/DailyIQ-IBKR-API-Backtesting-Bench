@@ -106,6 +106,7 @@ interface AlertsState {
 type AlertsAction =
   | { type: 'ADD'; alert: ChartAlert }
   | { type: 'REMOVE'; id: string }
+  | { type: 'UPDATE'; alert: ChartAlert }
   | { type: 'FIRE'; alertId: string; triggeredValue: number; triggeredBarTime: number }
   | { type: 'DISMISS'; notifId: string };
 
@@ -115,6 +116,8 @@ function reducer(state: AlertsState, action: AlertsAction): AlertsState {
       return { ...state, alerts: [...state.alerts, action.alert] };
     case 'REMOVE':
       return { ...state, alerts: state.alerts.filter(a => a.id !== action.id) };
+    case 'UPDATE':
+      return { ...state, alerts: state.alerts.map(a => a.id === action.alert.id ? action.alert : a) };
     case 'FIRE': {
       const alert = state.alerts.find(a => a.id === action.alertId);
       if (!alert) return state;
@@ -160,6 +163,7 @@ interface AlertsContextValue {
   notifications: FiredAlertNotification[];
   addAlert: (alert: ChartAlert) => void;
   removeAlert: (id: string) => void;
+  updateAlert: (alert: ChartAlert) => void;
   dismissNotification: (id: string) => void;
   evaluateAlerts: (symbol: string, latestClose: number, prevClose: number | null, latestBarTime: number, activeIndicators: ActiveIndicator[]) => void;
 }
@@ -193,6 +197,7 @@ export function AlertProvider({ children }: { children: ReactNode }) {
 
   const addAlert = useCallback((alert: ChartAlert) => dispatch({ type: 'ADD', alert }), []);
   const removeAlert = useCallback((id: string) => dispatch({ type: 'REMOVE', id }), []);
+  const updateAlert = useCallback((alert: ChartAlert) => dispatch({ type: 'UPDATE', alert }), []);
   const dismissNotification = useCallback((id: string) => dispatch({ type: 'DISMISS', notifId: id }), []);
 
   const evaluateAlerts = useCallback((
@@ -243,6 +248,7 @@ export function AlertProvider({ children }: { children: ReactNode }) {
     notifications: state.notifications,
     addAlert,
     removeAlert,
+    updateAlert,
     dismissNotification,
     evaluateAlerts,
   };

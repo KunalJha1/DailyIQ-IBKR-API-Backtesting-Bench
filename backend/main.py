@@ -45,6 +45,7 @@ from historical import (
     DEFAULT_DAILY_DURATION,
     DEFAULT_INTRADAY_DURATION,
     _cache_fresh,
+    _has_intraday_spacing,
     _normalize_bar_size,
     _write_bars,
     is_chart_intent_fresh,
@@ -1034,9 +1035,9 @@ def _fetch_live_quote_for_options(symbol: str) -> float | None:
 
     Priority:
       1. watchlist_quotes with source='tws' — real-time streaming price, always preferred
-      2. DailyIQ fresh network fetch — most accurate, works in all sessions
-      3. watchlist_quotes (any source) — background-worker cached price
-      4. market_snapshots
+      2. DailyIQ live fetch — fresh price; result is written back to market_snapshots so
+         the watchlist shows the same value
+      3. market_snapshots / watchlist_quotes — stale cached fallback
     Falls back silently so the options screen always loads even if data is unavailable.
     """
     if not symbol:
@@ -1051,24 +1052,30 @@ def _fetch_live_quote_for_options(symbol: str) -> float | None:
                 return float(row[0])
     except Exception:
         pass
-    # Always fetch a fresh price from DailyIQ (most accurate, works in all sessions)
+    # Fresh DailyIQ fetch — write the result back so the watchlist stays in sync
     try:
         from dailyiq_provider import fetch_quote_from_dailyiq
         q = fetch_quote_from_dailyiq(symbol)
         if q and q.get("last"):
-            return float(q["last"])
+            price = float(q["last"])
+            try:
+                from worker_watchlist import upsert_quote
+                upsert_quote(q)
+            except Exception:
+                pass
+            return price
     except Exception:
         pass
     # Fall back to cached data
     try:
         with sync_db_session() as conn:
             row = conn.execute(
-                "SELECT last FROM watchlist_quotes WHERE symbol = ?", (symbol,)
+                "SELECT last FROM market_snapshots WHERE symbol = ?", (symbol,)
             ).fetchone()
             if row and row[0]:
                 return float(row[0])
             row = conn.execute(
-                "SELECT last FROM market_snapshots WHERE symbol = ?", (symbol,)
+                "SELECT last FROM watchlist_quotes WHERE symbol = ?", (symbol,)
             ).fetchone()
             if row and row[0]:
                 return float(row[0])
@@ -3386,16 +3393,38 @@ def create_app() -> FastAPI:
                 "ts_max": result["ts_max"],
             }
             if result["count"] > 0:
-                if prefer_live_refresh:
-                    asyncio.create_task(_attempt_live_refresh(requested_duration))
-                _spawn_background_revalidate(requested_duration)
-                emit_debug_event(
-                    "historical",
-                    "window_cache_hit",
-                    f"Served cached window for {symbol} {db_bar_size}",
-                    {"count": result["count"]},
-                )
-                return payload
+                # Validate intraday bar spacing before serving cached data.
+                # Protects against DailyIQ regressions where all intraday bars
+                # share a midnight-UTC timestamp (date-only strings) — that data
+                # looks like a single daily bar on the 1m chart.
+                _INTRADAY_STEP_MS = {
+                    "1m": 60_000, "5m": 300_000, "15m": 900_000,
+                    "1h": 3_600_000, "4h": 14_400_000,
+                }
+                cached_bars_ok = True
+                if db_bar_size in _INTRADAY_STEP_MS and result["count"] >= 2:
+                    step_ms = _INTRADAY_STEP_MS[db_bar_size]
+                    if not _has_intraday_spacing(result["bars"], step_ms):
+                        cached_bars_ok = False
+                        emit_debug_event(
+                            "historical",
+                            "window_spacing_invalid",
+                            f"Cached window for {symbol} {db_bar_size} has bad bar spacing — forcing re-fetch",
+                            {"symbol": symbol, "barSize": db_bar_size, "count": result["count"]},
+                        )
+
+                if cached_bars_ok:
+                    if prefer_live_refresh:
+                        asyncio.create_task(_attempt_live_refresh(requested_duration))
+                    _spawn_background_revalidate(requested_duration)
+                    emit_debug_event(
+                        "historical",
+                        "window_cache_hit",
+                        f"Served cached window for {symbol} {db_bar_size}",
+                        {"count": result["count"]},
+                    )
+                    return payload
+                # Bad spacing — fall through to the re-fetch path below
 
             await _attempt_live_refresh(requested_duration)
             await run_db(

@@ -1,15 +1,16 @@
 import { useEffect } from 'react';
-import { Bell, Trash2 } from 'lucide-react';
+import { Bell, Pencil, Trash2 } from 'lucide-react';
 
 interface ChartContextMenuProps {
   x: number;
   y: number;
   onAddAlert?: () => void;
+  onEditAlert?: () => void;
   onDeleteAlert?: () => void;
   onClose: () => void;
 }
 
-export default function ChartContextMenu({ x, y, onAddAlert, onDeleteAlert, onClose }: ChartContextMenuProps) {
+export default function ChartContextMenu({ x, y, onAddAlert, onEditAlert, onDeleteAlert, onClose }: ChartContextMenuProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
@@ -25,7 +26,7 @@ export default function ChartContextMenu({ x, y, onAddAlert, onDeleteAlert, onCl
       />
       <div
         className="fixed z-50 flex flex-col rounded-md border border-white/[0.1] bg-[#161B22]/95 shadow-xl shadow-black/50 backdrop-blur-sm"
-        style={{ left: x, top: y, minWidth: 140 }}
+        style={{ left: x, top: y, minWidth: 148 }}
       >
         {onAddAlert && (
           <button
@@ -37,6 +38,19 @@ export default function ChartContextMenu({ x, y, onAddAlert, onDeleteAlert, onCl
             Add Alert
           </button>
         )}
+        {onEditAlert && (
+          <button
+            type="button"
+            className="flex items-center gap-2 px-3 py-2 text-[11px] text-white/80 transition-colors hover:bg-white/[0.06]"
+            onClick={() => { onEditAlert(); onClose(); }}
+          >
+            <Pencil size={13} className="text-amber-400" />
+            Edit Alert
+          </button>
+        )}
+        {(onEditAlert && onDeleteAlert) && (
+          <div className="mx-2 h-px bg-white/[0.07]" />
+        )}
         {onDeleteAlert && (
           <button
             type="button"
@@ -44,7 +58,7 @@ export default function ChartContextMenu({ x, y, onAddAlert, onDeleteAlert, onCl
             onClick={() => { onDeleteAlert(); onClose(); }}
           >
             <Trash2 size={13} className="text-red-400" />
-            Delete Alert
+            Remove Alert
           </button>
         )}
       </div>

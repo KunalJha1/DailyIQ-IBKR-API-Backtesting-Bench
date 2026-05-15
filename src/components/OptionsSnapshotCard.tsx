@@ -72,8 +72,6 @@ interface StatTileProps {
   sub?: string;
   color?: string;
   accentBorder?: string;
-  wide?: boolean;
-  scale?: number;
 }
 
 function StatTile({
@@ -82,8 +80,6 @@ function StatTile({
   sub,
   color = "text-white/90",
   accentBorder,
-  wide = false,
-  scale = 1,
 }: StatTileProps) {
   const tileBackground = accentBorder
     ? `linear-gradient(180deg, ${accentBorder}24, ${accentBorder}10)`
@@ -91,34 +87,21 @@ function StatTile({
 
   return (
     <div
-      className={`group flex min-w-0 flex-col justify-between border border-white/[0.06] transition-colors duration-100 hover:border-white/[0.12] hover:bg-white/[0.035] ${
-        wide ? "sm:col-span-2" : ""
-      }`}
+      className="group flex min-h-0 min-w-0 flex-col justify-center gap-0.5 overflow-hidden border border-white/[0.06] px-2 py-1 transition-colors duration-100 hover:border-white/[0.12] hover:bg-white/[0.035]"
       style={{
         background: tileBackground,
         borderRadius: 5,
         borderColor: accentBorder ? `${accentBorder}40` : undefined,
-        minHeight: 44 * scale,
-        padding: `${6 * scale}px ${8 * scale}px`,
       }}
     >
-      <span
-        className="truncate font-semibold uppercase text-white/46"
-        style={{ fontSize: 8 * scale, letterSpacing: `${0.14 * scale}em` }}
-      >
+      <span className="truncate text-[9px] font-semibold uppercase leading-none tracking-[0.13em] text-white/40">
         {label}
       </span>
-      <span
-        className={`truncate font-mono font-semibold tabular-nums ${color}`}
-        style={{ marginTop: 2 * scale, fontSize: clamp(13 * scale, 11, 22) }}
-      >
+      <span className={`truncate font-mono text-[14px] font-semibold tabular-nums leading-none ${color}`}>
         {value}
       </span>
       {sub && (
-        <span
-          className="truncate font-mono text-white/35 tabular-nums"
-          style={{ fontSize: 8 * scale }}
-        >
+        <span className="truncate font-mono text-[9px] leading-none text-white/30 tabular-nums">
           {sub}
         </span>
       )}
@@ -291,39 +274,8 @@ function OptionsSnapshotCard({
 
   const [searchOpen, setSearchOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const [cardScale, setCardScale] = useState(1);
   const configRef = useRef(config);
   configRef.current = config;
-
-  useEffect(() => {
-    const node = rootRef.current;
-    if (!node) return;
-
-    const updateScale = (width: number, height: number) => {
-      // Normalize against a 1920px reference viewport so the card content
-      // doesn't inflate on wider screens (e.g. 1440p) where the same column
-      // fraction allocates significantly more CSS pixels.
-      const vpNorm = Math.min(1.0, Math.sqrt(1920 / Math.max(window.innerWidth, 1)));
-      const normW = width * vpNorm;
-      const normH = height * vpNorm;
-
-      const areaScale = Math.sqrt((normW * normH) / (340 * 440));
-      const widthScale = normW / 340;
-      const heightScale = normH / 440;
-      const nextScale = Math.min(areaScale, widthScale * 1.2, heightScale * 1.25) * 1.35;
-      setCardScale(clamp(nextScale, 1.05, 2.45));
-    };
-
-    const rect = node.getBoundingClientRect();
-    updateScale(rect.width, rect.height);
-
-    const observer = new ResizeObserver(([entry]) => {
-      updateScale(entry.contentRect.width, entry.contentRect.height);
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
 
   // Link channel subscription — use configRef so changing expiry doesn't
   // re-subscribe (linkBus.subscribe fires the callback immediately, which
@@ -437,87 +389,53 @@ function OptionsSnapshotCard({
     <div ref={rootRef} className="flex h-full flex-col overflow-hidden border border-white/[0.06] bg-panel">
       {/* Header */}
       <div
-        className="flex shrink-0 items-center justify-between border-b border-white/[0.10] bg-base"
+        className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.10] bg-base px-2"
         data-drag-handle
-        style={{
-          gap: 6 * cardScale,
-          height: 32 * cardScale,
-          paddingInline: 8 * cardScale,
-        }}
       >
-        <div className="flex min-w-0 items-center" style={{ gap: 6 * cardScale }}>
+        <div className="flex min-w-0 items-center gap-1.5">
           <GripVertical
             className="shrink-0 cursor-grab text-white/20 active:cursor-grabbing"
-            size={12 * cardScale}
+            size={12}
             strokeWidth={2}
           />
           <button
             onClick={() => setSearchOpen((v) => !v)}
-            className="flex min-w-0 items-center border border-white/[0.08] bg-[#1C2128] text-left transition-colors duration-75 hover:border-white/15 hover:bg-white/[0.06]"
-            style={{
-              borderRadius: 4,
-              gap: 4 * cardScale,
-              height: 20 * cardScale,
-              paddingInline: 6 * cardScale,
-            }}
+            className="flex h-5 min-w-0 items-center gap-1 rounded border border-white/[0.08] bg-[#1C2128] px-1.5 text-left transition-colors duration-75 hover:border-white/15 hover:bg-white/[0.06]"
           >
-            <Search className="shrink-0 text-white/35" size={10 * cardScale} strokeWidth={2} />
-            <span
-              className="truncate font-mono font-semibold tracking-wide text-white/85"
-              style={{ fontSize: 10 * cardScale }}
-            >
+            <Search className="shrink-0 text-white/35" size={10} strokeWidth={2} />
+            <span className="truncate font-mono text-[10px] font-semibold tracking-wide text-white/85">
               {symbol || "Symbol…"}
             </span>
           </button>
-          <span
-            className="hidden truncate font-medium text-white/80 min-[360px]:inline"
-            style={{ fontSize: 11 * cardScale }}
-          >
+          <span className="hidden truncate text-[11px] font-medium text-white/80 min-[360px]:inline">
             Options Snapshot
           </span>
         </div>
 
-        <div className="flex shrink-0 items-center" style={{ gap: 4 * cardScale }}>
+        <div className="flex shrink-0 items-center gap-1">
           <ComponentLinkMenu linkChannel={linkChannel} onSetLinkChannel={onSetLinkChannel} />
           <button
             onClick={onClose}
-            className="flex items-center justify-center text-white transition-colors duration-75 hover:text-white/60"
-            style={{ width: 20 * cardScale, height: 20 * cardScale }}
+            className="flex h-5 w-5 items-center justify-center text-white transition-colors duration-75 hover:text-white/60"
           >
-            <X size={12 * cardScale} strokeWidth={2} />
+            <X size={12} strokeWidth={2} />
           </button>
         </div>
       </div>
 
       {/* No symbol empty state */}
       {!symbol && (
-        <div
-          className="flex flex-1 flex-col items-center justify-center text-center"
-          style={{ gap: 6 * cardScale, paddingInline: 16 * cardScale }}
-        >
-          <div
-            className="flex items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03]"
-            style={{ width: 32 * cardScale, height: 32 * cardScale }}
-          >
-            <Search size={14 * cardScale} className="text-white/24" strokeWidth={1.7} />
+        <div className="flex flex-1 flex-col items-center justify-center gap-1.5 px-4 text-center">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03]">
+            <Search size={14} className="text-white/24" strokeWidth={1.7} />
           </div>
           <div>
-            <p className="font-mono text-white/46" style={{ fontSize: 11 * cardScale }}>
-              No symbol selected
-            </p>
-            <p className="text-white/24" style={{ marginTop: 2 * cardScale, fontSize: 10 * cardScale }}>
-              Choose a ticker for options metrics.
-            </p>
+            <p className="font-mono text-[11px] text-white/46">No symbol selected</p>
+            <p className="mt-0.5 text-[10px] text-white/24">Choose a ticker for options metrics.</p>
           </div>
           <button
             onClick={() => setSearchOpen(true)}
-            className="border border-white/[0.10] bg-[#1C2128] text-white/60 transition-colors duration-75 hover:border-white/20 hover:text-white/90"
-            style={{
-              marginTop: 2 * cardScale,
-              borderRadius: 4,
-              padding: `${4 * cardScale}px ${10 * cardScale}px`,
-              fontSize: 10 * cardScale,
-            }}
+            className="mt-0.5 rounded border border-white/[0.10] bg-[#1C2128] px-2.5 py-1 text-[10px] text-white/60 transition-colors duration-75 hover:border-white/20 hover:text-white/90"
           >
             Search symbol
           </button>
@@ -526,90 +444,52 @@ function OptionsSnapshotCard({
 
       {/* Body */}
       {symbol && (
-        <ScrollArea
-          ref={bodyRef}
-          className="min-h-0 flex-1"
-          viewportClassName="h-full"
-          trackClassName="inset-y-1 right-1 w-1.5 bg-[#0D1117]"
-          thumbClassName="bg-white/[0.18]"
-        >
-          <div
-            className="flex min-h-full flex-col"
-            style={{
-              gap: 8 * cardScale,
-              padding: `${8 * cardScale}px ${12 * cardScale}px ${8 * cardScale}px ${8 * cardScale}px`,
-            }}
-          >
-            {/* Expiry selector + spot */}
-            <div
-              className="flex min-w-0 flex-wrap items-center justify-between rounded border border-white/[0.06] bg-base/70"
-              style={{
-                gap: 8 * cardScale,
-                padding: `${6 * cardScale}px ${8 * cardScale}px`,
-              }}
-            >
-              <div className="min-w-0">
-                <p
-                  className="font-semibold uppercase text-white/30"
-                  style={{ fontSize: 8 * cardScale, letterSpacing: `${0.14 * cardScale}em` }}
-                >
-                  Expiry
-                </p>
-                {allExps.length > 0 ? (
-                  <div style={{ marginTop: 4 * cardScale }}>
-                    <ExpiryPicker
-                      months={filteredMonths}
-                      selected={selectedExpiry}
-                      onSelect={commitExpiry}
-                      scale={cardScale}
-                    />
-                  </div>
-                ) : (
-                  <span
-                    className="block font-mono text-white/25"
-                    style={{ marginTop: 4 * cardScale, fontSize: 10 * cardScale }}
-                  >
-                    No expirations
-                  </span>
-                )}
-              </div>
-              <div className="text-right">
-                <p
-                  className="font-semibold uppercase text-white/30"
-                  style={{ fontSize: 8 * cardScale, letterSpacing: `${0.14 * cardScale}em` }}
-                >
-                  Spot
-                </p>
-                <span
-                  className="block font-mono font-semibold tabular-nums text-[#00C853]/90"
-                  style={{ marginTop: 2 * cardScale, fontSize: 13 * cardScale }}
-                >
-                  {spot != null ? `$${fp(spot)}` : "—"}
+        <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden p-2">
+          {/* Expiry selector + spot */}
+          <div className="flex shrink-0 min-w-0 items-center justify-between gap-2 rounded border border-white/[0.06] bg-base/70 px-2 py-1.5">
+            <div className="min-w-0">
+              <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-white/30">
+                Expiry
+              </p>
+              {allExps.length > 0 ? (
+                <div className="mt-1">
+                  <ExpiryPicker
+                    months={filteredMonths}
+                    selected={selectedExpiry}
+                    onSelect={commitExpiry}
+                    scale={1}
+                  />
+                </div>
+              ) : (
+                <span className="mt-1 block font-mono text-[10px] text-white/25">
+                  No expirations
                 </span>
-              </div>
-            </div>
-
-            {/* Stat grid */}
-            <div
-              className="grid"
-              style={{
-                gap: 6 * cardScale,
-                gridTemplateColumns: `repeat(auto-fit, minmax(${98 * cardScale}px, 1fr))`,
-              }}
-            >
-              {/* Implied move */}
-              {analytics.impliedMoveToExpiry != null && (
-                <StatTile
-                  label="Impl. Move"
-                  value={fSign(analytics.impliedMoveToExpiry)}
-                  sub={dte != null ? `${fDte(dte)}d to expiry` : undefined}
-                  color="text-[#A78BFA]"
-                  accentBorder="#8B5CF6"
-                  scale={cardScale}
-                />
               )}
+            </div>
+            <div className="text-right">
+              <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-white/30">
+                Spot
+              </p>
+              <span className="mt-0.5 block font-mono text-[13px] font-semibold tabular-nums text-[#00C853]/90">
+                {spot != null ? `$${fp(spot)}` : "—"}
+              </span>
+            </div>
+          </div>
 
-            {/* Support */}
+          {/* Stat grid — tiles fill remaining height via 1fr rows */}
+          <div
+            className="min-h-0 flex-1 grid grid-cols-2 gap-1"
+            style={{ gridAutoRows: "1fr" }}
+          >
+            {analytics.impliedMoveToExpiry != null && (
+              <StatTile
+                label="Impl. Move"
+                value={fSign(analytics.impliedMoveToExpiry)}
+                sub={dte != null ? `${fDte(dte)}d to expiry` : undefined}
+                color="text-[#A78BFA]"
+                accentBorder="#8B5CF6"
+              />
+            )}
             <StatTile
               label="Support"
               value={analytics.support != null ? `$${fp(analytics.support)}` : "—"}
@@ -620,10 +500,7 @@ function OptionsSnapshotCard({
               }
               color={analytics.support != null ? "text-[#00C853]" : "text-white/20"}
               accentBorder={analytics.support != null ? "#00C853" : undefined}
-              scale={cardScale}
             />
-
-            {/* Resistance */}
             <StatTile
               label="Resistance"
               value={analytics.resistance != null ? `$${fp(analytics.resistance)}` : "—"}
@@ -634,10 +511,7 @@ function OptionsSnapshotCard({
               }
               color={analytics.resistance != null ? "text-[#FF3D71]" : "text-white/20"}
               accentBorder={analytics.resistance != null ? "#FF3D71" : undefined}
-              scale={cardScale}
             />
-
-            {/* ATM IV */}
             <StatTile
               label="ATM IV"
               value={fIv(atmIv)}
@@ -648,10 +522,7 @@ function OptionsSnapshotCard({
                     ? "text-[#F59E0B]"
                     : "text-white/80"
               }
-              scale={cardScale}
             />
-
-            {/* Straddle */}
             <StatTile
               label="ATM Straddle"
               value={straddlePrice != null ? `$${fp(straddlePrice)}` : "—"}
@@ -661,10 +532,7 @@ function OptionsSnapshotCard({
                   : undefined
               }
               color="text-[#8B5CF6]/80"
-              scale={cardScale}
             />
-
-            {/* Put/Call ratio */}
             <StatTile
               label="P/C OI Ratio"
               value={pcRatio != null ? pcRatio.toFixed(2) : "—"}
@@ -686,10 +554,7 @@ function OptionsSnapshotCard({
                       ? "text-[#00C853]"
                       : "text-[#F59E0B]"
               }
-              scale={cardScale}
             />
-
-            {/* Max pain */}
             <StatTile
               label="Max Pain"
               value={maxPain != null ? `$${fp(maxPain)}` : "—"}
@@ -699,10 +564,7 @@ function OptionsSnapshotCard({
                   : undefined
               }
               color="text-[#F59E0B]"
-              scale={cardScale}
             />
-
-            {/* Best covered call */}
             {analytics.bestCoveredCall != null && (
               <StatTile
                 label="Best Cov. Call"
@@ -710,30 +572,22 @@ function OptionsSnapshotCard({
                 sub="highest scored CC strike"
                 color="text-[#F59E0B]"
                 accentBorder="#F59E0B"
-                scale={cardScale}
               />
             )}
-
-            {/* DTE */}
             <StatTile
               label="DTE"
               value={fDte(dte)}
               sub={dte != null ? "days to expiry" : undefined}
               color="text-white/70"
-              scale={cardScale}
             />
           </div>
 
-          {/* No data notice */}
           {!hasData && symbol && (
             <div className="flex flex-1 items-center justify-center">
-              <span className="text-white/20" style={{ fontSize: 10 * cardScale }}>
-                Fetching options data…
-              </span>
+              <span className="text-[10px] text-white/20">Fetching options data…</span>
             </div>
           )}
-          </div>
-        </ScrollArea>
+        </div>
       )}
 
       {/* Symbol search modal */}

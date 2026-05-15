@@ -780,6 +780,28 @@ def fetch_bars_from_dailyiq(
 
     bars = _items_to_bars(data["items"])
 
+    # Guard against DailyIQ regressions where intraday bars are returned with
+    # date-only timestamps (all bars collapse to midnight UTC) or where daily
+    # OHLCV is returned for an intraday timeframe request.  When multiple bars
+    # are present but none show proper intraday spacing, the data is unusable
+    # for a granular chart — discard it so the Yahoo fallback takes over.
+    _INTRADAY_STEP_MS: dict[str, int] = {"1m": 60_000, "5m": 300_000, "15m": 900_000}
+    if timeframe in _INTRADAY_STEP_MS and len(bars) >= 2:
+        step_ms = _INTRADAY_STEP_MS[timeframe]
+        if not _has_intraday_spacing(bars, step_ms):
+            logger.warning(
+                "DailyIQ returned %d bars for %s %s without intraday spacing"
+                " (date-only timestamps or daily-bar regression) — discarding",
+                len(bars), symbol, timeframe,
+            )
+            emit_debug_event(
+                "dailyiq",
+                "spacing_validation_failed",
+                f"DailyIQ {symbol} {timeframe}: intraday spacing check failed, discarding {len(bars)} bars",
+                {"symbol": symbol, "timeframe": timeframe, "count": len(bars)},
+            )
+            bars = []
+
     if bars:
         logger.info(
             "Fetched %d %s bars from DailyIQ for %s", len(bars), timeframe, symbol

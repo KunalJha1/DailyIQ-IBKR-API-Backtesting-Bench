@@ -4,13 +4,14 @@ import { X, Bell } from 'lucide-react';
 import CustomSelect, { type CustomSelectOption } from './CustomSelect';
 import type { ActiveIndicator } from '../chart/types';
 import { indicatorRegistry } from '../chart/indicators/registry';
-import type { ChartAlert, PriceCondition, IndicatorCondition } from '../lib/alerts';
+import type { ChartAlert, PriceAlert, PriceCondition, IndicatorCondition } from '../lib/alerts';
 
 interface AlertDialogProps {
   open: boolean;
   symbol: string;
   initialPrice: number;
   activeIndicators: ActiveIndicator[];
+  editAlert?: PriceAlert;
   onClose: () => void;
   onSave: (alert: ChartAlert) => void;
 }
@@ -27,7 +28,7 @@ const INDICATOR_CONDITIONS: CustomSelectOption[] = [
   { value: 'falls_below', label: 'Falls Below' },
 ];
 
-export default function AlertDialog({ open, symbol, initialPrice, activeIndicators, onClose, onSave }: AlertDialogProps) {
+export default function AlertDialog({ open, symbol, initialPrice, activeIndicators, editAlert, onClose, onSave }: AlertDialogProps) {
   const [tab, setTab] = useState<'price' | 'indicator'>('price');
   const [label, setLabel] = useState('');
   const [priceCondition, setPriceCondition] = useState<PriceCondition>('crosses_above');
@@ -37,10 +38,19 @@ export default function AlertDialog({ open, symbol, initialPrice, activeIndicato
   const [indicatorCondition, setIndicatorCondition] = useState<IndicatorCondition>('crosses_above');
   const [indicatorTarget, setIndicatorTarget] = useState('');
 
-  // Sync price when dialog opens with a new prefill
+  // Sync price when dialog opens with a new prefill or edit data
   useEffect(() => {
-    if (open) setPriceValue(initialPrice);
-  }, [open, initialPrice]);
+    if (open) {
+      if (editAlert) {
+        setTab('price');
+        setPriceCondition(editAlert.condition);
+        setPriceValue(editAlert.price);
+        setLabel(editAlert.label ?? '');
+      } else {
+        setPriceValue(initialPrice);
+      }
+    }
+  }, [open, initialPrice, editAlert]);
 
   // Reset indicator selection when switching to indicator tab or when active indicators change
   useEffect(() => {
@@ -66,7 +76,8 @@ export default function AlertDialog({ open, symbol, initialPrice, activeIndicato
   }, [open, handleClose]);
 
   function handleSave() {
-    const id = crypto.randomUUID();
+    const id = editAlert?.id ?? crypto.randomUUID();
+    const createdAt = editAlert?.createdAt ?? Date.now();
     if (tab === 'price') {
       const price = parseFloat(String(priceValue));
       if (!isFinite(price)) return;
@@ -78,7 +89,7 @@ export default function AlertDialog({ open, symbol, initialPrice, activeIndicato
         condition: priceCondition,
         price,
         status: 'active',
-        createdAt: Date.now(),
+        createdAt,
       });
     } else {
       const ind = activeIndicators.find(i => i.id === indicatorId);
@@ -126,7 +137,7 @@ export default function AlertDialog({ open, symbol, initialPrice, activeIndicato
         <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-3">
           <div className="flex items-center gap-2">
             <Bell size={14} className="text-amber-400" />
-            <span className="font-mono text-[12px] text-white/90">Add Alert</span>
+            <span className="font-mono text-[12px] text-white/90">{editAlert ? 'Edit Alert' : 'Add Alert'}</span>
             <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] text-white/50">{symbol}</span>
           </div>
           <button
@@ -138,19 +149,21 @@ export default function AlertDialog({ open, symbol, initialPrice, activeIndicato
           </button>
         </div>
 
-        {/* Tab switcher */}
-        <div className="flex border-b border-white/[0.07]">
-          {(['price', 'indicator'] as const).map(t => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={`flex-1 py-2 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors ${tab === t ? 'border-b-2 border-amber-400 text-amber-400' : 'text-white/40 hover:text-white/60'}`}
-            >
-              {t === 'price' ? 'Price' : 'Indicator'}
-            </button>
-          ))}
-        </div>
+        {/* Tab switcher — hidden when editing a price alert */}
+        {!editAlert && (
+          <div className="flex border-b border-white/[0.07]">
+            {(['price', 'indicator'] as const).map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setTab(t)}
+                className={`flex-1 py-2 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors ${tab === t ? 'border-b-2 border-amber-400 text-amber-400' : 'text-white/40 hover:text-white/60'}`}
+              >
+                {t === 'price' ? 'Price' : 'Indicator'}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Body */}
         <div className="flex flex-col gap-3 p-4">
@@ -260,7 +273,7 @@ export default function AlertDialog({ open, symbol, initialPrice, activeIndicato
             disabled={tab === 'indicator' && activeIndicators.length === 0}
             className="h-8 rounded bg-amber-500/15 px-4 font-mono text-[10px] text-amber-400 transition-colors hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-35"
           >
-            Create Alert
+            {editAlert ? 'Save Changes' : 'Create Alert'}
           </button>
         </div>
       </div>

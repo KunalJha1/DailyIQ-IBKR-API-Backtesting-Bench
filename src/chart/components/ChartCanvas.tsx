@@ -3,7 +3,7 @@ import { ChartEngine } from '../core/ChartEngine';
 import ChartContextMenu from '../../components/ChartContextMenu';
 import AlertDialog from '../../components/AlertDialog';
 import type { ActiveIndicator } from '../types';
-import type { ChartAlert } from '../../lib/alerts';
+import type { ChartAlert, PriceAlert } from '../../lib/alerts';
 import type {
   OHLCVBar,
   ChartType,
@@ -62,6 +62,7 @@ interface ChartCanvasProps {
   alerts?: ChartAlert[];
   onAddAlert?: (price: number, symbol: string) => void;
   onDeleteAlert?: (alertId: string) => void;
+  onEditAlert?: (updated: ChartAlert) => void;
   volumeWeightedColors?: { up: string; down: string };
   children?: React.ReactNode;
 }
@@ -91,6 +92,7 @@ export default function ChartCanvas({
   alerts = [],
   onAddAlert,
   onDeleteAlert,
+  onEditAlert,
   volumeWeightedColors,
   children,
 }: ChartCanvasProps) {
@@ -113,6 +115,8 @@ export default function ChartCanvas({
   const [alertLineCtxMenu, setAlertLineCtxMenu] = useState<{ x: number; y: number; alertId: string } | null>(null);
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
   const [alertDialogPrice, setAlertDialogPrice] = useState(0);
+  const [alertEditData, setAlertEditData] = useState<PriceAlert | null>(null);
+  const [alertEditDialogOpen, setAlertEditDialogOpen] = useState(false);
   const [priceSectionHeight, setPriceSectionHeight] = useState(0);
   const [paneLayout, setPaneLayout] = useState<Array<{ paneId: string; top: number; height: number; yScaleMode: YScaleMode; showScaleControls: boolean; collapsed: boolean; maximized: boolean }>>([]);
   const [hoveredPaneId, setHoveredPaneId] = useState<string | null>(null);
@@ -835,6 +839,13 @@ export default function ChartCanvas({
           <ChartContextMenu
             x={alertLineCtxMenu.x}
             y={alertLineCtxMenu.y}
+            onEditAlert={() => {
+              const found = alerts.find(a => a.id === alertLineCtxMenu.alertId && a.type === 'price' && a.status === 'active');
+              if (found) {
+                setAlertEditData(found as PriceAlert);
+                setAlertEditDialogOpen(true);
+              }
+            }}
             onDeleteAlert={() => {
               if (onDeleteAlert) onDeleteAlert(alertLineCtxMenu.alertId);
             }}
@@ -848,6 +859,19 @@ export default function ChartCanvas({
           activeIndicators={activeIndicators}
           onClose={() => setAlertDialogOpen(false)}
           onSave={() => setAlertDialogOpen(false)}
+        />
+        <AlertDialog
+          open={alertEditDialogOpen}
+          symbol={symbol ?? ''}
+          initialPrice={alertEditData?.price ?? 0}
+          activeIndicators={activeIndicators}
+          editAlert={alertEditData ?? undefined}
+          onClose={() => { setAlertEditDialogOpen(false); setAlertEditData(null); }}
+          onSave={(updated) => {
+            if (onEditAlert) onEditAlert(updated);
+            setAlertEditDialogOpen(false);
+            setAlertEditData(null);
+          }}
         />
         <div style={{ pointerEvents: (drawingHovered || activeTool !== 'none' || selectedDrawing) ? 'none' : undefined }}>
           {children}

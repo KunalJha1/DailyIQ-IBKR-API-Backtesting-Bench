@@ -13,6 +13,7 @@ export interface TechnicalTableRowSnapshot {
   macdSignal: number;
   macdPrev: number;
   macdSignalPrev: number;
+  volMom: number; // 1=SBM, -1=SSM, 2=BullDiv, -2=BearDiv, 0=Flat
 }
 
 export interface TechnicalTableSnapshot {
@@ -22,6 +23,7 @@ export interface TechnicalTableSnapshot {
   overallChop: number;
   overallRsi: number;
   overallMacdState: number;
+  overallVolMom: number; // 1=SBM dominates, -1=SSM dominates, 0=Mixed
 }
 
 export interface LiquidityTableRowSnapshot {
@@ -29,10 +31,12 @@ export interface LiquidityTableRowSnapshot {
   highPrice: number;
   highSwept: boolean;
   highTarget: number;
+  highConfidencePrev?: number;
   lowLabel: string;
   lowPrice: number;
   lowSwept: boolean;
   lowTarget: number;
+  lowConfidencePrev?: number;
 }
 
 export interface LiquidityTableSnapshot {
@@ -42,6 +46,12 @@ export interface LiquidityTableSnapshot {
   highlightNearLevels: boolean;
   atrDaily: number;
   targetAtrMult: number;
+  technicalRows?: TechnicalTableRowSnapshot[];
+  overallBull?: number;
+  overallBear?: number;
+  overallRsiAvg?: number;
+  overallMacdBull?: number;
+  overallMacdBear?: number;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -164,6 +174,29 @@ export function diqMacdColor(macdNow: number, signalNow: number, macdPrev: numbe
   if (macdNow > signalNow) return DIQ_TABLE_BULL_GREEN;
   if (macdNow < signalNow) return '#FB923C';
   return '#6B7280';
+}
+
+export function diqVolMomText(v: number): string {
+  if (!Number.isFinite(v)) return '--';
+  if (v === 1) return 'SBM ↑';
+  if (v === -1) return 'SSM ↓';
+  if (v === 2) return 'Bull Div ↑';
+  if (v === -2) return 'Bear Div ↓';
+  return 'Flat →';
+}
+
+export function diqVolMomColor(v: number): string {
+  if (!Number.isFinite(v)) return '#6B7280';
+  if (v === 1) return '#00C853';
+  if (v === -1) return '#FF3D71';
+  if (v === 2) return '#00BCD4';
+  if (v === -2) return '#FB923C';
+  return '#6B7280';
+}
+
+export function diqVolMomTextColor(v: number): string {
+  if (v === 1 || v === 2) return '#000000';
+  return '#FFFFFF';
 }
 
 // ── Bar utilities ──────────────────────────────────────────────────────────────
@@ -329,6 +362,16 @@ function tableRollingHighest(values: number[], period: number): number[] {
   return result;
 }
 
+function tableVolSma(volumes: number[], period: number): number[] {
+  const result = new Array<number>(volumes.length).fill(NaN);
+  for (let i = period - 1; i < volumes.length; i += 1) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j += 1) sum += volumes[j];
+    result[i] = sum / period;
+  }
+  return result;
+}
+
 function tableRollingLowest(values: number[], period: number): number[] {
   const result = new Array<number>(values.length).fill(NaN);
   for (let i = period - 1; i < values.length; i += 1) {
@@ -357,12 +400,13 @@ export function computeTechnicalTableRowFromBars(
   slowLen: number,
   trendLen: number,
 ): TechnicalTableRowSnapshot {
-  const row: TechnicalTableRowSnapshot = { tf, trend: NaN, strength: NaN, chop: NaN, rsiNow: NaN, rsiPrev: NaN, macdNow: NaN, macdSignal: NaN, macdPrev: NaN, macdSignalPrev: NaN };
+  const row: TechnicalTableRowSnapshot = { tf, trend: NaN, strength: NaN, chop: NaN, rsiNow: NaN, rsiPrev: NaN, macdNow: NaN, macdSignal: NaN, macdPrev: NaN, macdSignalPrev: NaN, volMom: NaN };
   if (bars.length === 0) return row;
 
   const closes = bars.map((b) => b.close);
   const highs = bars.map((b) => b.high);
   const lows = bars.map((b) => b.low);
+  const volumes = bars.map((b) => b.volume);
   const avg = bars.map((b) => (b.high + b.low + b.close) / 3);
   const fast = tableEma(closes, fastLen);
   const slow = tableEma(closes, slowLen);
@@ -376,6 +420,7 @@ export function computeTechnicalTableRowFromBars(
   const ema34 = tableEma(closes, 34);
   const high30 = tableRollingHighest(highs, 30);
   const low30 = tableRollingLowest(lows, 30);
+  const volSma10 = tableVolSma(volumes, 10);
 
   const findLastFiniteIndex = (series: number[], startAt = series.length - 1): number => {
     for (let i = Math.min(startAt, series.length - 1); i >= 0; i -= 1) if (Number.isFinite(series[i])) return i;
@@ -430,6 +475,17 @@ export function computeTechnicalTableRowFromBars(
     return -1;
   })();
   if (chopIndex >= 0) row.chop = tableChopAngle(ema34[chopIndex], ema34[chopIndex - 1], avg[chopIndex], high30[chopIndex], low30[chopIndex]);
+
+  if (i >= 10 && Number.isFinite(closes[i]) && Number.isFinite(closes[i - 10]) && Number.isFinite(volumes[i]) && Number.isFinite(volSma10[i])) {
+    const priceUp = closes[i] > closes[i - 10];
+    const priceDown = closes[i] < closes[i - 10];
+    const volUp = volumes[i] > volSma10[i];
+    if (priceUp && volUp) row.volMom = 1;
+    else if (priceDown && volUp) row.volMom = -1;
+    else if (priceDown && !volUp) row.volMom = 2;
+    else if (priceUp && !volUp) row.volMom = -2;
+    else row.volMom = 0;
+  }
 
   return row;
 }

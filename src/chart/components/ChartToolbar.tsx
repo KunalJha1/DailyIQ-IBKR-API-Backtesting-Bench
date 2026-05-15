@@ -105,7 +105,7 @@ export default function ChartToolbar({
   onCreateCodeStrategy,
   onCopyMasterPrompt,
   activeIndicators = [],
-  dataSource = 'offline',
+  dataSource: _dataSource = 'offline',
   loading = false,
   isStale = false,
   linkChannel = null,

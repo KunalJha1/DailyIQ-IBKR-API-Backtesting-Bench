@@ -576,6 +576,7 @@ interface TechnicalTableRowSnapshot {
   macdSignal: number;
   macdPrev: number;
   macdSignalPrev: number;
+  volMom: number;
 }
 
 interface TechnicalTableSnapshot {
@@ -585,6 +586,7 @@ interface TechnicalTableSnapshot {
   overallChop: number;
   overallRsi: number;
   overallMacdState: number;
+  overallVolMom: number;
 }
 
 interface LiquidityTableRowSnapshot {
@@ -1055,6 +1057,7 @@ function computeTechnicalTableRowFromBars(
     macdSignal: NaN,
     macdPrev: NaN,
     macdSignalPrev: NaN,
+    volMom: NaN,
   };
 
   if (bars.length === 0) return row;
@@ -1062,6 +1065,7 @@ function computeTechnicalTableRowFromBars(
   const closes = bars.map((bar) => bar.close);
   const highs = bars.map((bar) => bar.high);
   const lows = bars.map((bar) => bar.low);
+  const volumes = bars.map((bar) => bar.volume);
   const avg = bars.map((bar) => (bar.high + bar.low + bar.close) / 3);
   const fast = tableEma(closes, fastLen);
   const slow = tableEma(closes, slowLen);
@@ -1075,6 +1079,15 @@ function computeTechnicalTableRowFromBars(
   const ema34 = tableEma(closes, 34);
   const high30 = tableRollingHighest(highs, 30);
   const low30 = tableRollingLowest(lows, 30);
+  const volSma10 = (() => {
+    const result = new Array<number>(volumes.length).fill(NaN);
+    for (let vi = 9; vi < volumes.length; vi += 1) {
+      let sum = 0;
+      for (let vj = vi - 9; vj <= vi; vj += 1) sum += volumes[vj];
+      result[vi] = sum / 10;
+    }
+    return result;
+  })();
 
   const findLastFiniteIndex = (series: number[], startAt = series.length - 1): number => {
     for (let i = Math.min(startAt, series.length - 1); i >= 0; i -= 1) {
@@ -1157,6 +1170,17 @@ function computeTechnicalTableRowFromBars(
   })();
   if (chopIndex >= 0) {
     row.chop = tableChopAngle(ema34[chopIndex], ema34[chopIndex - 1], avg[chopIndex], high30[chopIndex], low30[chopIndex]);
+  }
+
+  if (i >= 10 && Number.isFinite(closes[i]) && Number.isFinite(closes[i - 10]) && Number.isFinite(volumes[i]) && Number.isFinite(volSma10[i])) {
+    const priceUp = closes[i] > closes[i - 10];
+    const priceDown = closes[i] < closes[i - 10];
+    const volUp = volumes[i] > volSma10[i];
+    if (priceUp && volUp) row.volMom = 1;
+    else if (priceDown && volUp) row.volMom = -1;
+    else if (priceDown && !volUp) row.volMom = 2;
+    else if (priceUp && !volUp) row.volMom = -2;
+    else row.volMom = 0;
   }
 
   return row;
@@ -1441,7 +1465,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     sidecarPort,
   });
   // Alert system
-  const { addAlert, removeAlert, alerts } = useAlerts();
+  const { addAlert, removeAlert, updateAlert, alerts } = useAlerts();
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
   const [alertDialogPrice, setAlertDialogPrice] = useState(0);
   const [alertDialogSymbol, setAlertDialogSymbol] = useState('');
@@ -1454,6 +1478,28 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
     () => alerts.filter((alert) => alert.symbol === symbol),
     [alerts, symbol],
   );
+
+  const mergedLiquidityTableSnapshot = useMemo(() => {
+    if (!liquidityTableSnapshot) return null;
+    if (!technicalTableSnapshot) return liquidityTableSnapshot;
+    const techRows = technicalTableSnapshot.rows;
+    const bull = techRows.filter((r) => r.trend === 1).length;
+    const bear = techRows.filter((r) => r.trend === -1).length;
+    const rsiVals = techRows.map((r) => r.rsiNow).filter(Number.isFinite);
+    const rsiAvg = rsiVals.length > 0 ? rsiVals.reduce((a, b) => a + b, 0) / rsiVals.length : NaN;
+    const macdBull = techRows.filter((r) => Number.isFinite(r.macdNow) && Number.isFinite(r.macdSignal) && r.macdNow > r.macdSignal).length;
+    const macdBear = techRows.filter((r) => Number.isFinite(r.macdNow) && Number.isFinite(r.macdSignal) && r.macdNow < r.macdSignal).length;
+    return {
+      ...liquidityTableSnapshot,
+      technicalRows: techRows,
+      overallBull: bull,
+      overallBear: bear,
+      overallRsiAvg: rsiAvg,
+      overallMacdBull: macdBull,
+      overallMacdBear: macdBear,
+    };
+  }, [liquidityTableSnapshot, technicalTableSnapshot]);
+
   useAlertEvaluator(bars, symbol, activeIndicators);
 
   const liveQuote = useQuoteData('chart-toolbar', symbol);
@@ -2041,6 +2087,8 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
         let rsiCount = 0;
         let macdBull = 0;
         let macdBear = 0;
+        let volMomBull = 0;
+        let volMomBear = 0;
 
         for (const row of rows) {
           if (row.trend === 1) bullCount += 1;
@@ -2061,6 +2109,8 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
             if (row.macdNow > row.macdSignal) macdBull += 1;
             else if (row.macdNow < row.macdSignal) macdBear += 1;
           }
+          if (row.volMom === 1) volMomBull += 1;
+          else if (row.volMom === -1) volMomBear += 1;
         }
 
         const snapshot: TechnicalTableSnapshot = {
@@ -2070,6 +2120,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           overallChop: chopCount > 0 ? (chopSum / chopCount) : NaN,
           overallRsi: rsiCount > 0 ? (rsiSum / rsiCount) : NaN,
           overallMacdState: macdBull > macdBear ? 1 : macdBear > macdBull ? -1 : 0,
+          overallVolMom: volMomBull > volMomBear ? 1 : volMomBear > volMomBull ? -1 : 0,
         };
 
         if (!cancelled) {
@@ -3328,6 +3379,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
           alerts={chartAlerts}
           onAddAlert={handleAddAlert}
           onDeleteAlert={removeAlert}
+          onEditAlert={updateAlert}
           volumeWeightedColors={volumeWeightedColors}
         >
           {dragState && chartLayout && (
@@ -3503,7 +3555,7 @@ function ChartPage({ tabId, allowSplit = true, compact = false }: ChartPageProps
 
         {chartLayout && activeLiquiditySweepIndicator && liquidityTableWidget.visible && (
           <DailyIQLiquidityTableOverlay
-            snapshot={liquidityTableSnapshot}
+            snapshot={mergedLiquidityTableSnapshot}
             widget={liquidityTableWidget}
             dragging={liquidityTableDragging}
             resizing={liquidityTableResizing}

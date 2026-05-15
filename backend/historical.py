@@ -304,6 +304,18 @@ def _ib_datetime_utc(ts_ms: int) -> str:
     return dt.strftime("%Y%m%d %H:%M:%S UTC")
 
 
+def _has_intraday_spacing(bars: list[dict], source_step_ms: int) -> bool:
+    """Return True if at least one consecutive pair of bars has a gap within 3× the expected step."""
+    if len(bars) < 2:
+        return False
+    max_gap_ms = source_step_ms * 3
+    for previous, current in zip(bars, bars[1:]):
+        gap_ms = current["time"] - previous["time"]
+        if 0 < gap_ms <= max_gap_ms:
+            return True
+    return False
+
+
 def _dedupe_bars(bars: list[dict]) -> list[dict]:
     if not bars:
         return []
@@ -1522,16 +1534,39 @@ async def get_historical_bars(
                 if cached:
                     has_full_coverage = _has_full_coverage(earliest_ts_ms, lookback_days, depth_complete)
                     if has_full_coverage:
-                        logger.info(
-                            f"Cache hit for {symbol} {cache_key} ({len(cached)} bars, source={cached_source})"
-                        )
-                        emit_debug_event(
-                            "historical",
-                            "cache_return",
-                            f"Cache hit {symbol} {cache_key}",
-                            {"symbol": symbol, "cacheKey": cache_key, "count": len(cached), "source": cached_source},
-                        )
-                        return cached, "cache"
+                        # Validate intraday spacing before serving from cache.
+                        # Guards against previously-stored bad DailyIQ data (e.g. bars
+                        # that all share a midnight-UTC timestamp due to date-only strings).
+                        _INTRADAY_STEP_MS = {
+                            "1m": 60_000, "5m": 300_000, "15m": 900_000,
+                            "1h": 3_600_000, "4h": 14_400_000,
+                        }
+                        spacing_ok = True
+                        if not is_daily and len(cached) >= 2:
+                            step_ms = _INTRADAY_STEP_MS.get(db_bar_size)
+                            if step_ms is not None and not _has_intraday_spacing(cached, step_ms):
+                                spacing_ok = False
+                                logger.warning(
+                                    f"Cached bars for {symbol} {cache_key} fail intraday spacing check"
+                                    " — discarding and forcing re-fetch"
+                                )
+                                emit_debug_event(
+                                    "historical",
+                                    "cache_spacing_invalid",
+                                    f"Cached {symbol} {cache_key} has bad bar spacing, forcing re-fetch",
+                                    {"symbol": symbol, "cacheKey": cache_key, "count": len(cached)},
+                                )
+                        if spacing_ok:
+                            logger.info(
+                                f"Cache hit for {symbol} {cache_key} ({len(cached)} bars, source={cached_source})"
+                            )
+                            emit_debug_event(
+                                "historical",
+                                "cache_return",
+                                f"Cache hit {symbol} {cache_key}",
+                                {"symbol": symbol, "cacheKey": cache_key, "count": len(cached), "source": cached_source},
+                            )
+                            return cached, "cache"
                     logger.info(
                         f"Fresh cache for {symbol} {cache_key} is too shallow for {lookback_days}d; "
                         "requesting deeper history"

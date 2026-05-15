@@ -3863,7 +3863,7 @@ export class ChartEngine {
         ? this.chartAlerts.find((a) => {
             if (a.type !== 'price' || a.status !== 'active') return false;
             const ay = this.viewport.priceToPixelY(a.price);
-            return Math.abs(my - ay) <= 6;
+            return Math.abs(my - ay) <= 10;
           })
         : null;
       if (hitAlert && this._onAlertContextMenu) {
