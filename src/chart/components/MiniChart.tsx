@@ -2997,15 +2997,6 @@ export default function MiniChart({
           className="absolute inset-0"
           onMouseMove={handleCanvasPointerMove}
           onMouseLeave={handleCanvasPointerLeave}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            const engine = engineRef.current;
-            if (!engine) return;
-            const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            const canvasY = (e.clientY - rect.top) * dpr;
-            setAlertCtxMenu({ x: e.clientX, y: e.clientY, price: engine.getPriceAtCanvasY(canvasY) });
-          }}
           style={{ cursor: yAxisHovered ? 'ns-resize' : 'crosshair' }}
         />
         {alertCtxMenu && createPortal(

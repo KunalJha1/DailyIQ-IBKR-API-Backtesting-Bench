@@ -76,9 +76,9 @@ export default function DailyIQTechnicalTableOverlay({
   const hScale = Math.max(0, Math.min(1, (widget.height - minHeight) / (maxHeight - minHeight)));
   const tableScale = (wScale + hScale) / 2;
   // font + horizontal padding scale with WIDTH only so text never overflows its % column
-  const titleFontSize = 9 + (wScale * 3);
-  const headerFontSize = 9 + (wScale * 3);
-  const bodyFontSize = 9 + (wScale * 3);
+  const titleFontSize = 11 + (wScale * 3);
+  const headerFontSize = 11 + (wScale * 3);
+  const bodyFontSize = 11 + (wScale * 3);
   const headerPadY = 5 + (hScale * 5);
   const headerPadX = 4 + (wScale * 5);
   const bodyPadY = 3 + (hScale * 4);
@@ -155,7 +155,7 @@ export default function DailyIQTechnicalTableOverlay({
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative', backgroundColor: '#1E2232', userSelect: 'none', WebkitUserSelect: 'none' }}>
-        <table style={{ width: '100%', height: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: bodyFontSize, fontFamily: '"JetBrains Mono", monospace', color: '#E6EDF3', backgroundColor: '#1E2232', tableLayout: 'fixed', userSelect: 'none', WebkitUserSelect: 'none' }}>
+        <table style={{ width: '100%', height: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: bodyFontSize, fontFamily: '"JetBrains Mono", monospace', fontWeight: 600, color: '#E6EDF3', backgroundColor: '#1E2232', tableLayout: 'fixed', userSelect: 'none', WebkitUserSelect: 'none' }}>
           <colgroup>
             {/* widths proportional to longest content: Timeframe(9) Trend(7) Strength(8) Chop(11) RSI(7) MACD(8) EMA Cross(9) Vol Mom(10) = 69 units */}
             <col style={{ width: '13%' }} /><col style={{ width: '10%' }} /><col style={{ width: '12%' }} />
@@ -164,7 +164,7 @@ export default function DailyIQTechnicalTableOverlay({
           <thead>
             <tr>
               {['Timeframe', 'Trend', 'Strength', 'Chop', 'RSI', 'MACD', 'EMA Cross', 'Vol Mom'].map((head) => (
-                <th key={head} style={{ position: 'sticky', top: 0, zIndex: 1, padding: headerCellPadding, borderBottom: '1px solid rgba(255,255,255,0.14)', backgroundColor: '#1E2232', color: '#FFFFFF', textAlign: head === 'Timeframe' ? 'left' : 'center', fontWeight: 600, fontSize: headerFontSize, whiteSpace: 'nowrap', verticalAlign: 'middle', overflow: 'hidden' }}>{head}</th>
+                <th key={head} style={{ position: 'sticky', top: 0, zIndex: 1, padding: headerCellPadding, borderBottom: '1px solid rgba(255,255,255,0.14)', backgroundColor: '#1E2232', color: '#FFFFFF', textAlign: head === 'Timeframe' ? 'left' : 'center', fontWeight: 700, fontSize: headerFontSize, whiteSpace: 'nowrap', verticalAlign: 'middle', overflow: 'hidden' }}>{head}</th>
               ))}
             </tr>
           </thead>
